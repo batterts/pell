@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .emitter import emit
+from .emitter import emit, EmitError
 from .lexer import tokenize
 from .parser import parse, ParseError
 from .lexer import LexError
@@ -35,7 +35,7 @@ def cmd_build(args: argparse.Namespace) -> int:
             src = src_path.read_text()
             module = parse(src, str(src_path))
             sql = emit(module)
-        except (LexError, ParseError) as e:
+        except (LexError, ParseError, EmitError) as e:
             print(f"pell: {e}", file=sys.stderr)
             failures += 1
             continue

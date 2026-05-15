@@ -1,0 +1,19 @@
+// Annotations: @deterministic, @result_cache, @udf, @autonomous.
+// Each lowers to its PL/SQL pragma/clause counterpart.
+
+module lookups.country;
+
+@deterministic
+@result_cache
+@udf
+pub fn country_name(code: text) -> text {
+  let row = sql! {
+    select name from countries where code = :code
+  }.one();
+  return row;
+}
+
+@autonomous
+pub fn audit_log(event: text) {
+  sql! { insert into audit(event, ts) values (:event, sysdate) };
+}

@@ -174,6 +174,119 @@ def test_no_size_on_param_types():
     assert "IN VARCHAR2" in sql
 
 
+def test_for_update_modifier():
+    sql = compile_to_sql("""
+        module m;
+        pub record A { id: number, x: number }
+        pub error E;
+        pub fn lock_it(id: number) -> Result<A, E> {
+          transaction {
+            let row = sql! {
+              select id, x from t where id = :id
+            }.for_update().one()?;
+            return Ok(row);
+          }
+          return Err(E);
+        }
+    """)
+    assert "FOR UPDATE" in sql
+
+
+def test_for_update_nowait_skip_locked():
+    sql = compile_to_sql("""
+        module m;
+        pub record A { id: number, x: number }
+        pub error E;
+        pub fn lock_first(id: number) -> Result<A, E> {
+          transaction {
+            let row = sql! {
+              select id, x from t where id = :id
+            }.for_update().nowait().one()?;
+            return Ok(row);
+          }
+          return Err(E);
+        }
+    """)
+    assert "FOR UPDATE NOWAIT" in sql
+
+
+def test_string_interpolation():
+    sql = compile_to_sql("""
+        module m;
+        pub fn greet(name: text) {
+          log::info("hello {name}");
+        }
+    """)
+    assert "'hello ' || p_name" in sql
+
+
+def test_string_interpolation_field_access():
+    sql = compile_to_sql("""
+        module m;
+        pub record P { id: number, name: text }
+        pub fn show(p: P) {
+          log::info("id={p.id}");
+        }
+    """)
+    assert "'id=' || p_p.id" in sql
+
+
+def test_string_no_interpolation_unchanged():
+    sql = compile_to_sql("""
+        module m;
+        pub fn p() {
+          log::info("no braces here");
+        }
+    """)
+    assert "'no braces here'" in sql
+
+
+def test_annotation_deterministic_result_cache():
+    sql = compile_to_sql("""
+        module m;
+        @deterministic
+        @result_cache
+        pub fn lookup(code: text) -> text {
+          let r = sql! { select name from t where code = :code }.one();
+          return r;
+        }
+    """)
+    assert "DETERMINISTIC RESULT_CACHE" in sql
+
+
+def test_annotation_udf():
+    sql = compile_to_sql("""
+        module m;
+        @udf
+        pub fn pure_calc(x: number) -> number {
+          return x;
+        }
+    """)
+    assert "PRAGMA UDF;" in sql
+
+
+def test_annotation_autonomous():
+    sql = compile_to_sql("""
+        module m;
+        @autonomous
+        pub fn audit(msg: text) {
+          sql! { insert into audit(msg) values (:msg) };
+        }
+    """)
+    assert "PRAGMA AUTONOMOUS_TRANSACTION;" in sql
+
+
+def test_annotation_udf_autonomous_conflict():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql("""
+            module m;
+            @udf
+            @autonomous
+            pub fn bad() {}
+        """)
+
+
 def test_procedure_return_without_value():
     sql = compile_to_sql("""
         module m;

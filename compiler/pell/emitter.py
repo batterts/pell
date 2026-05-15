@@ -15,6 +15,13 @@ from typing import Optional
 from . import ast as A
 
 
+class EmitError(Exception):
+    def __init__(self, msg: str, loc: A.Loc):
+        super().__init__(f"{loc}: {msg}")
+        self.loc = loc
+        self.msg = msg
+
+
 # ---------------------------------------------------------------------------
 # Type mapping
 # ---------------------------------------------------------------------------
@@ -238,7 +245,33 @@ class Emitter:
             sig += f"({params})"
         if not (ret is None or _is_unit_like(ret)):
             sig += f" RETURN {lower_type(ret, param=True)}"
+        # signature-level annotations: DETERMINISTIC, RESULT_CACHE
+        ann_names = {a.name for a in fn.annotations}
+        if "deterministic" in ann_names:
+            sig += " DETERMINISTIC"
+        if "result_cache" in ann_names:
+            sig += " RESULT_CACHE"
         return sig
+
+    def _fn_body_pragmas(self, fn: A.FnDef) -> list[str]:
+        """Body-level pragmas: PRAGMA UDF, PRAGMA AUTONOMOUS_TRANSACTION."""
+        ann_names = {a.name for a in fn.annotations}
+        out: list[str] = []
+        if "autonomous" in ann_names:
+            out.append("PRAGMA AUTONOMOUS_TRANSACTION;")
+        if "udf" in ann_names:
+            out.append("PRAGMA UDF;")
+        return out
+
+    def _check_annotation_conflicts(self, fn: A.FnDef) -> None:
+        """Raise a compile-time error on illegal annotation combinations."""
+        ann_names = {a.name for a in fn.annotations}
+        if "udf" in ann_names and "autonomous" in ann_names:
+            raise EmitError(
+                f"fn {fn.name!r}: @udf and @autonomous are mutually exclusive — UDF assumes "
+                f"the fn participates in the calling SQL's transaction",
+                fn.loc,
+            )
 
     def _fn_body(self, fn: A.FnDef) -> str:
         # reset per-fn state
@@ -249,17 +282,22 @@ class Emitter:
         self._current_fn = fn
         self._local_types = {}
 
+        self._check_annotation_conflicts(fn)
+
         # walk body to collect declarations and assemble statements
         sig = self._fn_signature(fn)
         stmt_lines: list[str] = []
         for s in fn.body:
             stmt_lines.extend(self._emit_stmt(s, indent="    "))
 
+        body_pragmas = self._fn_body_pragmas(fn)
+
         out: list[str] = []
         out.append(f"  {sig} IS")
-        if self._declares:
-            for d in self._declares:
-                out.append(f"    {d}")
+        for d in self._declares:
+            out.append(f"    {d}")
+        for p in body_pragmas:
+            out.append(f"    {p}")
         out.append(f"  BEGIN")
         if stmt_lines:
             for line in stmt_lines:
@@ -353,15 +391,17 @@ class Emitter:
         return None
 
     def _infer_call_type(self, call: A.Call) -> Optional[str]:
-        # .one() / .first() / .one_or_none() on a sql!{}
+        # .one() / .first() / .one_or_none() on a sql!{} (possibly wrapped in lock modifiers)
         if isinstance(call.callee, A.MemberAccess):
             method = call.callee.field
             recv = call.callee.obj
-            if method in ("one", "first", "one_or_none") and isinstance(recv, A.SqlBlock):
-                rt = self._row_type_from_fn_return()
-                if rt is not None:
-                    return rt
-                return "VARCHAR2(4000)"
+            if method in ("one", "first", "one_or_none"):
+                _, sql = self._strip_lock_modifiers(recv)
+                if sql is not None:
+                    rt = self._row_type_from_fn_return()
+                    if rt is not None:
+                        return rt
+                    return "VARCHAR2(4000)"
             if method == "rowcount":
                 return "PLS_INTEGER"
             if method == "returning" and call.type_args:
@@ -399,28 +439,67 @@ class Emitter:
 
     def _emit_questionmark_call(self, target: str, inner_call: A.Call, indent: str) -> list[str]:
         """Emit `target := <call>?` — propagate Err via RAISE."""
-        # If the inner call is sql!{}.one() — turn into a SELECT INTO.
+        # If the inner call is sql!{}[.for_update()...].one() — turn into a SELECT INTO.
         if isinstance(inner_call.callee, A.MemberAccess) and inner_call.callee.field == "one":
-            recv = inner_call.callee.obj
-            if isinstance(recv, A.SqlBlock):
-                return self._emit_select_into(target, recv, indent, expect_exactly_one=True)
-        # If the inner call is sql!{}.first()?  — same but raise NotFound if not found
+            recv, sql = self._strip_lock_modifiers(inner_call.callee.obj)
+            if sql is not None:
+                return self._emit_select_into(target, sql, indent, expect_exactly_one=True)
+        # If the inner call is sql!{}.first()? — same but raise NotFound if not found
         if isinstance(inner_call.callee, A.MemberAccess) and inner_call.callee.field == "first":
-            recv = inner_call.callee.obj
-            if isinstance(recv, A.SqlBlock):
-                return self._emit_first_loop(target, recv, indent, propagate_none=True)
+            recv, sql = self._strip_lock_modifiers(inner_call.callee.obj)
+            if sql is not None:
+                return self._emit_first_loop(target, sql, indent, propagate_none=True)
         # general: assume the call returns the value and may raise (already-shaped errors via RAISE)
         return [f"{indent}{target} := {self._emit_expr(inner_call)};"]
+
+    def _strip_lock_modifiers(self, expr: A.Expr) -> tuple[Optional[A.Expr], Optional[A.SqlBlock]]:
+        """Unwrap `.for_update()` / `.nowait()` / `.skip_locked()` modifiers and
+        return the underlying SqlBlock (with the FOR UPDATE clause appended).
+
+        Returns (None, None) if the expr doesn't ultimately bottom out in a SqlBlock.
+        """
+        lock_parts: list[str] = []
+        cur = expr
+        while isinstance(cur, A.Call) and isinstance(cur.callee, A.MemberAccess):
+            method = cur.callee.field
+            if method == "for_update":
+                lock_parts.insert(0, "FOR UPDATE")
+            elif method == "nowait":
+                lock_parts.append("NOWAIT")
+            elif method == "skip_locked":
+                lock_parts.append("SKIP LOCKED")
+            elif method == "wait" and cur.args:
+                arg = self._emit_expr(cur.args[0])
+                lock_parts.append(f"WAIT {arg}")
+            elif method == "for_update_of" and cur.args:
+                cols = ", ".join(self._emit_expr(a) for a in cur.args)
+                lock_parts.insert(0, f"FOR UPDATE OF {cols}")
+            else:
+                break
+            cur = cur.callee.obj
+        if isinstance(cur, A.SqlBlock):
+            if lock_parts:
+                new_sql = A.SqlBlock(
+                    loc=cur.loc,
+                    sql=cur.sql.rstrip().rstrip(";") + " " + " ".join(lock_parts),
+                    binds=cur.binds,
+                    is_dml=cur.is_dml,
+                    has_returning=cur.has_returning,
+                )
+                return cur, new_sql
+            return cur, cur
+        return None, None
 
     def _emit_call_assignment(self, target: str, call: A.Call, indent: str) -> list[str]:
         # .one() with no ? — same select-into but on NO_DATA_FOUND we raise a generic invariant? For v0, leave it as raise.
         if isinstance(call.callee, A.MemberAccess) and call.callee.field in ("one", "first"):
             recv = call.callee.obj
-            if isinstance(recv, A.SqlBlock):
+            _, sql_with_locks = self._strip_lock_modifiers(recv)
+            if sql_with_locks is not None:
                 if call.callee.field == "one":
-                    return self._emit_select_into(target, recv, indent, expect_exactly_one=True)
+                    return self._emit_select_into(target, sql_with_locks, indent, expect_exactly_one=True)
                 else:
-                    return self._emit_first_loop(target, recv, indent, propagate_none=False)
+                    return self._emit_first_loop(target, sql_with_locks, indent, propagate_none=False)
             # `sql!{INSERT ... RETURNING ...}.returning::<T>().one()` — DML RETURNING INTO
             if isinstance(recv, A.Call) and isinstance(recv.callee, A.MemberAccess) and recv.callee.field == "returning":
                 inner_sql = recv.callee.obj
@@ -707,7 +786,7 @@ class Emitter:
         if isinstance(e, A.NumberLit):
             return e.value
         if isinstance(e, A.TextLit):
-            return _sql_string(e.value)
+            return self._emit_text_lit(e)
         if isinstance(e, A.BoolLit):
             return "TRUE" if e.value else "FALSE"
         if isinstance(e, A.UnitLit):
@@ -755,6 +834,38 @@ class Emitter:
         if op == "MOD":
             return f"MOD({left}, {right})"
         return f"({left} {op} {right})"
+
+    def _emit_text_lit(self, e: A.TextLit) -> str:
+        """A text literal with `{name}` placeholders lowers to `'lit ' || name`.
+
+        Only simple identifier interpolation is supported in v0; complex
+        `{a.b}` etc. are emitted as concatenations of those identifiers (the
+        rest of the expression lowering kicks in).
+        """
+        import re
+        s = e.value
+        if "{" not in s:
+            return _sql_string(s)
+        parts = re.split(r"\{([A-Za-z_][A-Za-z0-9_.]*)\}", s)
+        # parts alternates: literal, name, literal, name, ...
+        chunks: list[str] = []
+        for i, p in enumerate(parts):
+            if i % 2 == 0:
+                if p:
+                    chunks.append(_sql_string(p))
+            else:
+                # name may contain `.` for field access; treat as `obj.field`
+                if "." in p:
+                    head, *rest = p.split(".")
+                    expr = self._lower_ident(head)
+                    for r in rest:
+                        expr = f"{expr}.{r.lower()}"
+                    chunks.append(expr)
+                else:
+                    chunks.append(self._lower_ident(p))
+        if not chunks:
+            return "''"
+        return "(" + " || ".join(chunks) + ")"
 
     def _emit_call_expr(self, e: A.Call) -> str:
         # Detect simple method calls and inline them.
