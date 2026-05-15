@@ -1,9 +1,12 @@
 # A Modern Language That Compiles to PL/SQL 23
 
 > Working name: **`pell`** (placeholder — see "Naming" at the end).
-> Status: draft 0.2, 2026-05-14. Surface syntax locked (Rust/Kotlin-ish);
+> Status: draft 0.3, 2026-05-14. Surface syntax locked (Rust/Kotlin-ish);
 > error-payload lowering chosen (§6.6 (C), `SYS_CONTEXT`); M2 surfaces
-> closed (writes, locking, transactions).
+> closed (writes, locking, transactions); DDL out for v1; triggers out
+> for v1 (raw PL/SQL); native JetBrains plugin in v1 scope; deploy state
+> is a local lockfile (no schema-side state table); `@test(db)` is
+> always-rollback (no commits escape hatch); name `pell` locked.
 
 ## 1. Goals
 
@@ -1432,61 +1435,68 @@ acceptable because packages have order dependencies (specs before bodies,
 cross-package types), and re-running on partial failure must be safe.
 
 v1 model — borrowed from Flyway/Liquibase but scoped to packages, types,
-and triggers (per §11 (3), DDL stays out):
+(DDL stays out — decision recorded in this draft's status header):
 
-1. **State table**, owned by `pell` in the target schema:
-   `pell_deploy_state(artifact_name, kind, content_hash, applied_at, applied_by)`.
-   Created on first deploy.
-2. **Plan phase** (offline): compare `deploy.lock.json` against
-   `pell_deploy_state` to compute the set of artifacts whose hash changed.
-   Spec changes drag their body and any downstream package whose interface
-   hash they touch. `pell deploy --plan` prints the plan; CI gates on it.
+1. **Local state file**, `build/deploy.lock.json`, keyed by deploy target
+   (e.g. `[deploy.dev]` profile from `pell.toml`):
+   `{ "target": "dev", "artifacts": [{ "name": "...", "kind": "package_body",
+   "content_hash": "...", "applied_at": "...", "applied_by": "..." }] }`.
+   The deploy state is **not** stored in the database — keeps schemas
+   clean and avoids `pell` owning a state table in every target. CI
+   commits the lockfile after a successful deploy so the next run on a
+   different machine starts from the right baseline.
+2. **Plan phase** (offline): compare the new build's artifact hashes
+   against `build/deploy.lock.json` to compute the set of artifacts that
+   changed. Spec changes drag their body and any downstream package whose
+   interface hash they touch. `pell deploy --plan` prints the plan; CI
+   gates on it.
 3. **Apply phase**: for each changed artifact, in dependency order:
-   specs first (all of them), then bodies. Each `CREATE OR REPLACE` is
-   wrapped in an anonymous block that updates `pell_deploy_state` on
-   success. PL/SQL package replacement is **not** transactional across
-   multiple packages — we accept that and make re-runs idempotent instead.
+   specs first (all of them), then bodies. PL/SQL package replacement is
+   **not** transactional across multiple packages — we accept that and
+   make re-runs idempotent instead. After each successful apply the
+   lockfile is rewritten so a mid-deploy failure leaves a recoverable
+   state.
 4. **Rollback**: no automatic rollback; on failure, deploy halts and the
-   state table reflects what landed. `pell deploy --resume` continues
-   where it stopped. `pell deploy --to <git-ref>` rebuilds at a prior
-   commit and re-applies (the "rollback" you actually want).
+   lockfile reflects what landed. `pell deploy --resume` continues where
+   it stopped. `pell deploy --to <git-ref>` rebuilds at a prior commit
+   and re-applies (the "rollback" you actually want).
+
+Tradeoff vs. a state table in the schema: the lockfile is per-checkout,
+so multi-machine teams must commit it (CI-friendly) and conflicts on
+parallel deploys to the same target are resolved by whoever lands second
+re-running. We accept that cost to keep `pell` from owning DB state.
 
 Liquibase/Flyway are not adopted directly because their changeset model
 fights `CREATE OR REPLACE` — package bodies aren't migrations, they're
-artifacts. The state table is `pell`-shaped on purpose; emitting a
+artifacts. The lockfile schema is `pell`-shaped on purpose; emitting a
 Liquibase-changelog adapter is a v2 idea if there's demand.
 
 ### 10.2 `@test(db)` — execution model
 
 - **Connection**: resolved from a `[test]` profile in `pell.toml`
   (`url`, `user`, `password_env`). `pell test` requires the profile to
-  point at a *non-production* DB; the harness refuses if the schema's
-  `pell_deploy_state.applied_by` is unset (i.e., it doesn't look like a
-  pell-managed sandbox). Override with `--i-know-what-im-doing`.
-- **Isolation**: each `@test(db)` runs inside a savepoint that's rolled
-  back on completion, success or failure. Tests that issue `commit`
-  (e.g., to exercise `@autonomous` paths) must declare `@test(db, commits)`,
-  which switches to a per-test schema-truncate strategy and disables
-  parallelism for those tests.
+  point at a *non-production* DB; the harness refuses unless the target
+  is explicitly marked `is_sandbox = true` in the profile.
+- **Isolation**: every `@test(db)` runs inside a savepoint that's rolled
+  back on completion, success or failure. **There is no commits escape
+  hatch.** Tests that need real commits (DDL, exercising `@autonomous`
+  end-to-end) are out of scope for `pell test` in v1 — use a separate
+  integration-test harness for those. The strictness is deliberate:
+  every test that could commit is a test that could pollute the schema
+  for the next test, and the language is small enough that we'd rather
+  not ship that footgun.
 - **Parallelism**: pure-`pell` tests run on the host's CPU pool. `@test(db)`
   tests serialize by default in v1; opt into parallel pools by
   configuring `[test] db_pool = N` with N pre-provisioned connections.
 - **Fixtures**: `@fixture fn seed_employees() { … }` declares a setup
   callable, attached to tests via `@test(db, fixture = seed_employees)`.
   Fixtures run inside the same savepoint as the test.
+- **Property-based**: `@prop fn …(x: gen<int>, y: gen<text>)` declares a
+  property test; the runner generates inputs (`gen<T>` comes from the
+  prelude) and shrinks on failure. Available alongside `@test` from v1;
+  works the same way for `@prop(db)`.
 
-### 10.3 LSP and editor reality
-
-`pell-lsp` is the editor integration surface. We ship official thin
-wrappers for VS Code (a Code extension), Neovim (`lspconfig` entry), and
-Helix (`languages.toml`). For **JetBrains** (DataGrip, IntelliJ): the
-generic LSP plugin works for diagnostics/hover/go-to-def but does *not*
-get inline SQL completion against the user's connected schema — that
-requires DataGrip's native API and is out of v1. We document this
-explicitly so DataGrip users aren't surprised. A native JetBrains plugin
-is a v1.1 candidate if there's user demand.
-
-### 10.4 Package manager — v1 scope
+### 10.3 Package manager — v1 scope
 
 - **Manifest** (`pell.toml`):
   ```toml
@@ -1529,7 +1539,7 @@ Implementation-language pick: **Rust**, because it gives us a single static
 binary, fast parsing, easy LSP via `tower-lsp`, and good string-manipulation
 ergonomics. Go is a close second. Python is rejected for distribution reasons.
 
-### 10.5 LSP capabilities (v1)
+### 10.4 LSP capabilities (v1)
 
 The server is a single binary, `pell-lsp`, sharing the parser/typer crate
 with `pell build`. v1 ships:
@@ -1587,6 +1597,33 @@ with `pell build`. v1 ships:
 Not in v1: call hierarchy, type hierarchy, monikers, semantic-token delta,
 DAP integration (see §8). Parked behind real demand from M4 dogfooding.
 
+**Schema source for `sql!{}` completion.** The LSP reads tables, columns,
+and bind-typeable identifiers from a schema snapshot file checked into
+the repo (`schema.json` or similar — format spec'd in M4). `pell schema
+pull` refreshes the snapshot from a configured `[deploy.*]` target when
+the user runs it; the LSP never connects to a live DB on its own. This
+keeps editing offline-capable, makes schema changes reviewable in PRs,
+and avoids "every dev needs a working DB connection just to edit" pain.
+
+### 10.5 Editor integration — what we ship
+
+`pell-lsp` is the editor integration surface. v1 ships:
+
+- **VS Code**: official Code extension wrapping `pell-lsp`.
+- **Neovim**: `lspconfig` entry.
+- **Helix**: `languages.toml` snippet in the docs.
+- **JetBrains (DataGrip / IntelliJ)**: a **native plugin**, not a
+  generic-LSP wrapper. Built on JetBrains' PSI/UAST APIs so that:
+  - SQL completion inside `sql!{}` integrates with DataGrip's existing
+    schema browser when present (in addition to the snapshot file),
+  - refactoring (rename, extract) uses IntelliJ's native machinery,
+  - the debugger surface can light up `pell` source-map traces when DAP
+    lands in v2.
+
+  This roughly doubles the editor-tooling investment for v1, but Oracle
+  developers live in DataGrip — a degraded experience there is a hard
+  adoption blocker.
+
 ### 10.6 Parser error recovery
 
 A real IDE buffer is unparseable most of the time. The parser is designed
@@ -1640,16 +1677,7 @@ Both are tested as part of the M0 deliverable.
    generics proposal needs its own design pass (especially: how to keep
    PL/SQL type-name explosion bounded when `pub fn foo<T>` can be
    instantiated by downstream packages).
-3. **DDL**: in scope or out? *Bias*: out for v1. Tables/indexes/sequences stay
-   in plain `.sql`. `pell` only generates packages, types, and triggers.
-4. **Triggers**: support as a first-class construct (`trigger on employees
-   before update { … }`) or out? *Bias*: support, because trigger ergonomics
-   in PL/SQL are awful and this is high-value.
-5. **Testing model**: assertion-style (`assert eq(...)`) plus fixtures? Or
-   property-based? *Bias*: assertion + fixtures for v1.
-6. **Concurrency / autonomous transactions**: explicit `autonomous fn`? Or
-   block-level `autonomous { … }`? *Bias*: block-level.
-7. **Compile-time SQL validation**: tiered.
+3. **Compile-time SQL validation**: tiered.
    - *v1 (always-on)*: ship an offline SQL parser (lex + parse only — no
      semantics) sufficient to extract bind variables, detect obvious typos
      (`slect`, missing `from`), and reject use of constructs we refuse to
@@ -1678,22 +1706,23 @@ because `pell deploy`'s state model influences source-map hashing (§8).
    parser for bind extraction and typo detection (§11.7 v1 tier).
    Deliverable: a working `find_employee` end-to-end against an Oracle 23
    sandbox.
-4. **M3 — typed errors**: error decls, `?`, `match`, lowering strategy chosen
-   between (A)/(B). Deliverable: stack-trace round-trip via source maps.
+4. **M3 — typed errors**: error decls, `?`, `match`; lowering via §6.6 (C)
+   (`SYS_CONTEXT` + sentinel `EXCEPTION`). Deliverable: stack-trace
+   round-trip via source maps.
 5. **M4 — packaging + deploy**: `pell.toml`, `pell.lock`, dependencies
-   (paths first, registries later), `pell deploy` with the state-table
+   (paths first, registries later), `pell deploy` with the local-lockfile
    model from §10.1. Deliverable: idempotent re-deploy of a two-module
    project; `pell deploy --plan` output gating CI.
 6. **M5 — tooling polish**: `pell test` (incl. `@test(db)` with savepoint
    isolation, §10.2), `pell doc`, `pell-lsp` (diagnostics, hover,
-   go-to-def, rename, find-refs). Deliverable: usable VS Code + Neovim
-   extensions wrapping the LSP. JetBrains gets the generic LSP plugin
-   path; a native plugin is post-v1 (§10.3).
+   go-to-def, rename, find-refs). Deliverables: usable VS Code + Neovim
+   extensions wrapping the LSP, **plus** a native JetBrains plugin
+   (§10.5) — Oracle devs live in DataGrip, so this is in v1 scope.
 
 Cut lines, in priority order, if M5 slips: `pell doc` → rename → find-refs →
-JetBrains LSP wrapper docs → savepoint isolation for `@test(db)` (degrade to
-"run against a freshly-created throwaway schema"). Hover, go-to-def, and
-diagnostics are non-negotiable for v1 to be called shipped.
+property-based test generator (`@prop`) → native JetBrains plugin (degrade
+to generic LSP wrapper). Hover, go-to-def, diagnostics, and savepoint
+isolation for `@test(db)` are non-negotiable for v1 to be called shipped.
 
 ## 13. Prior art worth studying
 
@@ -1713,8 +1742,9 @@ diagnostics are non-negotiable for v1 to be called shipped.
 
 ## Next steps
 
-1. Decide DDL surface (§11.3 — tables/indexes/sequences stay in raw SQL,
-   or grow a `pell` construct?) and triggers (§11.4).
-2. Start M0: tree-sitter grammar + a handful of canonical `.pell` examples
+1. Start M0: tree-sitter grammar + a handful of canonical `.pell` examples
    that exercise every construct in §4.
-3. Pick a real name (§14 — `pell` is still the placeholder).
+2. Stand up the `pell_runtime` package skeleton (§6.6) and prove the
+   `SYS_CONTEXT` raise/catch round-trip against Oracle 23.
+3. Spec the schema-snapshot file format (§10.4) — needed before M2 SQL
+   completion makes sense.
