@@ -28,9 +28,12 @@ or stack-trace clarity is a regression even if it shortens the source.
 - **Not** a SQL replacement. Embedded SQL stays SQL; we don't reinvent `SELECT`.
 - **Not** a polyglot backend. No JS/Postgres/SQLite targets in v1. Trying to
   abstract over dialects is what kills these projects.
-- **Not** a runtime. We emit PL/SQL text; we don't ship a VM, a stdlib loaded
-  into the DB, or runtime helpers (unless one specific helper package becomes
-  unavoidable — see §7).
+- **Not** a runtime, mostly. We emit PL/SQL text; we don't ship a VM or a
+  stdlib loaded into the DB. The single exception is `pell_runtime`, a
+  thin package that owns the `pell_err` `SYS_CONTEXT` namespace (§6.6),
+  declares one `EXCEPTION` per `pell` error variant in the project, and
+  exposes a `set_err`/`clear_err` pair. Everything else lowers to plain
+  PL/SQL.
 - **Not** a full IDE. LSP + tree-sitter grammar; editors plug in.
 
 ## 3. Design choices at a glance
@@ -144,10 +147,9 @@ Key points:
   prelude variant for the `Option<Row>` → `Result<Row, _>` conversion.
 - Errors form a closed sum at each function boundary (`E1 | E2`); callers must
   handle or re-declare them. There is no implicit `WHEN OTHERS`.
-- When emitted to PL/SQL, each `error` becomes a numbered `EXCEPTION` plus a
-  shadow record type carrying the payload; we marshal via package-level globals
-  scoped per-call (the alternative — `RAISE_APPLICATION_ERROR` with JSON
-  payloads — is on the table; see §11).
+- When emitted to PL/SQL, each `error` becomes a real Oracle `EXCEPTION`
+  declared in the `pell_runtime` package, with the payload marshalled
+  through `SYS_CONTEXT('pell_err', …)` — see §6.6 for the full lowering.
 
 ### 4.4 `try` / `catch` with exhaustive patterns
 
@@ -544,7 +546,7 @@ exception-safety guarantees the rest of the language leans on.
   `list<number>`, etc. is monomorphized by the emitter into a concrete
   PL/SQL type with a mangled name. Methods on these intrinsics (`xs.first()`,
   `opt.expect(msg)`) are also intrinsic — they are *not* evidence of a
-  general generic-method facility. See §11.3.
+  general generic-method facility. See §11.2.
 - No traits/interfaces in v1. Function overloading is also out.
 
 ### 5.1 Collections — one surface, three backing types
@@ -1044,41 +1046,122 @@ error one line later, which is the right outcome.
 
 ### 6.6 Lowering strategy (errors)
 
-Two candidates; we'll prototype both and pick based on stack-trace quality:
+**Chosen: (C) sentinel `EXCEPTION` per variant + `SYS_CONTEXT` payload
+storage.** Rationale below; (A) and (B) documented as rejected
+alternatives.
 
-**(A) `RAISE_APPLICATION_ERROR` + JSON payload.** Each error variant gets a
-stable code in the `-20000..-20999` band. Payload is a JSON string in the
-message. Catching unmarshals back to the typed variant. *Pros*: one
-mechanism, plays well with cross-package boundaries. *Cons*: the band has
-exactly **1000 codes** and is shared across the entire schema with every
-other tool, ORM, and hand-written package — for a non-trivial codebase this
-runs out fast. The `RAISE_APPLICATION_ERROR` message is capped at **2048
-bytes**, which is tight once payloads include strings or nested records;
-JSON gets truncated silently if we don't pre-flight the size. Realistically
-(A) needs a runtime helper anyway: a side table (or context) keyed by a
-correlation id stuffed in the message, so payloads bigger than 2KB still
-work. That collapses much of the "no runtime dep" advantage.
+#### 6.6.1 The chosen approach (C)
 
-**(B) Sentinel `EXCEPTION` per variant + session-scoped payload register.**
-Compiler emits a `pell_runtime` package whose package-level state holds a
-stack of payload records keyed by `(error_identity, depth)`; `raise` pushes,
-`catch` pops. PL/SQL package state is **session-scoped**, not thread-local
-(there are no threads in the PL/SQL execution model — sessions serialize
-through a single call stack), so the stack discipline is well-defined as
-long as every raise is paired with either a catch or a top-of-stack
-unwind-and-clear at the outermost generated entry point. *Pros*: no
-message-size limits, real `EXCEPTION` per variant means `WHEN my_err THEN`
-works in mixed `pell`/hand-PL/SQL code, payload typing survives across
-package boundaries. *Cons*: introduces a runtime dep, the outermost
-generated entry point must always clear residual state in a top-level
-`finally` (otherwise the next call in the same session sees stale
-payloads), and `@autonomous` blocks need their own nested stack frame
-because they may raise into a different transaction context.
+Each `error` variant declared in `pell` lowers to two artifacts:
 
-Initial bias: **(A)** for v0/M3 prototype on the strength of "no runtime
-dep", but the 1000-code band and 2KB cap mean we should expect to migrate
-to **(B)** by the time real codebases land. Worth structuring the emitter
-so the choice is a single backend trait.
+1. A real Oracle `EXCEPTION` declared in the `pell_runtime` package, named
+   by the variant's fully qualified `pell` identity:
+
+   ```plsql
+   PACKAGE pell_runtime AS
+     hr_employees_NotFound        EXCEPTION;
+     hr_employees_DuplicateEmail  EXCEPTION;
+     hr_employees_PolicyViolation EXCEPTION;
+     -- ...one per variant declared in any compiled module
+   END;
+   ```
+
+2. A session context, declared once at deploy time:
+
+   ```plsql
+   CREATE OR REPLACE CONTEXT pell_err
+     USING pell_runtime
+     ACCESSED LOCALLY;
+   ```
+
+   The `USING pell_runtime` binding restricts `DBMS_SESSION.SET_CONTEXT`
+   writes to that package — no other code in the schema can mutate the
+   payload state. `ACCESSED LOCALLY` keeps it session-private (it doesn't
+   participate in Oracle's global-application-context machinery).
+
+**Raise** (compiler-generated, from `Err(NotFound { entity: "user", id: 99 })`):
+
+```plsql
+pell_runtime.set_err('hr_employees_NotFound:1',
+                     '{"entity":"user","id":99}');
+RAISE pell_runtime.hr_employees_NotFound;
+```
+
+`set_err` is a one-line procedure inside `pell_runtime` that wraps
+`DBMS_SESSION.SET_CONTEXT('pell_err', p_key, p_payload)`. The `:1` suffix
+is the *raise depth* — see "nested raises" below.
+
+**Catch** (compiler-generated, from a `match Err(NotFound { ... }) -> ...`):
+
+```plsql
+EXCEPTION
+  WHEN pell_runtime.hr_employees_NotFound THEN
+    l_payload := SYS_CONTEXT('pell_err', 'hr_employees_NotFound:1');
+    pell_runtime.clear_err('hr_employees_NotFound:1');
+    -- typed dispatch from the parsed JSON
+```
+
+**Nested raises of the same variant.** If a `WHEN` handler itself raises a
+new `NotFound`, the inner raise would overwrite the outer's payload under
+a naive scheme. The compiler tracks raise depth statically per fn and
+suffixes the context key with the depth (`:1`, `:2`, …). At catch sites,
+the matching depth is the current statically-known depth. The compiler
+verifies that every raise is paired with a catch at the same depth or
+deeper (this falls out of the existing closed-error-union typing — see §4.4).
+
+**Cleanup discipline.** A top-level generated entry point (every `pub fn`
+called from outside `pell`) wraps its body in an emitted `finally` that
+clears any `pell_err` parameters set during the call. This prevents
+session-leak when an invariant panic blows past `pell`'s catch sites into
+hand-written PL/SQL upstream.
+
+**Payload size.** `SYS_CONTEXT` values are capped at **4000 bytes** per
+parameter (Oracle 23). Payloads that JSON-encode to more than that are a
+compile-time warning and a runtime invariant panic if they actually
+exceed it. If real code hits this regularly we add a side-table backing
+for oversized variants; not in v1.
+
+**`@autonomous` interaction.** An `@autonomous` fn opens a separate
+transaction, but `SYS_CONTEXT` is *session-scoped*, not transaction-scoped
+— context values set inside an autonomous block remain visible after its
+commit/rollback. The compiler emits a `finally` around the autonomous
+body that clears any context keys it set, mirroring the entry-point
+cleanup.
+
+**Cross-language interop.** Hand-written PL/SQL upstream of `pell` can:
+
+- Catch typed errors by name: `WHEN pell_runtime.hr_employees_NotFound
+  THEN`. Real `EXCEPTION` identities work across package boundaries.
+- Read the payload: `SYS_CONTEXT('pell_err', 'hr_employees_NotFound:1')`,
+  parse the JSON.
+- Read context values **from SQL**: `SELECT … WHERE x =
+  SYS_CONTEXT('pell_err', 'NotFound:1')`. This is mostly a debugging
+  affordance, but it's a real capability the other lowerings don't have.
+
+#### 6.6.2 Rejected: (A) `RAISE_APPLICATION_ERROR` + JSON payload
+
+Each variant gets a stable code in `-20000..-20999`; payload is JSON in
+the message; catchers parse `SQLERRM`. *Why rejected*: the band has
+exactly **1000 codes** total and is shared schema-wide with every other
+tool, ORM, and hand-written package. The 2 KB message cap silently
+truncates structured payloads. To fix the 2 KB cap you need a side-table
+or a context — at which point you've reinvented (C) but with a worse
+catch surface (`WHEN OTHERS THEN parse_sqlerrm`) and the shared-code-band
+tax still in force. Useful only if we needed *zero* schema artifacts,
+which we don't — `CREATE CONTEXT pell_err` is one DDL statement.
+
+#### 6.6.3 Rejected: (B) `EXCEPTION` per variant + package-global payload register
+
+Same `EXCEPTION` story as (C), but the payload lives in package variables
+inside `pell_runtime` (a stack keyed by `(error_identity, depth)`) instead
+of `SYS_CONTEXT`. *Why rejected*: package state survives across calls in
+the same session and has no built-in cleanup hook, so we'd be writing
+discipline (and tests for it) that Oracle gives us for free with
+`SYS_CONTEXT`'s session-end semantics. Also: package state isn't visible
+from SQL, so the debugging affordance in §6.6.1 is lost. The only
+advantage (B) has over (C) is unlimited per-payload size, which is a
+problem `SYS_CONTEXT`'s 4 KB cap doesn't have for any plausible error
+shape.
 
 ## 7. Module / package model
 
@@ -1347,7 +1430,7 @@ acceptable because packages have order dependencies (specs before bodies,
 cross-package types), and re-running on partial failure must be safe.
 
 v1 model — borrowed from Flyway/Liquibase but scoped to packages, types,
-and triggers (per §11 (4), DDL stays out):
+and triggers (per §11 (3), DDL stays out):
 
 1. **State table**, owned by `pell` in the target schema:
    `pell_deploy_state(artifact_name, kind, content_hash, applied_at, applied_by)`.
@@ -1539,13 +1622,11 @@ Both are tested as part of the M0 deliverable.
 
 ## 11. Open questions
 
-1. **Error-payload lowering**: (A) vs (B) in §6.6. Need a prototype to compare
-   stack-trace quality and cross-package behavior.
-2. **SQL parsing depth**: do we parse SQL inside `sql!{}` ourselves (to catch
+1. **SQL parsing depth**: do we parse SQL inside `sql!{}` ourselves (to catch
    bind-var typos and unknown columns at compile time), or treat it as an
    opaque string and rely on the DB to validate at deploy time? *Bias*: parse
    enough to extract binds and column names; let the DB validate semantics.
-3. **Generics**: any in v1, or none? Leaning **none for user code**, because
+2. **Generics**: any in v1, or none? Leaning **none for user code**, because
    PL/SQL has no parametric polymorphism and monomorphizing across an open
    type universe is painful. Library code (`Option`, `Result`, `list`,
    `map`, `set`) is compiler-intrinsic: each used instantiation is
@@ -1557,16 +1638,16 @@ Both are tested as part of the M0 deliverable.
    generics proposal needs its own design pass (especially: how to keep
    PL/SQL type-name explosion bounded when `pub fn foo<T>` can be
    instantiated by downstream packages).
-4. **DDL**: in scope or out? *Bias*: out for v1. Tables/indexes/sequences stay
+3. **DDL**: in scope or out? *Bias*: out for v1. Tables/indexes/sequences stay
    in plain `.sql`. `pell` only generates packages, types, and triggers.
-5. **Triggers**: support as a first-class construct (`trigger on employees
+4. **Triggers**: support as a first-class construct (`trigger on employees
    before update { … }`) or out? *Bias*: support, because trigger ergonomics
    in PL/SQL are awful and this is high-value.
-6. **Testing model**: assertion-style (`assert eq(...)`) plus fixtures? Or
+5. **Testing model**: assertion-style (`assert eq(...)`) plus fixtures? Or
    property-based? *Bias*: assertion + fixtures for v1.
-7. **Concurrency / autonomous transactions**: explicit `autonomous fn`? Or
+6. **Concurrency / autonomous transactions**: explicit `autonomous fn`? Or
    block-level `autonomous { … }`? *Bias*: block-level.
-8. **Compile-time SQL validation**: tiered.
+7. **Compile-time SQL validation**: tiered.
    - *v1 (always-on)*: ship an offline SQL parser (lex + parse only — no
      semantics) sufficient to extract bind variables, detect obvious typos
      (`slect`, missing `from`), and reject use of constructs we refuse to
@@ -1592,7 +1673,7 @@ because `pell deploy`'s state model influences source-map hashing (§8).
    modules. Deliverable: compile a non-SQL `pell` program to a `.sql` file
    that runs and produces output.
 3. **M2 — SQL embedding**: `sql!{}` blocks, iterators, binds, offline SQL
-   parser for bind extraction and typo detection (§11.8 v1 tier).
+   parser for bind extraction and typo detection (§11.7 v1 tier).
    Deliverable: a working `find_employee` end-to-end against an Oracle 23
    sandbox.
 4. **M3 — typed errors**: error decls, `?`, `match`, lowering strategy chosen
