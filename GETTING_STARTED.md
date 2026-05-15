@@ -99,6 +99,7 @@ END hello;
 | String interpolation: `"hello {name}"` | `07_full.pell` | lowered to `'hello ' || p_name`; supports field paths `{p.id}` |
 | `.for_update()` / `.nowait()` / `.skip_locked()` / `.wait(N)` / `.for_update_of(cols)` | `07_full.pell` | locking modifiers on read iterators |
 | `pell runtime` CLI subcommand | — | aggregates all error decls from a project into a merged `pell_runtime.sql` |
+| `fn name() { ... } finally { ... }` | `08_finally.pell` | nested `pell_finally_body` procedure called on both success and error paths; RAISE on error path |
 
 ## What doesn't work yet
 
@@ -111,8 +112,6 @@ Roughly ordered by how much pain they'll cause if you hit them:
 3. **Local type inference is shallow.** When a `let` value is a function call to *another module* or a complex chained call, you may get `l_x NUMBER;  -- TODO: inferred, please annotate`. Workaround: annotate the let with `let x: T = ...`.
 
 5. **`@inline`, `@result_cache(relies_on = ...)`, `@error_code(N)` are still ignored.** The other annotations (`@deterministic`, `@result_cache`, `@udf`, `@autonomous`) now emit.
-
-6. **`finally { ... }` is parsed but not lowered.** Use explicit error handling via `match` for now (which is also limited — see #1).
 
 7. **No SQL validation.** The compiler doesn't check that table/column names inside `sql!{}` exist. Bind names are extracted from the SQL text by regex.
 
