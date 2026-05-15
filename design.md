@@ -917,9 +917,22 @@ so the choice is a single backend trait.
 
 - **Source maps**: per-line mapping from emitted `.sql` to source `.pell`.
   When the DB returns `ORA-06512 at "FOO_BAR_BAZ", line 47`, the `pell` CLI
-  rewrites that to `hr/employees.pell:23`.
-- **No incremental compilation** in v1; full project rebuild. Acceptable up to
-  a few hundred modules.
+  rewrites that to `hr/employees.pell:23`. Caveat: maps live alongside the
+  build output and key off a body hash; once a package has been re-extracted
+  via `DBMS_METADATA.GET_DDL` and re-applied by hand, the hash diverges and
+  we fall back to "unmapped, line N of body N". Production debugging
+  therefore requires that the `build/maps/` directory matches the deployed
+  artifact — `pell deploy` writes a `deploy.lock.json` recording the
+  per-package hash so the CLI can refuse to map against a mismatched build.
+- **Incremental compilation**: not in v1. Full rebuild is fine at module #5,
+  tolerable at module #50 (single-digit seconds), and the wall it hits is
+  closer to #150–200 than "a few hundred", once the LSP also wants
+  whole-program type info for hover. v1 ships with two mitigations instead
+  of true incrementality: (a) parsing + typing are parallel per module, and
+  (b) `pell-lsp` keeps a hot in-memory module graph and only re-types the
+  affected SCC on edit. Real incremental codegen (cached emit per module,
+  fingerprinted by interface hash) lands in v1.1; design the IR so the
+  module boundary is a clean cut point.
 - **Output layout**:
   ```
   build/
@@ -929,6 +942,7 @@ so the choice is a single backend trait.
     maps/
       hr_employees.map.json
     deploy.sql           # ordered concat of specs first, then bodies
+    deploy.lock.json     # per-package hashes; matched against DB on deploy
   ```
 
 ## 9. Annotations and compiler directives
@@ -1095,12 +1109,128 @@ time.
 | Tool | Purpose | Tech |
 |---|---|---|
 | `pell build` | Source → PL/SQL text | Rust (likely) or Go |
-| `pell fmt` | Canonical formatting | Same as compiler |
-| `pell test` | Run unit tests; pure-`pell` tests run without a DB, `@sql` tests need a connection | Compiler + tiny harness |
-| `pell deploy` | Apply `build/deploy.sql` to a configured DB | sqlcl/sqlplus wrapper |
-| `pell-lsp` | LSP server | Same crate as compiler |
+| `pell check` | Type-check + lint without emitting | Same as compiler |
+| `pell fmt` | Canonical formatting (idempotent, no config knobs) | Same as compiler |
+| `pell test` | Run unit tests; pure-`pell` tests run without a DB, `@test(db)` tests need a connection | Compiler + tiny harness |
+| `pell deploy` | Apply build to a configured DB; idempotent, tracks state | sqlcl wrapper + state table |
+| `pell doc` | Render module/fn/error docs from `///` comments → HTML + markdown | Compiler |
+| `pell-lsp` | LSP server (diagnostics, hover, go-to-def, rename, find-refs) | Same crate, `tower-lsp` |
 | `pell` tree-sitter grammar | Editor highlighting + structural navigation | tree-sitter |
 | `pell.toml` | Manifest (name, modules, db connection profiles, deps) | toml |
+| `pell.lock` | Resolved dependency versions + content hashes | toml |
+
+Conspicuously **deferred** (and we name them so the deferral is a decision,
+not an oversight):
+
+- **Coverage** — instrumenting the lowered PL/SQL is feasible (insert
+  per-statement counter increments into an autonomous tx) but the
+  cost/value at v1 is bad. `pell test --coverage` is v1.1.
+- **Configurable lint rules** — `@allow(rule)` / `@deny(rule)` scopes exist
+  (§9.5), but v1 ships only the built-in rule set; no external rule
+  plugins. A `[lints]` table in `pell.toml` flips severity.
+- **Watch mode** — `pell build --watch` and `pell test --watch` are nice but
+  not load-bearing for v1. `pell-lsp` covers the inner-loop case.
+- **REPL** — out. PL/SQL has no meaningful REPL story; sqlcl is the answer.
+
+### 10.1 `pell deploy` — idempotency model
+
+The single hardest thing to get right. Plain "execute `deploy.sql`" is not
+acceptable because packages have order dependencies (specs before bodies,
+cross-package types), and re-running on partial failure must be safe.
+
+v1 model — borrowed from Flyway/Liquibase but scoped to packages, types,
+and triggers (per §11 (4), DDL stays out):
+
+1. **State table**, owned by `pell` in the target schema:
+   `pell_deploy_state(artifact_name, kind, content_hash, applied_at, applied_by)`.
+   Created on first deploy.
+2. **Plan phase** (offline): compare `deploy.lock.json` against
+   `pell_deploy_state` to compute the set of artifacts whose hash changed.
+   Spec changes drag their body and any downstream package whose interface
+   hash they touch. `pell deploy --plan` prints the plan; CI gates on it.
+3. **Apply phase**: for each changed artifact, in dependency order:
+   specs first (all of them), then bodies. Each `CREATE OR REPLACE` is
+   wrapped in an anonymous block that updates `pell_deploy_state` on
+   success. PL/SQL package replacement is **not** transactional across
+   multiple packages — we accept that and make re-runs idempotent instead.
+4. **Rollback**: no automatic rollback; on failure, deploy halts and the
+   state table reflects what landed. `pell deploy --resume` continues
+   where it stopped. `pell deploy --to <git-ref>` rebuilds at a prior
+   commit and re-applies (the "rollback" you actually want).
+
+Liquibase/Flyway are not adopted directly because their changeset model
+fights `CREATE OR REPLACE` — package bodies aren't migrations, they're
+artifacts. The state table is `pell`-shaped on purpose; emitting a
+Liquibase-changelog adapter is a v2 idea if there's demand.
+
+### 10.2 `@test(db)` — execution model
+
+- **Connection**: resolved from a `[test]` profile in `pell.toml`
+  (`url`, `user`, `password_env`). `pell test` requires the profile to
+  point at a *non-production* DB; the harness refuses if the schema's
+  `pell_deploy_state.applied_by` is unset (i.e., it doesn't look like a
+  pell-managed sandbox). Override with `--i-know-what-im-doing`.
+- **Isolation**: each `@test(db)` runs inside a savepoint that's rolled
+  back on completion, success or failure. Tests that issue `commit`
+  (e.g., to exercise `@autonomous` paths) must declare `@test(db, commits)`,
+  which switches to a per-test schema-truncate strategy and disables
+  parallelism for those tests.
+- **Parallelism**: pure-`pell` tests run on the host's CPU pool. `@test(db)`
+  tests serialize by default in v1; opt into parallel pools by
+  configuring `[test] db_pool = N` with N pre-provisioned connections.
+- **Fixtures**: `@fixture fn seed_employees() { … }` declares a setup
+  callable, attached to tests via `@test(db, fixture = seed_employees)`.
+  Fixtures run inside the same savepoint as the test.
+
+### 10.3 LSP and editor reality
+
+`pell-lsp` is the editor integration surface. We ship official thin
+wrappers for VS Code (a Code extension), Neovim (`lspconfig` entry), and
+Helix (`languages.toml`). For **JetBrains** (DataGrip, IntelliJ): the
+generic LSP plugin works for diagnostics/hover/go-to-def but does *not*
+get inline SQL completion against the user's connected schema — that
+requires DataGrip's native API and is out of v1. We document this
+explicitly so DataGrip users aren't surprised. A native JetBrains plugin
+is a v1.1 candidate if there's user demand.
+
+### 10.4 Package manager — v1 scope
+
+- **Manifest** (`pell.toml`):
+  ```toml
+  [package]
+  name = "hr"
+  version = "0.4.1"
+  pell  = "^0.1"        # required compiler version
+
+  [modules]
+  root = "src"
+
+  [dependencies]
+  audit = { path = "../audit" }
+  # registry deps deferred; format reserved:
+  # logging = "^1.2"
+
+  [deploy.dev]
+  url = "jdbc:oracle:thin:@//localhost:1521/XEPDB1"
+  user = "hr_dev"
+  password_env = "HR_DEV_PW"
+
+  [test]
+  profile = "dev"
+  db_pool = 4
+  ```
+- **Lockfile** (`pell.lock`): records resolved versions and content hashes
+  for every direct and transitive dep. Path-only deps still write a hash;
+  the lockfile detects drift between checkouts.
+- **Versioning**: SemVer. Compiler version (`pell = "..."`) is part of the
+  manifest; `pell build` refuses if the installed compiler is outside the
+  declared range, with a one-line suggestion of the right `pellup` command.
+- **Stdlib upgrades**: the prelude (`Option`, `Result`, `list`/`map`/`set`,
+  `oracle::*`, `log::*`) is versioned with the compiler. v1 ships zero
+  stdlib breaking changes; from v1.1 on, deprecations go through one minor
+  before removal.
+- **Out of v1**: registries (no `pell publish`), workspaces (multi-package
+  monorepos beyond `path = "..."`), feature flags, build scripts.
 
 Implementation-language pick: **Rust**, because it gives us a single static
 binary, fast parsing, easy LSP via `tower-lsp`, and good string-manipulation
@@ -1135,27 +1265,51 @@ ergonomics. Go is a close second. Python is rejected for distribution reasons.
    property-based? *Bias*: assertion + fixtures for v1.
 7. **Concurrency / autonomous transactions**: explicit `autonomous fn`? Or
    block-level `autonomous { … }`? *Bias*: block-level.
-8. **Compile-time SQL validation**: optional `pell check --db` mode that
-   actually issues `EXPLAIN PLAN` against a configured DB to validate binds
-   and resolve types. Out of v1, on the v2 wishlist.
+8. **Compile-time SQL validation**: tiered.
+   - *v1 (always-on)*: ship an offline SQL parser (lex + parse only — no
+     semantics) sufficient to extract bind variables, detect obvious typos
+     (`slect`, missing `from`), and reject use of constructs we refuse to
+     lower (e.g. ref cursors outside `unsafe::cursor!{}`). Yes, we are
+     parsing Oracle SQL ourselves; we restrict to a documented subset and
+     pass unrecognized constructs through as opaque text with a warning.
+     Aim for "catches 80% of finger-trouble bugs at edit time" via the LSP.
+   - *v1.1*: `pell check --db` issues `DBMS_SQL.PARSE` (cheaper than
+     `EXPLAIN PLAN`, doesn't touch the cost-based optimizer) to validate
+     against a live schema. Opt-in, runs in CI.
+   - *v2*: type-resolve columns, validate bind types, surface plan hints.
 
 ## 12. v1 milestones
 
-Suggested ordering, each ~self-contained:
+Suggested ordering, each ~self-contained. **Note on order**: packaging
+(manifest + deploy) lands *before* IDE polish, because a usable LSP is
+worth little without a way to organize a multi-module project, and
+because `pell deploy`'s state model influences source-map hashing (§8).
 
 1. **M0 — grammar + parser**: tree-sitter grammar, lex + parse, no semantics.
    Deliverable: round-trip `.pell` → AST → `pell fmt` output.
 2. **M1 — typer (no SQL)**: records, enums, `Result`, `Option`, functions,
    modules. Deliverable: compile a non-SQL `pell` program to a `.sql` file
    that runs and produces output.
-3. **M2 — SQL embedding**: `sql!{}` blocks, iterators, binds. Deliverable: a
-   working `find_employee` end-to-end against an Oracle 23 sandbox.
+3. **M2 — SQL embedding**: `sql!{}` blocks, iterators, binds, offline SQL
+   parser for bind extraction and typo detection (§11.8 v1 tier).
+   Deliverable: a working `find_employee` end-to-end against an Oracle 23
+   sandbox.
 4. **M3 — typed errors**: error decls, `?`, `match`, lowering strategy chosen
    between (A)/(B). Deliverable: stack-trace round-trip via source maps.
-5. **M4 — tooling**: `pell test`, `pell-lsp` (hover, go-to-def, diagnostics).
-   Deliverable: usable VS Code + JetBrains extensions wrapping the LSP.
-6. **M5 — packaging**: `pell.toml`, dependencies (paths first, registries
-   later), `pell deploy`.
+5. **M4 — packaging + deploy**: `pell.toml`, `pell.lock`, dependencies
+   (paths first, registries later), `pell deploy` with the state-table
+   model from §10.1. Deliverable: idempotent re-deploy of a two-module
+   project; `pell deploy --plan` output gating CI.
+6. **M5 — tooling polish**: `pell test` (incl. `@test(db)` with savepoint
+   isolation, §10.2), `pell doc`, `pell-lsp` (diagnostics, hover,
+   go-to-def, rename, find-refs). Deliverable: usable VS Code + Neovim
+   extensions wrapping the LSP. JetBrains gets the generic LSP plugin
+   path; a native plugin is post-v1 (§10.3).
+
+Cut lines, in priority order, if M5 slips: `pell doc` → rename → find-refs →
+JetBrains LSP wrapper docs → savepoint isolation for `@test(db)` (degrade to
+"run against a freshly-created throwaway schema"). Hover, go-to-def, and
+diagnostics are non-negotiable for v1 to be called shipped.
 
 ## 13. Prior art worth studying
 
