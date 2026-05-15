@@ -23,6 +23,9 @@ comes out *today*.
 # compile every .pell in a directory
 ./pell build compiler/examples -d compiler/expected
 
+# generate a merged pell_runtime.sql with EXCEPTION decls for every error variant
+./pell runtime compiler/examples -o compiler/runtime/pell_runtime.sql
+
 # print the AST or token stream (debugging)
 ./pell parse  compiler/examples/02_employees.pell
 ./pell tokens compiler/examples/02_employees.pell
@@ -172,8 +175,14 @@ block at the top that looks like:
 --   PRAGMA EXCEPTION_INIT(hr_employees_notfound, -20100);
 ```
 
-For v0, you paste those EXCEPTION declarations into `pell_runtime.sql` by
-hand and re-run it. M4's `pell deploy` will automate the collation.
+v0.1 ships `pell runtime <dir> -o compiler/runtime/pell_runtime.sql` which
+scans every `.pell` file in a directory, collects all error variants, and
+emits a single merged `pell_runtime.sql` with the EXCEPTION declarations,
+the `pell_err` context, and the `set_err`/`clear_err`/`get_err` helpers.
+Re-run it whenever you add or remove an error variant; the codes are
+assigned deterministically by file order, starting at `-20100`.
+
+The earlier "paste it in by hand" workflow is gone — use `pell runtime`.
 
 ## Iterating on the compiler
 
