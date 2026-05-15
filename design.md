@@ -465,9 +465,32 @@ SELECT n
   FROM num_table ORDER BY n;
 ```
 
-Open question for v0.x: `SQL%BULK_ROWCOUNT(i)` — the per-iteration affected
-row count after a `FORALL`. No surface for it yet; a `.bulk_rowcount(i)`
-accessor on the iteration index is the obvious shape.
+After a `FORALL` (or any DML), the magic `bulk` namespace exposes the
+implicit-cursor attributes:
+
+| Pell | PL/SQL | Notes |
+|---|---|---|
+| `bulk.rowcount(i)` | `SQL%BULK_ROWCOUNT(i)` | Rows affected by iteration *i*. Only meaningful right after a `FORALL`. |
+| `bulk.total()`     | `SQL%ROWCOUNT`         | Total rows affected. Works after any DML or `FORALL`. |
+
+`bulk` is not a regular module or value — you can't store it in a variable
+or pass it; it's a compile-time-recognized accessor. The compiler does
+not yet enforce "must follow a FORALL/DML" statically (v0 limitation —
+you'll get an Oracle runtime error if used wrong).
+
+Lists also expose accessor methods on the local:
+
+| Pell | PL/SQL |
+|---|---|
+| `xs.len()`       | `xs.COUNT` |
+| `xs.first()`     | `xs.FIRST` |
+| `xs.last()`      | `xs.LAST`  |
+| `xs.at(i)`       | `xs(i)`    |
+| `xs.indices()`   | (loop construct: `for i in xs.indices()` becomes `FOR i IN xs.FIRST .. xs.LAST LOOP`) |
+
+String interpolation `"foo {expr} bar"` accepts arbitrary `pell`
+expressions inside `{ ... }`, including method calls
+(`"got {bulk.rowcount(i)}"`). Use `{{` and `}}` to escape braces.
 
 ### 4.6 Pipelines
 

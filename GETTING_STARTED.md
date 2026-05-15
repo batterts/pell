@@ -104,6 +104,10 @@ END hello;
 | `for x in xs { ... }` over a list | `09_bulk.pell` | `FOR i_x IN l_xs.FIRST .. l_xs.LAST LOOP` with a shadow local for the loop variable |
 | `forall x in xs { sql! { ... :x ... } }` | `09_bulk.pell` | emits PL/SQL `FORALL` over the list; body must be a single DML sql!{}; `:x` substitutes directly to `l_xs(i_x)` |
 | `let rows: list<T> = sql! { select … }.collect();` | `09_bulk.pell` | emits `SELECT … BULK COLLECT INTO l_rows FROM …` and declares the assoc-array list type |
+| `bulk.rowcount(i)` / `bulk.total()` | `09_bulk.pell` | `SQL%BULK_ROWCOUNT(i)` / `SQL%ROWCOUNT`; valid after a FORALL or DML |
+| `xs.len()` / `xs.first()` / `xs.last()` / `xs.at(i)` | `09_bulk.pell` | direct lowerings to `xs.COUNT` / `xs.FIRST` / `xs.LAST` / `xs(i)` |
+| `for i in xs.indices() { ... }` | `09_bulk.pell` | `FOR i IN l_xs.FIRST .. l_xs.LAST LOOP` |
+| String interp with arbitrary expressions: `"x is {p.field}, n is {bulk.rowcount(i)}"` | `09_bulk.pell` | interpolation lexes + parses the brace content as a pell expression |
 
 ## What doesn't work yet
 
