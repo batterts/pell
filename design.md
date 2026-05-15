@@ -223,6 +223,47 @@ hand-written PL/SQL, that's `unsafe::cursor!{}` and stays out of normal code.
 distinguish "exactly one" from "more than one" without a second query — see
 §6.5 for the full table.
 
+### 4.5.2 Language injection inside `sql!{}`
+
+`sql!{}` is a hard boundary in the grammar: the braces flip the editor into a
+sub-context where Oracle SQL applies. The tree-sitter grammar declares the
+body as an injection point (`injection.language = "sql"`), so a tree-sitter
+SQL grammar (we'll target `tree-sitter-sql` with an Oracle dialect overlay)
+renders highlighting, structural navigation, and folding inside the braces
+exactly as a `.sql` buffer would.
+
+LSP responsibilities at the injection boundary:
+
+- **Completion**: identifier completion inside `sql!{}` is dispatched by the
+  cursor's parent node. Inside the SQL body, completion sources are
+  (1) keywords/builtins from the SQL grammar, (2) table/view names from a
+  configured schema snapshot (loaded from `pell.toml` or live via
+  `pell check --db`), (3) column names scoped to tables already named in the
+  `FROM` clause, (4) bind names — see below.
+- **Bind variables** (`:status`, `:dept_id`): these are *not* SQL identifiers;
+  they cross back into `pell` scope. Each `:name` token resolves to a `pell`
+  `let`/`var`/parameter in lexical scope at the `sql!{}` site. The LSP
+  surfaces this as:
+  - **Inlay hint** after `:status` showing the inferred bind type
+    (`:status: text`).
+  - **Go-to-definition** from `:status` jumps to the `let status = …`
+    binding, *not* into the SQL grammar.
+  - **Diagnostic** "no binding `:status` in scope" at the exact span of the
+    bind token (not the whole block) when resolution fails.
+  - **Find-references** for a `let` includes its uses as `:name` inside any
+    `sql!{}` in scope.
+- **Diagnostics granularity**: errors from our embedded SQL parser must point
+  at the offending token (line/column within the brace body), not at the
+  whole `sql!{}` span. The emitter stores the brace-body's source offset so
+  inner spans map back to file positions cleanly.
+- **Hover**: hovering a column name shows its declared type (when a schema
+  snapshot is loaded); hovering a bind shows the resolved `pell` binding
+  and its type.
+- **Rename**: renaming a `pell` `let status` updates every `:status` use in
+  enclosing `sql!{}` blocks. Renaming a SQL identifier (column, table) is
+  *not* in v1 — it would require coordinating across `.pell` and the schema,
+  and that's a footgun without a real refactor engine on the DB side.
+
 ### 4.6 Pipelines
 
 ```pell
@@ -653,7 +694,12 @@ Initial bias: **(A)**, accept the code-band coordination cost, document it.
 
 - **Source maps**: per-line mapping from emitted `.sql` to source `.pell`.
   When the DB returns `ORA-06512 at "FOO_BAR_BAZ", line 47`, the `pell` CLI
-  rewrites that to `hr/employees.pell:23`.
+  rewrites that to `hr/employees.pell:23`. The map file is a stable
+  documented JSON schema (so a DAP adapter and JetBrains plugin can both
+  consume it without re-reading the compiler internals). v1 ships the
+  rewriter as a CLI filter (`pell trace`) and the map format; an actual DAP
+  adapter (breakpoints, stepping) is v2 — Oracle's debugger surface is
+  shaped enough that we should not promise step-debugging in v1.
 - **No incremental compilation** in v1; full project rebuild. Acceptable up to
   a few hundred modules.
 - **Output layout**:
@@ -679,6 +725,13 @@ all of these, plus our own compiler controls, under one uniform surface:
 
 The set is **closed**: the compiler knows every legal annotation, validates
 its target and arguments, and errors on unknown names. No silent typos.
+
+This closedness is deliberately IDE-friendly. After `@` the LSP offers the
+complete legal set filtered by target (annotations valid on the item the
+cursor is on); hover on an annotation shows its target rules, args, and any
+mutual-exclusion constraints; misspellings are a diagnostic with a
+quick-fix to the nearest legal name. An open/user-extensible annotation
+surface would make all three of those degrade to "best effort".
 
 ### 9.1 Syntax
 
@@ -832,6 +885,99 @@ time.
 Implementation-language pick: **Rust**, because it gives us a single static
 binary, fast parsing, easy LSP via `tower-lsp`, and good string-manipulation
 ergonomics. Go is a close second. Python is rejected for distribution reasons.
+
+### 10.1 LSP capabilities (v1)
+
+The server is a single binary, `pell-lsp`, sharing the parser/typer crate
+with `pell build`. v1 ships:
+
+- **Diagnostics** — push-based; whole-file and incremental on save. Diagnostics
+  carry exact source ranges, including ranges *inside* `sql!{}` bodies
+  (see §4.5.2). Severity: error/warning/info/hint.
+- **Hover** — type of the symbol under the cursor; for fns, the full signature
+  with declared error variants; for `:bind` tokens, the resolved `pell`
+  binding and its inferred type; surfaces `@deprecated`, `@panics`,
+  `@must_use` (§9.4).
+- **Go-to-definition** — including `:bind` → `let`, `into::<T>` → `record T`,
+  and cross-module across `import` boundaries.
+- **Find-references / document-symbols / workspace-symbols**.
+- **Completion** —
+  - top-level: keywords, in-scope identifiers, imported module members,
+  - after `.`: methods on the receiver's type, filtered by return type when
+    used in `?` / `match` position,
+  - after `@`: legal annotations for the target item (§9),
+  - inside `sql!{}`: SQL keywords + schema-aware tables/columns + in-scope
+    `:bind` candidates (see §4.5.2),
+  - after `Err(`: in-scope error variants.
+- **Signature help** — including bind-parameter help inside `sql!{}` (lists the
+  binds the SQL refers to and what `pell` value each resolves to).
+- **Semantic tokens** — full token classification including a dedicated token
+  type for `sql!{}` body, `:bind` references, annotation names, error
+  variants, and `unsafe` regions. Range-based delta is a v2 nice-to-have.
+- **Inlay hints** —
+  - inferred `let` types: `let row = …` → `: Option<{id: number, name: text}>`,
+  - bind types inside `sql!{}`: `:status` → `text`,
+  - inferred error union on `?`: shows the variant being propagated when the
+    enclosing fn declares a union,
+  - generated-name hints on the lowered side are *not* surfaced (they're
+    backend noise).
+- **Code actions** (v1 set, deliberately small):
+  - `Extract .expect(msg) to invariant constant` — pulls the message into a
+    named `pub const` for searchability and reuse.
+  - `Convert .first() + match Some/None to .one() + ?` — when the enclosing
+    fn declares `NotFound` (or can have it added with a follow-up action).
+  - `Lift WHEN OTHERS THEN log; RAISE pattern to finally { log; }` — applied
+    at function boundary; only offered when the existing handler does not
+    transform the error.
+  - `Add error variant to fn signature` — quick-fix for "error not declared".
+  - `Add missing match arm` — for non-exhaustive `match` on a closed sum.
+  - `Add binding for :bind` — quick-fix when a bind has no `let` in scope.
+- **Formatting / range-formatting** — `pell fmt` exposed via LSP.
+- **Rename** — across module boundaries. The compiler owns the source→generated
+  name map (e.g. `module hr.employees` → `hr_employees`), and rename operates
+  on the `pell` AST only; the package mangling re-derives. Renames of
+  identifiers used as `:bind` inside `sql!{}` propagate to the bind sites.
+  Renames of SQL identifiers (tables, columns) are out of v1.
+- **Document links** — `import std::log` → the module's source file; module
+  references in `@result_cache(relies_on = [hr.employees])` are clickable.
+
+Not in v1: call hierarchy, type hierarchy, monikers, semantic-token delta,
+DAP integration (see §8). Parked behind real demand from M4 dogfooding.
+
+### 10.2 Parser error recovery
+
+A real IDE buffer is unparseable most of the time. The parser is designed
+around that:
+
+- A **statement-level recovery boundary**: on a parse error inside a fn body,
+  the parser skips to the next `;`, `}`, or top-level item keyword (`fn`,
+  `record`, `error`, `module`, `import`, `@`) and resumes. This keeps the
+  rest of the file analyzable for completion and hover.
+- **Resilient AST nodes**: every block, expression, and arg list is allowed
+  to be incomplete in the AST (the typer treats missing children as
+  `<error>` of `Unknown` type, which suppresses cascading errors).
+- `sql!{}` bodies parse with their own resilient SQL grammar; an unclosed
+  identifier or trailing comma doesn't take down the outer `pell` parse.
+
+### 10.3 Tree-sitter grammar — disambiguations
+
+`pell` has several places where the same token sequence could mean two things.
+The tree-sitter grammar (and the hand-written parser) need an explicit story
+for each; flagging here so we don't discover them in M0:
+
+| Construct | Ambiguity | Resolution |
+|---|---|---|
+| `E1 \| E2` in a fn return vs `Pat1 \| Pat2` in a match arm | `\|` is both error-union and or-pattern | Position-based: only an error-union after `Result<T,` or in an `error` decl context; only an or-pattern inside a `match` arm LHS. Grammar uses separate non-terminals. |
+| `T?` (nullable type) vs `expr?` (propagation) | Trailing `?` is both | Type-context vs expr-context disambiguates; never overlaps in practice. Grammar uses two distinct production rules; reject `T?` in expr position with a targeted error. |
+| `sql!{ … }` body | Outer parser must not try to parse SQL | Treat `sql!` as a macro-like prefix; the `{` after `sql!` opens a *raw-block* token that the SQL injection consumes. |
+| `:name` bind | Easily confused with a label or a type ascription | Only valid inside `sql!{}` body. Outside, `:` is type ascription only; the lexer can hint based on the enclosing scope. |
+| `@name` vs decorator on an expression | Annotations are item/stmt/block only (§9.6), not expression | Grammar production for annotation is fixed to item/stmt/block parents; rejects mid-expression. |
+| `for x in 1..=n` | Range vs two consecutive expressions | `..` and `..=` are explicit range operators; grammar treats them as binary infix. |
+| `record User { … }` literal vs block | `{` after a type name is either struct-literal or a block | After a bare type name in expression position, treat `{` as struct-literal; in statement position after `if`/`for`/`while`/etc., it's a block. Same rule Rust uses; users learn it once. |
+
+The grammar ships with **injection queries**: `sql!{}` body → SQL grammar, and
+interpolated string fragments (`"{name}"`) → `pell` expression grammar.
+Both are tested as part of the M0 deliverable.
 
 ## 11. Open questions
 
