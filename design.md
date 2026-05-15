@@ -180,7 +180,14 @@ sql! {
 };
 ```
 
-Lists lower to nested table types declared at module scope and reused.
+Lists lower to nested table types declared at module scope and reused. Note
+that to use `TABLE(:xs)` in embedded SQL the element type must be SQL-
+visible, which means the nested-table type itself has to be a **schema-
+level** `CREATE TYPE … AS TABLE OF …`, not a package-local
+`TYPE … IS TABLE OF …`. The compiler emits the schema types under a
+configurable schema prefix (`pell_…`) and treats them as part of the
+deploy artifact. See §5.1.4 for the element-type restrictions this
+implies.
 
 ### 4.5.1 No explicit cursors
 
@@ -194,11 +201,17 @@ is an iterator; consuming methods on it lower to one of:
   needed).
 
 In particular, **`.first()` does not lower to `SELECT INTO`** and never
-involves `NO_DATA_FOUND`. It lowers to:
+involves `NO_DATA_FOUND`. It lowers to (the holder record matches the
+*projection*, not the table — `employees%rowtype` would be wrong when the
+select list is narrower):
 
 ```plsql
 declare
-  l_result employees%rowtype;
+  type t_proj is record (
+    id   employees.id%type,
+    name employees.name%type
+  );
+  l_result t_proj;
   l_found  boolean := false;
 begin
   for r in (
@@ -208,6 +221,7 @@ begin
   ) loop
     l_result := r;
     l_found  := true;
+    exit;          -- belt-and-braces; FETCH FIRST already bounds the cursor
   end loop;
   -- l_found drives Option::Some vs Option::None at the call site
 end;
@@ -218,6 +232,12 @@ scope. The cursor `FOR` loop *is* a cursor underneath — but it's the
 implicit, scoped form, not the manual `OPEN`/`FETCH`/`CLOSE` form Shaun is
 allergic to. If you ever need direct access to a `sys_refcursor` for FFI to
 hand-written PL/SQL, that's `unsafe::cursor!{}` and stays out of normal code.
+
+Optimizer note: `FETCH FIRST n ROWS ONLY` plans the same as `ROWNUM <= n`
+in modern releases; it does not pessimize plans on indexed lookups. Where
+the source query is itself bounded (PK lookup, unique index), the compiler
+elides `FETCH FIRST 1` because the plan can't return more than one row
+anyway — keeps the emitted SQL readable.
 
 `.one()` lowers similarly but with `fetch first 2 rows only` so we can
 distinguish "exactly one" from "more than one" without a second query — see
@@ -283,7 +303,7 @@ type:
 
 | `pell` type | Role | Lowers to | Notes |
 |---|---|---|---|
-| `list<T>` | ordered sequence | nested table | gets a module-level `type t_T_list is table of T;` declaration; usable in SQL via `TABLE(:xs)` |
+| `list<T>` | ordered sequence | nested table | usable in SQL via `TABLE(:xs)` *only* when `T` is SQL-visible (see §5.1.4); the type is emitted as a schema-level `CREATE TYPE` so SQL can see it |
 | `map<K,V>` | keyed lookup | associative array | `K` must be `int`, `text`, or a primitive that has a derived `to_key()` |
 | `set<T>` | unique unordered | associative array indexed by `T`'s key | `set<T>` is sugar for `map<T, unit>` |
 
@@ -415,7 +435,20 @@ concerns — PL/SQL handles the hashing under the hood.
 
 The collection type matters when SQL gets involved:
 
-- `list<T>` is a nested table and works directly: `select … from table(:xs)`.
+- `list<T>` is a nested table and works directly: `select … from table(:xs)`,
+  but only when `T` is SQL-visible. Specifically:
+  - **Allowed**: scalar SQL types (`number`, `text → varchar2`, `date`,
+    `timestamp`, `bytes → raw`/`blob`, `json`), schema-level object types,
+    and `list<U>` where `U` is itself allowed (nested-table-of-nested-table
+    via wrapper object).
+  - **Disallowed**: PL/SQL-only types in the element (`boolean` is SQL-
+    visible in 23, so it's fine here; pre-23 it was not), `record` types
+    that themselves contain nested records or assoc arrays, anonymous
+    cursor types. The compiler refuses these at the `sql!{}` boundary and
+    points the user at `.iter()` + a row-at-a-time path.
+  - `interval` works but the schema-level type must spell out
+    `INTERVAL DAY TO SECOND` / `INTERVAL YEAR TO MONTH` precision; the
+    compiler emits one schema type per concrete precision.
 - `map<K, V>` is an associative array and **cannot** be passed to SQL.
   Use `.keys()` or `.values()` to produce a `list<…>` first; the compiler
   does the nested-table copy:
@@ -510,12 +543,12 @@ We deliberately don't add a separate `on_error { }` block in v1 — `finally`
 plus `match` covers the cases without inventing a third construct. Revisit if
 real code shows the always-runs semantics is wrong more than rarely.
 
-**Lowering** (sketch — uses a nested anonymous block + a flag so the finally
-body isn't duplicated, even though PL/SQL has no native `finally`):
+**Lowering** (sketch — uses a nested anonymous block + a local procedure so
+the finally body isn't duplicated, even though PL/SQL has no native
+`finally`):
 
 ```plsql
 declare
-  l_failed boolean := false;
   procedure finally_body is begin
     -- emitted finally code
   end;
@@ -524,16 +557,43 @@ begin
     -- emitted body
   exception
     when others then
-      l_failed := true;
-      finally_body();
-      raise;
+      begin finally_body; exception when others then null; end;
+      raise;                  -- preserves the original error stack
   end;
-  finally_body();
+  finally_body;
 end;
 ```
 
+Edge cases the compiler has to handle and the sketch above does *not*:
+
+- **Early `return` from the body.** PL/SQL has no labelled `return` out of
+  a nested block, so the compiler rewrites early returns as
+  `l_return_value := …; goto pell_finally;` and emits a single
+  `<<pell_finally>>` label that calls `finally_body` then `return`s.
+  (`goto` out of an inner block is legal as long as it doesn't cross a
+  handler boundary; the compiler validates.)
+- **`finally_body` itself raises.** PL/SQL's last-raised-wins rule means
+  a naive call would mask the original exception. The wrapper above
+  swallows secondary errors during error unwinding (logging them via the
+  runtime helper) so the original cause survives; in the success path the
+  finally body is allowed to raise normally.
+- **Re-raise inside the body's handler.** Already handled — the inner
+  `RAISE` (with no exception name) reraises the current one; the outer
+  block has no handler so it propagates out of the wrapper unchanged.
+- **Package initialization blocks.** A module-level `init { } finally { }`
+  lowers into the package body's bottom `BEGIN … END;` initializer. Note
+  that any error from package init poisons the package for the session
+  (subsequent calls raise `ORA-04068` until reconnection); `finally`
+  there can log but cannot rescue.
+- **`@autonomous` on the enclosing fn.** The pragma stays at the
+  outermost block; the finally wrapper is *inside* the autonomous scope,
+  so cleanup runs in the autonomous transaction and any
+  `commit`/`rollback` in `finally` applies there, not to the caller's
+  transaction.
+
 If the finally body is small (single statement, no locals), the compiler may
-inline it to avoid the nested procedure.
+inline it directly into both arms to avoid the local procedure call — see
+`@inline_finally` (§9.3).
 
 ### 6.5 "Catch and release" vs. "this shouldn't happen"
 
@@ -576,7 +636,7 @@ let admin = sql! { select * from users where username = 'admin' }
   .expect("admin user must exist (seeded at install time)");
 ```
 
-### 6.5.1 Invariant panics are uncatchable
+### 6.5.1 Invariant panics are uncatchable *in pell source*
 
 `.expect(msg)` and the related `.unwrap()` are the "this shouldn't happen"
 channel. They are **not** regular errors:
@@ -586,6 +646,14 @@ channel. They are **not** regular errors:
 - `finally { }` still runs (it always runs), but it cannot stop the panic.
 - They propagate to the top of the call stack and abort the request.
 
+"Uncatchable" here is a *pell-source-level* property, not an Oracle-level
+one. The lowering uses `RAISE_APPLICATION_ERROR`, which produces an
+ordinary `ORA-20001` exception — hand-written PL/SQL elsewhere in the same
+schema (or `WHEN OTHERS` in a stored procedure not generated by `pell`)
+*can* still catch it. The compiler's job is only to refuse to emit such a
+handler from `pell` source. Mention this in operator docs so people don't
+treat "uncatchable" as a security property.
+
 Lowering: a reserved error code in the `-20000..-20999` band (initial
 choice: `-20001`, name `PELL_INVARIANT_VIOLATION`) raised via
 `RAISE_APPLICATION_ERROR`. The compiler:
@@ -594,6 +662,12 @@ choice: `-20001`, name `PELL_INVARIANT_VIOLATION`) raised via
 - refuses to compile a `match` or `catch` that would catch it,
 - includes the source location of the `.expect()` call and its message in
   the raised text, so the operator sees `pell invariant at hr/employees.pell:47: admin user must exist`.
+
+The `RAISE_APPLICATION_ERROR` message argument is capped at **2048 bytes**
+in Oracle 23 (unchanged since 10g). The compiler truncates long messages
+with an ellipsis and emits the full text to a side channel (the runtime
+log table, if `pell_runtime` is in use; otherwise `DBMS_OUTPUT` as a
+fallback).
 
 This gives Shaun's two cases distinct, syntactically obvious forms:
 
@@ -609,17 +683,37 @@ Two candidates; we'll prototype both and pick based on stack-trace quality:
 
 **(A) `RAISE_APPLICATION_ERROR` + JSON payload.** Each error variant gets a
 stable code in the `-20000..-20999` band. Payload is a JSON string in the
-message. Catching unmarshals back to the typed variant. *Pros*: one mechanism,
-plays well with cross-package boundaries. *Cons*: `-20000..-20999` is small
-and shared across the schema — needs coordination. Message size limits.
+message. Catching unmarshals back to the typed variant. *Pros*: one
+mechanism, plays well with cross-package boundaries. *Cons*: the band has
+exactly **1000 codes** and is shared across the entire schema with every
+other tool, ORM, and hand-written package — for a non-trivial codebase this
+runs out fast. The `RAISE_APPLICATION_ERROR` message is capped at **2048
+bytes**, which is tight once payloads include strings or nested records;
+JSON gets truncated silently if we don't pre-flight the size. Realistically
+(A) needs a runtime helper anyway: a side table (or context) keyed by a
+correlation id stuffed in the message, so payloads bigger than 2KB still
+work. That collapses much of the "no runtime dep" advantage.
 
-**(B) Sentinel `EXCEPTION` per variant + thread-local payload.** Compiler
-emits a `pell_runtime` package with a stack of payload records keyed by error
-identity; `raise` pushes, `catch` pops. *Pros*: no message-size limits, real
-exception hierarchy. *Cons*: introduces a runtime dep, ordering across
-nested calls is fiddly.
+**(B) Sentinel `EXCEPTION` per variant + session-scoped payload register.**
+Compiler emits a `pell_runtime` package whose package-level state holds a
+stack of payload records keyed by `(error_identity, depth)`; `raise` pushes,
+`catch` pops. PL/SQL package state is **session-scoped**, not thread-local
+(there are no threads in the PL/SQL execution model — sessions serialize
+through a single call stack), so the stack discipline is well-defined as
+long as every raise is paired with either a catch or a top-of-stack
+unwind-and-clear at the outermost generated entry point. *Pros*: no
+message-size limits, real `EXCEPTION` per variant means `WHEN my_err THEN`
+works in mixed `pell`/hand-PL/SQL code, payload typing survives across
+package boundaries. *Cons*: introduces a runtime dep, the outermost
+generated entry point must always clear residual state in a top-level
+`finally` (otherwise the next call in the same session sees stale
+payloads), and `@autonomous` blocks need their own nested stack frame
+because they may raise into a different transaction context.
 
-Initial bias: **(A)**, accept the code-band coordination cost, document it.
+Initial bias: **(A)** for v0/M3 prototype on the strength of "no runtime
+dep", but the 1000-code band and 2KB cap mean we should expect to migrate
+to **(B)** by the time real codebases land. Worth structuring the emitter
+so the choice is a single backend trait.
 
 ## 7. Module / package model
 
@@ -720,19 +814,19 @@ each, which keeps the core small and the grab-bag organized.
 | Annotation | Target | Lowers to | Notes |
 |---|---|---|---|
 | `@deterministic` | fn | `DETERMINISTIC` clause | Required for function-based indexes and for fns called from SQL with caching. Compiler refuses to apply this to fns with observable side effects detectable from their body (mutations, IO, `sql!{}` writes). |
-| `@result_cache` | fn | `RESULT_CACHE` clause | PL/SQL function result cache. Compiler enforces: no side effects, no session state, all args primitive or `derive Key`. `@result_cache(relies_on = [hr.employees])` for dependency hints. |
-| `@autonomous` | fn or `{ }` block | `PRAGMA AUTONOMOUS_TRANSACTION;` | Independent transaction context. Block form opens a nested anonymous block with the pragma — saves writing a whole helper fn just to commit independently. |
-| `@inline` / `@no_inline` | fn or call site | `PRAGMA INLINE(name, 'YES'/'NO')` | Hints to the PL/SQL compiler. |
-| `@udf` | fn | `PRAGMA UDF;` | Fewer SQL ↔ PL/SQL context switches when called from SQL. Mutually exclusive with some `@autonomous` settings; compiler enforces. |
-| `@serially_reusable` | module | `PRAGMA SERIALLY_REUSABLE;` | Whole module is session-stateless. Compiler refuses if the module declares package-level mutable state. |
-| `@restrict_references(rnds, wnds, …)` | fn | `PRAGMA RESTRICT_REFERENCES(...)` | Legacy; rarely needed past 11g. Included for old-codebase interop. |
+| `@result_cache` | fn | `RESULT_CACHE` clause | PL/SQL function result cache. Compiler enforces: no side effects, no session state, all args primitive or `derive Key`. **`RELIES_ON` is deprecated** (since 11.2; parsed and ignored in modern Oracle, including 23 — the engine tracks dependencies automatically). The annotation accepts no `relies_on` arg; if users want explicit hints we surface them as documentation, not pragma. |
+| `@autonomous` | fn or `{ }` block | `PRAGMA AUTONOMOUS_TRANSACTION;` | Independent transaction context. Block form opens a nested anonymous block with the pragma — saves writing a whole helper fn just to commit independently. Note: an autonomous block **must** end with `commit` or `rollback`; the compiler emits an implicit `rollback` on uncaught error paths so the autonomous tx doesn't leak. |
+| `@inline` / `@no_inline` | call site (statement) | `PRAGMA INLINE(name, 'YES'/'NO')` | This pragma decorates the *next statement* in the caller, not the callee. Annotating a fn declaration with `@inline` is a compile error in `pell`; use it at the call site. |
+| `@udf` | fn | `PRAGMA UDF;` | Fewer SQL ↔ PL/SQL context switches when called from SQL. Trades off the other direction: a UDF-pragma'd fn called from PL/SQL pays an extra context switch. Compiler-enforced conflicts: incompatible with `@autonomous` on the same fn (UDF assumes the fn participates in the calling SQL's transaction); incompatible with `OUT`/`IN OUT` params (UDF fns are pure-ish from SQL's view); silently coexists with `@deterministic` and `@result_cache` in 23. |
+| `@serially_reusable` | module | `PRAGMA SERIALLY_REUSABLE;` | Whole module is session-stateless. Compiler refuses if the module declares package-level mutable state. PL/SQL requires this pragma in **both spec and body**; the emitter writes it to both. Note also: serially-reusable packages can't be used from database triggers, and their state resets between top-level server calls — flag in `pell doc`. |
+| `@restrict_references(rnds, wnds, …)` | fn | `PRAGMA RESTRICT_REFERENCES(...)` | Legacy; deprecated since 8i, retained only for very old codebase interop. New code should rely on `@deterministic` / `@udf` instead. |
 
 A worked example showing why this is better than raw PL/SQL — the canonical
 "cache me a lookup" pattern:
 
 ```pell
 @deterministic
-@result_cache(relies_on = [hr.countries])
+@result_cache
 @udf
 fn country_name(code: text) -> Option<text> {
   return sql! {
@@ -747,7 +841,7 @@ Lowers to roughly:
 function country_name(p_code in varchar2)
   return option_varchar2
   deterministic
-  result_cache relies_on (hr_countries)
+  result_cache
 is
   pragma udf;
 begin
@@ -760,11 +854,20 @@ in the body as `PRAGMA`, and which can/can't coexist. In `pell` they're all
 annotations on the function — same surface, compiler enforces the legal
 combinations.
 
+All three coexist legally in 23ai. The combination is exactly the one the
+Oracle docs recommend for SQL-callable lookup functions: `DETERMINISTIC`
+unlocks function-based-index and SQL-cache use, `RESULT_CACHE` memoizes
+across sessions with automatic invalidation on referenced-table DML, and
+`PRAGMA UDF` cuts the per-call SQL↔PL/SQL context-switch cost. The
+compiler must still reject incompatible additions: `@autonomous` here would
+be wrong (UDF + autonomous), and the moment the body grows a write `sql!{}`
+the `@deterministic` and `@result_cache` checks fail.
+
 ### 9.3 Codegen control
 
 | Annotation | Target | Effect |
 |---|---|---|
-| `@error_code(N)` | `error` decl | Pin to a specific code in `-20000..-20999`. Without it, the compiler assigns deterministically from the error's fully qualified name. `-20001` (the reserved `PELL_INVARIANT_VIOLATION`, §6.5.1) cannot be claimed. |
+| `@error_code(N)` | `error` decl | Pin to a specific code in `-20000..-20999`. Without it, the compiler assigns deterministically from the error's fully qualified name. `-20001` (the reserved `PELL_INVARIANT_VIOLATION`, §6.5.1) cannot be claimed. The band has 1000 codes total and is shared schema-wide; deterministic assignment can collide once a project exceeds ~few hundred error variants. The compiler emits a registry file (`build/error-codes.json`) and fails the build on collision; resolving requires either renaming the error or pinning a free code. See also §6.6, where lowering strategy (B) sidesteps the band entirely. |
 | `@module(package_name = "X", emit_synonym = true)` | module | Override §7 defaults. |
 | `@inline_finally` | `finally` block or fn | Force the inlining variant of §6.3 lowering even when the body is large. Useful for hot paths. |
 | `@no_source_map` | fn | Skip source-map entries for generated/glue code. |
