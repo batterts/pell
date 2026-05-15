@@ -772,9 +772,13 @@ class Emitter:
         for stmt in s.body:
             out.extend(self._emit_stmt(stmt, indent + "  "))
         self._tx_stack.pop()
+        # If the body's last statement is an unconditional return, the trailing
+        # COMMIT is unreachable; it was already injected before the return.
+        body_ends_in_return = bool(s.body) and isinstance(s.body[-1], A.ReturnStmt)
+        if not body_ends_in_return:
+            out.append(f"{indent}  COMMIT;")
+            out.append(f"{indent}  {committed_flag} := TRUE;")
         out += [
-            f"{indent}  COMMIT;",
-            f"{indent}  {committed_flag} := TRUE;",
             f"{indent}EXCEPTION",
             f"{indent}  WHEN OTHERS THEN",
             f"{indent}    IF NOT {committed_flag} THEN ROLLBACK TO {sp}; END IF;",

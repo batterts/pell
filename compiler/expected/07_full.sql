@@ -99,8 +99,6 @@ CREATE OR REPLACE PACKAGE BODY orders_fulfillment AS
       COMMIT;
       l_committed_0 := TRUE;
       RETURN l_new_line_id;
-      COMMIT;
-      l_committed_0 := TRUE;
     EXCEPTION
       WHEN OTHERS THEN
         IF NOT l_committed_0 THEN ROLLBACK TO pell_sp_0; END IF;
