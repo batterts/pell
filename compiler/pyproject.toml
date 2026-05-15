@@ -1,0 +1,9 @@
+[project]
+name = "pell"
+version = "0.0.1"
+description = "MVP transpiler from pell to Oracle PL/SQL 23"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

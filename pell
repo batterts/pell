@@ -1,0 +1,5 @@
+#!/bin/sh
+# Wrapper that runs the pell compiler using the project venv.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export PYTHONPATH="$SCRIPT_DIR/compiler:${PYTHONPATH:-}"
+exec "$SCRIPT_DIR/compiler/.venv/bin/python" -m pell "$@"

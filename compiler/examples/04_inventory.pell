@@ -1,0 +1,31 @@
+// DML write that needs the generated PK back via `.returning::<T>()`,
+// and a row count via `.rowcount()`. Exercises the DmlResult side of
+// `sql!{}`.
+
+module inventory.skus;
+
+pub record Sku {
+  id: number,
+  code: text,
+  qty: number,
+}
+
+pub error DuplicateCode { code: text }
+
+pub fn create_sku(code: text, qty: number) -> number {
+  let new_id = sql! {
+    insert into skus(code, qty) values (:code, :qty)
+    returning id
+  }
+    .returning::<number>()
+    .one();
+  return new_id;
+}
+
+pub fn deplete_expired() -> number {
+  let n = sql! {
+    update skus set qty = 0
+    where expires_at < sysdate
+  }.rowcount();
+  return n;
+}

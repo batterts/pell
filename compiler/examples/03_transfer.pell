@@ -1,0 +1,39 @@
+// Bank-style transfer. Exercises transactions, FOR UPDATE-style locking
+// (still SELECT for v0 — for_update modifier is not yet lowered), DML
+// writes, and Err-returns inside a transaction.
+
+module billing.charges;
+
+pub record Account {
+  id: number,
+  balance: number,
+}
+
+pub error Overdraft { account: number, requested: number, available: number }
+pub error AccountFrozen { account: number }
+
+pub fn transfer(from_id: number, to_id: number, amt: number)
+  -> Result<Unit, Overdraft | AccountFrozen>
+{
+  transaction {
+    let src: Account = sql! {
+      select id, balance from accounts where id = :from_id and frozen = 0
+    }.one()?;
+
+    if src.balance < amt {
+      return Err(Overdraft {
+        account: from_id,
+        requested: amt,
+        available: src.balance,
+      });
+    }
+
+    sql! {
+      update accounts set balance = balance - :amt where id = :from_id
+    };
+    sql! {
+      update accounts set balance = balance + :amt where id = :to_id
+    };
+  }
+  return Ok(());
+}
