@@ -174,6 +174,78 @@ def test_no_size_on_param_types():
     assert "IN VARCHAR2" in sql
 
 
+def test_target_19c_lowers_bool_in_object_to_number_one():
+    from pell.emitter import emit
+    from pell.parser import parse
+    src = """
+        module m;
+        pub record Src { id: number, active: bool }
+        pub record Out { id: number, ok: bool }
+        @pipelined
+        pub fn pipe(rows: cursor<Src>) -> stream<Out> {
+          for s in rows { yield Out { id: s.id, ok: s.active }; }
+        }
+    """
+    sql_23 = emit(parse(src), target="23")
+    sql_19c = emit(parse(src), target="19c")
+    # 23: OBJECT attributes use BOOLEAN
+    assert "ok BOOLEAN" in sql_23
+    assert "active BOOLEAN" in sql_23
+    # 19c: OBJECT attributes use NUMBER(1)
+    assert "ok NUMBER(1)" in sql_19c
+    assert "active NUMBER(1)" in sql_19c
+
+
+def test_target_19c_lowers_json_to_varchar2():
+    from pell.emitter import emit
+    from pell.parser import parse
+    src = """
+        module m;
+        pub record Doc { id: number, payload: json }
+        pub fn get_doc(id: number) -> Doc {
+          let row: Doc = sql! { select id, payload from docs where id = :id }.one();
+          return row;
+        }
+    """
+    sql_23 = emit(parse(src), target="23")
+    sql_19c = emit(parse(src), target="19c")
+    # 23: native JSON type for the payload field
+    assert "payload JSON" in sql_23
+    # 19c: VARCHAR2(32767) for the payload field
+    assert "payload VARCHAR2(32767)" in sql_19c
+    # the 19c output should not contain bare JSON as a slot type
+    assert "payload JSON" not in sql_19c
+
+
+def test_target_19c_preserves_pipelined_streaming():
+    """All the streaming machinery is already 19c-compatible — verify it
+    still works at --target 19c."""
+    from pell.emitter import emit
+    from pell.parser import parse
+    src = """
+        module m;
+        pub record Src { id: number }
+        pub record Out { id: number }
+        @pipelined
+        pub fn pipe(rows: cursor<Src>) -> stream<Out> {
+          for s in rows { yield Out { id: s.id }; }
+        }
+    """
+    sql = emit(parse(src), target="19c")
+    assert "PIPELINED" in sql
+    assert "PIPE ROW" in sql
+    assert "BULK COLLECT INTO" in sql
+
+
+def test_target_unknown_rejected():
+    from pell.emitter import emit, EmitError
+    from pell.parser import parse
+    import pytest as pt
+    src = "module m; pub fn f() {}"
+    with pt.raises(ValueError):
+        emit(parse(src), target="21c")
+
+
 def test_pipelined_emits_schema_types():
     sql = compile_to_sql("""
         module m;

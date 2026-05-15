@@ -1,4 +1,4 @@
-# A Modern Language That Compiles to PL/SQL 23
+# A Modern Language That Compiles to Oracle PL/SQL (19c+ / 23)
 
 > Working name: **`pell`** (placeholder — see "Naming" at the end).
 > Status: draft 0.3, 2026-05-14. Surface syntax locked (Rust/Kotlin-ish);
@@ -11,7 +11,8 @@
 ## 1. Goals
 
 Build a small, statically-typed surface language whose **only** backend target is
-Oracle PL/SQL 23, with first-class tooling.
+Oracle PL/SQL (19c and 23 supported via `--target`; 23 is the default), with
+first-class tooling.
 
 The three things that must be better than PL/SQL:
 
@@ -58,7 +59,8 @@ or stack-trace clarity is a regression even if it shortens the source.
 | Transactions | Ambient + explicit `COMMIT` / `ROLLBACK` | `transaction { … }` block, auto-commit on exit, rollback on error, nested = savepoint (§4.8) |
 | `RETURNING INTO` / `SQL%ROWCOUNT` | Implicit cursor attrs | `DmlResult` from a write `sql!{}` with `.returning::<T>()` and `.rowcount()` (§4.5.3) |
 | `SELECT … FOR UPDATE` | In-SQL keyword | `.for_update()` modifier on the read iterator, requires `transaction { … }` (§4.5.4) |
-| Boolean in SQL | Available in 23 — use it | Used natively |
+| Boolean in SQL | 23 only (PL/SQL-only pre-23) | Native `bool` when targeting 23; at SQL crossings on 19c (OBJECT attrs, columns), `bool` lowers to `NUMBER(1)` |
+| `json` data type | 21c+ native | Native `JSON` on 23/21c targets; lowers to `VARCHAR2(32767)` on `--target 19c` |
 | Compiler hints | `PRAGMA AUTONOMOUS_TRANSACTION;` / `PRAGMA INLINE(…)` / `PRAGMA UDF;` / `DETERMINISTIC` / `RESULT_CACHE` clauses, each with its own placement rules | Uniform `@name(args)` annotations, closed set, validated combinations (§9) |
 
 ## 4. Surface syntax — by example

@@ -56,9 +56,33 @@ PRIM_PARAM_MAP = {
 }
 
 
-def lower_type(t: A.TypeRef, *, param: bool = False) -> str:
-    """Lower a pell type reference to a PL/SQL type expression."""
+SUPPORTED_TARGETS = ("23", "19c")
+
+
+def lower_type(
+    t: A.TypeRef,
+    *,
+    param: bool = False,
+    target: str = "23",
+    sql_context: bool = False,
+) -> str:
+    """Lower a pell type reference to a PL/SQL type expression.
+
+    `target` controls dialect — `"23"` (default) or `"19c"`. `sql_context=True`
+    is set for OBJECT attribute / SQL-column positions where some PL/SQL-only
+    types (notably BOOLEAN) aren't legal pre-23.
+    """
     if isinstance(t, A.PrimType):
+        # 19c-specific lowerings for types that exist or behave differently in 23
+        if target == "19c":
+            if t.name == "json":
+                # JSON datatype is 21c+. On 19c, use VARCHAR2 (or CLOB if we
+                # ever need >32K). v0 picks 32767 to match MAX_STRING_SIZE=EXTENDED.
+                return "VARCHAR2(32767)"
+            if t.name == "bool" and sql_context:
+                # BOOLEAN is PL/SQL-only in 19c. Encode as NUMBER(1) at SQL
+                # crossings (OBJECT attributes, table columns).
+                return "NUMBER(1)"
         m = PRIM_PARAM_MAP if param else PRIM_MAP
         return m.get(t.name, t.name.upper())
     if isinstance(t, A.NamedType):
@@ -67,13 +91,13 @@ def lower_type(t: A.TypeRef, *, param: bool = False) -> str:
     if isinstance(t, A.OptionalType):
         # MVP: Option<T> lowers to the inner T (NULL represents None).
         # Loses Option<Option<T>>; documented limitation for v0.
-        return lower_type(t.inner, param=param)
+        return lower_type(t.inner, param=param, target=target, sql_context=sql_context)
     if isinstance(t, A.GenericType):
         if t.base == "Option" and t.params:
-            return lower_type(t.params[0], param=param)
+            return lower_type(t.params[0], param=param, target=target, sql_context=sql_context)
         if t.base == "Result" and t.params:
             # Result<T, E> lowers to just T at the type level; E propagates via RAISE.
-            return lower_type(t.params[0], param=param)
+            return lower_type(t.params[0], param=param, target=target, sql_context=sql_context)
         if t.base == "list" and t.params:
             return f"t_{_safe(_render_type(t.params[0]))}_list"
         if t.base == "map" and len(t.params) == 2:
@@ -130,8 +154,13 @@ def fn_pl_name(pell_name: str) -> str:
 
 
 class Emitter:
-    def __init__(self, module: A.Module):
+    def __init__(self, module: A.Module, target: str = "23"):
+        if target not in SUPPORTED_TARGETS:
+            raise ValueError(
+                f"unsupported target {target!r}; must be one of {SUPPORTED_TARGETS}"
+            )
         self.module = module
+        self.target = target
         self.pkg = module.package_name
         # collected during emission of a function body
         self._declares: list[str] = []  # PL/SQL declaration lines (no trailing ;)
@@ -168,6 +197,10 @@ class Emitter:
         self._fns: list[A.FnDef] = [i for i in module.items if isinstance(i, A.FnDef)]
         # all module-private and module-public fn names
         self._fn_names: set[str] = {f.name for f in self._fns}
+        # convenience wrapper that threads self.target through type lowering
+        self._lt = lambda t, *, param=False, sql_context=False: lower_type(
+            t, param=param, target=self.target, sql_context=sql_context
+        )
         self._pipelined_fn_names: set[str] = {
             f.name for f in self._fns
             if any(a.name == "pipelined" for a in f.annotations)
@@ -226,7 +259,7 @@ class Emitter:
             # OBJECT attribute types DO take size specifiers (unlike parameter
             # types), so we use the non-param lowering here.
             field_lines = [
-                f"  {f.name.lower()} {lower_type(f.type_ref)}"
+                f"  {f.name.lower()} {self._lt(f.type_ref, sql_context=True)}"
                 for f in rec.fields
             ]
             self._schema_types.append(
@@ -333,7 +366,7 @@ class Emitter:
         lines = [f"{indent}TYPE {_record_type_name(rec.name)} IS RECORD ("]
         field_lines = []
         for f in rec.fields:
-            field_lines.append(f"{indent}  {f.name.lower()} {lower_type(f.type_ref)}")
+            field_lines.append(f"{indent}  {f.name.lower()} {self._lt(f.type_ref)}")
         lines.append(",\n".join(field_lines))
         lines.append(f"{indent});")
         return "\n".join(lines)
@@ -360,7 +393,7 @@ class Emitter:
             sig += f" RETURN {nt_name} PIPELINED"
             return sig
         params = ", ".join(
-            f"{param_name(p.name)} IN {lower_type(p.type_ref, param=True)}"
+            f"{param_name(p.name)} IN {self._lt(p.type_ref, param=True)}"
             for p in fn.params
         )
         ret = fn.return_type
@@ -371,7 +404,7 @@ class Emitter:
         if params:
             sig += f"({params})"
         if not (ret is None or _is_unit_like(ret)):
-            sig += f" RETURN {lower_type(ret, param=True)}"
+            sig += f" RETURN {self._lt(ret, param=True)}"
         # signature-level annotations: DETERMINISTIC, RESULT_CACHE
         if "deterministic" in ann_names:
             sig += " DETERMINISTIC"
@@ -386,7 +419,7 @@ class Emitter:
         """
         if isinstance(t, A.GenericType) and t.base == "cursor":
             return "SYS_REFCURSOR"
-        return lower_type(t, param=True)
+        return self._lt(t, param=True)
 
     def _fn_body_pragmas(self, fn: A.FnDef) -> list[str]:
         """Body-level pragmas: PRAGMA UDF, PRAGMA AUTONOMOUS_TRANSACTION."""
@@ -551,7 +584,7 @@ class Emitter:
     def _emit_let(self, s: A.LetStmt, indent: str) -> list[str]:
         nm = local_name(s.name)
         # decide type for declaration
-        ty = lower_type(s.type_annot) if s.type_annot else None
+        ty = self._lt(s.type_annot) if s.type_annot else None
         # Special case: `let x: list<T> = [a, b, c];` — declare an INDEX BY
         # PLS_INTEGER table, then emit per-index assignments.
         if (
@@ -587,7 +620,7 @@ class Emitter:
         """`let xs: list<T> = <expr>;` for non-literal RHS (e.g. .collect())."""
         assert isinstance(s.type_annot, A.GenericType)
         elem_t = s.type_annot.params[0]
-        elem_sql = lower_type(elem_t)
+        elem_sql = self._lt(elem_t)
         list_type = f"t_{_safe(_render_type(elem_t))}_list"
         if list_type not in self._list_types_emitted:
             self._list_type_decls.append(
@@ -616,7 +649,7 @@ class Emitter:
         assert isinstance(s.type_annot, A.GenericType)
         assert isinstance(s.value, A.ListLit)
         elem_t = s.type_annot.params[0]
-        elem_sql = lower_type(elem_t)
+        elem_sql = self._lt(elem_t)
         # PLS_INTEGER for the index — matches BINARY_INTEGER in older syntax
         list_type = f"t_{_safe(_render_type(elem_t))}_list"
         if list_type not in self._list_types_emitted:
@@ -685,9 +718,9 @@ class Emitter:
             if method == "rowcount":
                 return "PLS_INTEGER"
             if method == "returning" and call.type_args:
-                return lower_type(call.type_args[0])
+                return self._lt(call.type_args[0])
             if method == "into" and call.type_args:
-                return lower_type(call.type_args[0])
+                return self._lt(call.type_args[0])
             # chained call: t = (sql!{...}.returning::<T>()).one()
             if method in ("one", "first", "one_or_none") and isinstance(recv, A.Call):
                 inner_ty = self._infer_call_type(recv)
@@ -699,10 +732,10 @@ class Emitter:
             if target_fn is not None and target_fn.return_type is not None:
                 rt = target_fn.return_type
                 if isinstance(rt, A.GenericType) and rt.base in ("Result", "Option") and rt.params:
-                    return lower_type(rt.params[0])
+                    return self._lt(rt.params[0])
                 if isinstance(rt, A.OptionalType):
-                    return lower_type(rt.inner)
-                return lower_type(rt)
+                    return self._lt(rt.inner)
+                return self._lt(rt)
         return None
 
     def _row_type_from_fn_return(self) -> Optional[str]:
@@ -712,10 +745,10 @@ class Emitter:
             return None
         rt = self._current_fn.return_type
         if isinstance(rt, A.GenericType) and rt.base in ("Result", "Option") and rt.params:
-            return lower_type(rt.params[0])
+            return self._lt(rt.params[0])
         if isinstance(rt, A.OptionalType):
-            return lower_type(rt.inner)
-        return lower_type(rt)
+            return self._lt(rt.inner)
+        return self._lt(rt)
 
     def _emit_questionmark_call(self, target: str, inner_call: A.Call, indent: str) -> list[str]:
         """Emit `target := <call>?` — propagate Err via RAISE."""
@@ -1541,5 +1574,5 @@ def _sql_string(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
-def emit(module: A.Module) -> str:
-    return Emitter(module).emit()
+def emit(module: A.Module, target: str = "23") -> str:
+    return Emitter(module, target=target).emit()

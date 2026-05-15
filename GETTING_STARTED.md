@@ -15,8 +15,12 @@ comes out *today*.
 ```sh
 # from /Users/shaun.batterton/code/plsql
 
-# compile a single file to stdout
+# compile a single file to stdout (default target is Oracle 23)
 ./pell build compiler/examples/01_hello.pell
+
+# target Oracle 19c instead — downgrades JSON to VARCHAR2(32767)
+# and BOOLEAN-in-OBJECT to NUMBER(1); everything else is the same
+./pell build compiler/examples/01_hello.pell --target 19c
 
 # compile a single file to disk
 ./pell build compiler/examples/02_employees.pell -o /tmp/employees.sql

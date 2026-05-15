@@ -34,11 +34,14 @@ def cmd_build(args: argparse.Namespace) -> int:
         try:
             src = src_path.read_text()
             module = parse(src, str(src_path))
-            sql = emit(module)
+            sql = emit(module, target=args.target)
         except (LexError, ParseError, EmitError) as e:
             print(f"pell: {e}", file=sys.stderr)
             failures += 1
             continue
+        except ValueError as e:
+            print(f"pell: {e}", file=sys.stderr)
+            return 2
         # destination
         if args.output:
             out_path = Path(args.output)
@@ -196,6 +199,13 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("input", help="path to a .pell file or a directory of them")
     b.add_argument("-o", "--output", help="output .sql file (single input only)")
     b.add_argument("-d", "--dir-output", help="output directory (when compiling a dir)")
+    b.add_argument(
+        "--target",
+        choices=("23", "19c"),
+        default="23",
+        help="Oracle target version (default: 23). 19c downgrades JSON to "
+        "VARCHAR2(32767) and BOOLEAN-in-OBJECT to NUMBER(1).",
+    )
     b.set_defaults(func=cmd_build)
 
     pa = sub.add_parser("parse", help="print AST for a .pell file")
