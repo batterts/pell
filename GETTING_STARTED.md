@@ -1,13 +1,14 @@
-# Getting started with `pell` v0
+# Getting started with `pell` v0.1
 
-This is the **v0 MVP compiler** for the language designed in
+This is the **v0.1 MVP compiler** for the language designed in
 [`design.md`](./design.md). It is a Python-based transpiler that takes
 `.pell` source and emits Oracle PL/SQL 23. A future Rust implementation
 is the long-term plan; this exists so you can write code and see what
 comes out *today*.
 
-> Status: hand-written subset compiler. About 53 tests, around a dozen
-> known limitations (see "What doesn't work yet" below).
+> Status: hand-written subset compiler. 75 tests pass. 7 example
+> programs compile end-to-end. Around a dozen known limitations (see
+> "What doesn't work yet" below).
 
 ## Quickstart
 
@@ -94,7 +95,10 @@ END hello;
 | `return Ok(x)` | `02_employees.pell` | RETURN x; (or just RETURN; for procedures) |
 | `record.field` access | `03_transfer.pell` | direct PL/SQL field access |
 | Binary operators | `02_employees.pell` | `==` → `=`, `!=` → `<>`, `&&` → `AND`, `||` → `OR`, etc. |
-| Annotations | parser only | `@deterministic` etc. are parsed but **not emitted yet** |
+| Annotations: `@deterministic`, `@result_cache`, `@udf`, `@autonomous` | `06_annotated.pell` | render onto signature / as `PRAGMA`; conflict detection enforced (`@udf` + `@autonomous` errors at compile time) |
+| String interpolation: `"hello {name}"` | `07_full.pell` | lowered to `'hello ' || p_name`; supports field paths `{p.id}` |
+| `.for_update()` / `.nowait()` / `.skip_locked()` / `.wait(N)` / `.for_update_of(cols)` | `07_full.pell` | locking modifiers on read iterators |
+| `pell runtime` CLI subcommand | — | aggregates all error decls from a project into a merged `pell_runtime.sql` |
 
 ## What doesn't work yet
 
@@ -106,9 +110,7 @@ Roughly ordered by how much pain they'll cause if you hit them:
 
 3. **Local type inference is shallow.** When a `let` value is a function call to *another module* or a complex chained call, you may get `l_x NUMBER;  -- TODO: inferred, please annotate`. Workaround: annotate the let with `let x: T = ...`.
 
-4. **String interpolation `"{x}"` is not implemented.** Use concatenation: `"hello " || name`.
-
-5. **Annotations are parsed but ignored at emit time.** `@deterministic`, `@result_cache`, `@autonomous`, `@inline`, `@udf` don't yet appear in the emitted PL/SQL. They will in v0.1.
+5. **`@inline`, `@result_cache(relies_on = ...)`, `@error_code(N)` are still ignored.** The other annotations (`@deterministic`, `@result_cache`, `@udf`, `@autonomous`) now emit.
 
 6. **`finally { ... }` is parsed but not lowered.** Use explicit error handling via `match` for now (which is also limited — see #1).
 
@@ -117,8 +119,6 @@ Roughly ordered by how much pain they'll cause if you hit them:
 8. **No schema snapshot, no `pell.toml`, no `pell deploy`.** Those land in M4. For v0, the CLI is just `build`, `parse`, and `tokens`.
 
 9. **Single-file modules only.** No cross-module imports beyond `import std::log;` (which doesn't even resolve, just prints as `log.info` in the body). Multi-file projects work if you compile each `.pell` separately, but cross-references aren't checked.
-
-10. **No `.for_update()` lowering.** `SELECT ... FOR UPDATE` works if you write the `for update` *inside* the SQL text. The `.for_update()` modifier (§4.5.4) isn't parsed yet.
 
 11. **Type-args (`::<T>`) only work on `.returning` and `.into`.** Generic `foo::<T>(...)` calls otherwise won't typecheck.
 
