@@ -16,7 +16,7 @@ from .ast import Loc
 
 KEYWORDS = {
     "module", "import", "pub", "fn", "let", "var", "return",
-    "if", "else", "for", "in", "match", "transaction",
+    "if", "else", "for", "forall", "in", "match", "transaction",
     "record", "error", "true", "false", "Some", "None", "Ok", "Err",
     "unsafe", "finally", "and", "or", "not",
 }

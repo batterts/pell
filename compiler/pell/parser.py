@@ -316,6 +316,8 @@ class Parser:
             return self._parse_if_stmt()
         if self._at_keyword("for"):
             return self._parse_for_stmt()
+        if self._at_keyword("forall"):
+            return self._parse_forall_stmt()
         if self._at_keyword("match"):
             return self._parse_match_stmt()
         if self._at_keyword("transaction"):
@@ -371,6 +373,14 @@ class Parser:
         iterable = self._parse_expr()
         body = self._parse_block()
         return A.ForStmt(loc=kw.loc, var_name=name, iterable=iterable, body=body)
+
+    def _parse_forall_stmt(self) -> A.ForallStmt:
+        kw = self._expect("KW_FORALL")
+        name = self._expect("IDENT").value
+        self._eat_keyword("in") or self._expect("KW_IN")
+        iterable = self._parse_expr()
+        body = self._parse_block()
+        return A.ForallStmt(loc=kw.loc, var_name=name, iterable=iterable, body=body)
 
     def _parse_match_stmt(self) -> A.MatchStmt:
         kw = self._expect("KW_MATCH")

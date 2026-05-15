@@ -174,6 +174,47 @@ def test_no_size_on_param_types():
     assert "IN VARCHAR2" in sql
 
 
+def test_forall_bulk_insert():
+    sql = compile_to_sql("""
+        module m;
+        pub fn run() {
+          let xs: list<number> = [1, 2, 3];
+          forall x in xs {
+            sql! { insert into t(n) values (:x) };
+          }
+        }
+    """)
+    assert "FORALL i_x IN l_xs.FIRST .. l_xs.LAST" in sql
+    assert "insert into t(n) values (l_xs(i_x))" in sql
+
+
+def test_forall_rejects_non_dml_body():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql("""
+            module m;
+            pub fn run() {
+              let xs: list<number> = [1, 2];
+              forall x in xs {
+                log::info(x);
+              }
+            }
+        """)
+
+
+def test_bulk_collect_into():
+    sql = compile_to_sql("""
+        module m;
+        pub fn run() -> number {
+          let rows: list<number> = sql! { select n from t order by n }.collect();
+          return 0;
+        }
+    """)
+    assert "TYPE t_number_list IS TABLE OF NUMBER" in sql
+    assert "l_rows t_number_list" in sql
+    assert "BULK COLLECT INTO l_rows" in sql
+
+
 def test_list_literal_and_loop():
     sql = compile_to_sql("""
         module m;

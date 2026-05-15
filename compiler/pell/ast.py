@@ -286,6 +286,18 @@ class ForStmt(Stmt):
 
 
 @dataclass
+class ForallStmt(Stmt):
+    """`forall n in nums { sql!{ ... :n ... } }` — bulk DML over a list.
+
+    Body must contain exactly one DML `sql!{}` statement; lowers to PL/SQL
+    `FORALL i IN list.FIRST .. list.LAST <dml>`.
+    """
+    var_name: str
+    iterable: Expr
+    body: list[Stmt] = field(default_factory=list)
+
+
+@dataclass
 class MatchStmt(Stmt):
     scrutinee: Expr
     arms: list[MatchArm] = field(default_factory=list)

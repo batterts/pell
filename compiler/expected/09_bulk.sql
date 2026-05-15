@@ -3,6 +3,7 @@
 
 CREATE OR REPLACE PACKAGE bulk_demo AS
   PROCEDURE insert_many;
+  FUNCTION read_all RETURN NUMBER;
 END bulk_demo;
 /
 
@@ -18,11 +19,28 @@ CREATE OR REPLACE PACKAGE BODY bulk_demo AS
     l_nums(3) := 5;
     l_nums(4) := 7;
     l_nums(5) := 11;
+    FORALL i_n IN l_nums.FIRST .. l_nums.LAST
+      insert into num_table(n) values (l_nums(i_n));
     FOR i_n IN l_nums.FIRST .. l_nums.LAST LOOP
       l_n_iter := l_nums(i_n);
-      insert into num_table(n) values (l_n_iter);
-      log.info(('inserted ' || l_n_iter));
+      log.info(('queued ' || l_n_iter));
     END LOOP;
   END insert_many;
+
+  FUNCTION read_all RETURN NUMBER IS
+    l_rows t_number_list;
+    l_total NUMBER;
+    l_r_iter NUMBER;
+  BEGIN
+    select n
+      BULK COLLECT INTO l_rows
+      FROM num_table order by n;
+    l_total := 0;
+    FOR i_r IN l_rows.FIRST .. l_rows.LAST LOOP
+      l_r_iter := l_rows(i_r);
+      l_total := (l_total + l_r_iter);
+    END LOOP;
+    RETURN l_total;
+  END read_all;
 END bulk_demo;
 /

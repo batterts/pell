@@ -1,4 +1,4 @@
-// Bulk insert from a list literal — pell equivalent of:
+// Bulk DML and BULK COLLECT INTO — pell equivalent of:
 //
 //   DECLARE
 //     TYPE num_list_type IS TABLE OF NUMBER INDEX BY BINARY_INTEGER;
@@ -7,15 +7,11 @@
 //     v_nums (1) := 1;  v_nums (2) := 3;  ...
 //     FORALL i IN v_nums.FIRST .. v_nums.LAST
 //       INSERT INTO num_table (n) VALUES (v_nums (i));
-//     FOR i IN v_nums.FIRST .. v_nums.LAST LOOP
-//       DBMS_OUTPUT.PUT_LINE('Inserted '||SQL%BULK_ROWCOUNT(i)||' on '||i);
-//     END LOOP;
+//     ...
 //   END;
 //
-// v0 caveat: pell doesn't yet emit FORALL or read SQL%BULK_ROWCOUNT.
-// The loop below performs row-by-row inserts (semantically identical;
-// less performant). A `bulk` construct that lowers to FORALL is
-// post-v0 work.
+// pell uses `forall n in nums { sql!{ ... :n ... } }` for the bulk DML form
+// and `.collect()` on a SELECT for BULK COLLECT INTO.
 
 module bulk.demo;
 
@@ -24,8 +20,26 @@ import std::log;
 pub fn insert_many() {
   let nums: list<number> = [1, 3, 5, 7, 11];
 
-  for n in nums {
+  // Bulk insert — lowers to FORALL.
+  forall n in nums {
     sql! { insert into num_table(n) values (:n) };
-    log::info("inserted {n}");
   }
+
+  // Per-iteration reporting still uses a regular for-loop.
+  for n in nums {
+    log::info("queued {n}");
+  }
+}
+
+pub fn read_all() -> number {
+  // BULK COLLECT INTO — pull every matching row into a list in one trip.
+  let rows: list<number> = sql! {
+    select n from num_table order by n
+  }.collect();
+
+  var total: number = 0;
+  for r in rows {
+    total = total + r;
+  }
+  return total;
 }

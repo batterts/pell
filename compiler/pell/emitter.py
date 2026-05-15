@@ -387,6 +387,8 @@ class Emitter:
             return self._emit_if(s, indent)
         if isinstance(s, A.ForStmt):
             return self._emit_for(s, indent)
+        if isinstance(s, A.ForallStmt):
+            return self._emit_forall(s, indent)
         if isinstance(s, A.MatchStmt):
             return self._emit_match(s, indent)
         if isinstance(s, A.TransactionStmt):
@@ -407,6 +409,14 @@ class Emitter:
             and isinstance(s.value, A.ListLit)
         ):
             return self._emit_list_let(s, nm, indent)
+        # Special case: `let x: list<T> = <expr>;` where expr is not a list
+        # literal (typically `sql!{...}.collect()`). Register the list type
+        # and the local so subsequent for/forall loops over it work.
+        if (
+            isinstance(s.type_annot, A.GenericType)
+            and s.type_annot.base == "list"
+        ):
+            return self._emit_list_let_from_expr(s, nm, indent)
         # generic type lookup if we can do it cheaply
         if ty is None:
             ty = self._infer_decl_type(s.value)
@@ -420,6 +430,24 @@ class Emitter:
         if s.value is None:
             return []
         # special handling if the expression is a QuestionMark on a Result-typed call
+        return self._emit_assign_to(nm, s.value, indent)
+
+    def _emit_list_let_from_expr(self, s: A.LetStmt, nm: str, indent: str) -> list[str]:
+        """`let xs: list<T> = <expr>;` for non-literal RHS (e.g. .collect())."""
+        assert isinstance(s.type_annot, A.GenericType)
+        elem_t = s.type_annot.params[0]
+        elem_sql = lower_type(elem_t)
+        list_type = f"t_{_safe(_render_type(elem_t))}_list"
+        if list_type not in self._list_types_emitted:
+            self._list_type_decls.append(
+                f"  TYPE {list_type} IS TABLE OF {elem_sql} INDEX BY PLS_INTEGER;"
+            )
+            self._list_types_emitted.add(list_type)
+        self._decl(f"{nm} {list_type};")
+        self._local_types[s.name] = list_type
+        self._list_locals[s.name] = elem_sql
+        if s.value is None:
+            return []
         return self._emit_assign_to(nm, s.value, indent)
 
     def _emit_list_let(self, s: A.LetStmt, nm: str, indent: str) -> list[str]:
@@ -588,6 +616,12 @@ class Emitter:
         return None, None
 
     def _emit_call_assignment(self, target: str, call: A.Call, indent: str) -> list[str]:
+        # `.collect()` on a SELECT → BULK COLLECT INTO
+        if isinstance(call.callee, A.MemberAccess) and call.callee.field == "collect":
+            recv = call.callee.obj
+            _, sql = self._strip_lock_modifiers(recv)
+            if sql is not None and not sql.is_dml:
+                return self._emit_bulk_collect_into(target, sql, indent)
         # .one() with no ? — same select-into but on NO_DATA_FOUND we raise a generic invariant? For v0, leave it as raise.
         if isinstance(call.callee, A.MemberAccess) and call.callee.field in ("one", "first"):
             recv = call.callee.obj
@@ -608,6 +642,19 @@ class Emitter:
             if isinstance(recv, A.SqlBlock) and recv.is_dml:
                 return self._emit_dml_with_rowcount(target, recv, indent)
         return [f"{indent}{target} := {self._emit_expr(call)};"]
+
+    def _emit_bulk_collect_into(self, target: str, sql: A.SqlBlock, indent: str) -> list[str]:
+        """Lower `<sql_select>.collect()` to `SELECT … BULK COLLECT INTO target …`."""
+        import re
+        sql_text = self._rewrite_binds(sql.sql).strip().rstrip(";")
+        m = re.search(r"\s+from\s+", sql_text, re.IGNORECASE)
+        if m:
+            head = sql_text[:m.start()]
+            tail = sql_text[m.end():]
+            spliced = f"{head}\n      BULK COLLECT INTO {target}\n      FROM {tail}"
+        else:
+            spliced = f"{sql_text}\n      BULK COLLECT INTO {target}"
+        return [f"{indent}{spliced.strip()};"]
 
     def _emit_dml_returning(self, target: str, sql: A.SqlBlock, indent: str) -> list[str]:
         """Lower `sql!{INSERT ... RETURNING col}.returning::<T>().one()` to a DML
@@ -802,6 +849,55 @@ class Emitter:
             out.append(f"{indent}END LOOP;")
             return out
         return [f"{indent}-- TODO: for x in non-sql, non-range iterable"]
+
+    def _emit_forall(self, s: A.ForallStmt, indent: str) -> list[str]:
+        """Lower `forall n in nums { sql!{...:n...} }` to PL/SQL FORALL.
+
+        Body must be a single DML `sql!{}` statement. The loop variable name
+        is substituted directly into the DML's bind references — there is no
+        intermediate per-iteration local (FORALL uses the iterator as an
+        L-value directly).
+        """
+        if not isinstance(s.iterable, A.Ident) or s.iterable.name not in self._list_locals:
+            raise EmitError(
+                "forall iterable must be a list-typed local variable",
+                s.loc,
+            )
+        if len(s.body) != 1 or not isinstance(s.body[0], A.ExprStmt) or not isinstance(s.body[0].expr, A.SqlBlock):
+            raise EmitError(
+                "forall body must be exactly one DML sql!{} statement",
+                s.loc,
+            )
+        sql: A.SqlBlock = s.body[0].expr
+        if not sql.is_dml:
+            raise EmitError(
+                "forall body must be a DML statement (insert/update/delete/merge)",
+                s.loc,
+            )
+        list_local = local_name(s.iterable.name)
+        idx = f"i_{s.var_name}"
+        # Custom bind rewrite: :<loop_var> → <list_local>(idx); other binds
+        # follow the usual param/local rules.
+        import re
+        loop_var = s.var_name
+        def repl(m: "re.Match[str]") -> str:
+            name = m.group(1)
+            if name == loop_var:
+                return f"{list_local}({idx})"
+            if name in self._params:
+                return param_name(name)
+            return local_name(name)
+        sql_text = re.sub(
+            r"(?<![A-Za-z0-9_]):([A-Za-z_][A-Za-z0-9_]*)",
+            repl,
+            sql.sql,
+        ).strip().rstrip(";")
+        out = [f"{indent}FORALL {idx} IN {list_local}.FIRST .. {list_local}.LAST"]
+        for line in sql_text.splitlines():
+            out.append(f"{indent}  {line}")
+        if not out[-1].rstrip().endswith(";"):
+            out[-1] = out[-1] + ";"
+        return out
 
     def _emit_match(self, s: A.MatchStmt, indent: str) -> list[str]:
         """Lower a match into an IF/ELSIF chain.
