@@ -1,7 +1,9 @@
 # A Modern Language That Compiles to PL/SQL 23
 
 > Working name: **`pell`** (placeholder — see "Naming" at the end).
-> Status: draft 0.1, 2026-05-13. Everything here is up for revision.
+> Status: draft 0.2, 2026-05-14. Surface syntax locked (Rust/Kotlin-ish);
+> error-payload lowering chosen (§6.6 (C), `SYS_CONTEXT`); M2 surfaces
+> closed (writes, locking, transactions).
 
 ## 1. Goals
 
@@ -1711,8 +1713,8 @@ diagnostics are non-negotiable for v1 to be called shipped.
 
 ## Next steps
 
-1. Lock the syntax-style decision (Rust/Kotlin-ish vs the alternatives shown
-   earlier).
-2. Pick error-lowering (A) vs (B) — or commit to prototyping both in M3.
-3. Start M0: tree-sitter grammar + a handful of canonical `.pell` examples
+1. Decide DDL surface (§11.3 — tables/indexes/sequences stay in raw SQL,
+   or grow a `pell` construct?) and triggers (§11.4).
+2. Start M0: tree-sitter grammar + a handful of canonical `.pell` examples
    that exercise every construct in §4.
+3. Pick a real name (§14 — `pell` is still the placeholder).
