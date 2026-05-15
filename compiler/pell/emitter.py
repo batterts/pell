@@ -289,9 +289,28 @@ class Emitter:
 
         # walk body to collect declarations and assemble statements
         sig = self._fn_signature(fn)
-        stmt_lines: list[str] = []
+        # If there's a `finally` clause, lower as:
+        #   procedure pell_finally_body is begin <finally> end;
+        #   begin
+        #     begin <body>
+        #     exception when others then
+        #       begin pell_finally_body; exception when others then null; end;
+        #       raise;
+        #     end;
+        #     pell_finally_body;
+        #   end;
+        has_finally = fn.finally_body is not None
+
+        body_stmt_lines: list[str] = []
+        body_indent = "      " if has_finally else "    "
         for s in fn.body:
-            stmt_lines.extend(self._emit_stmt(s, indent="    "))
+            body_stmt_lines.extend(self._emit_stmt(s, indent=body_indent))
+
+        finally_stmt_lines: list[str] = []
+        if has_finally:
+            assert fn.finally_body is not None
+            for s in fn.finally_body:
+                finally_stmt_lines.extend(self._emit_stmt(s, indent="      "))
 
         body_pragmas = self._fn_body_pragmas(fn)
 
@@ -299,14 +318,34 @@ class Emitter:
         out.append(f"  {sig} IS")
         for d in self._declares:
             out.append(f"    {d}")
+        if has_finally:
+            out.append(f"    PROCEDURE pell_finally_body IS")
+            out.append(f"    BEGIN")
+            if finally_stmt_lines:
+                out.extend(finally_stmt_lines)
+            else:
+                out.append("      NULL;")
+            out.append(f"    END pell_finally_body;")
         for p in body_pragmas:
             out.append(f"    {p}")
         out.append(f"  BEGIN")
-        if stmt_lines:
-            for line in stmt_lines:
-                out.append(line)
+        if has_finally:
+            out.append("    BEGIN")
+            if body_stmt_lines:
+                out.extend(body_stmt_lines)
+            else:
+                out.append("      NULL;")
+            out.append("    EXCEPTION")
+            out.append("      WHEN OTHERS THEN")
+            out.append("        BEGIN pell_finally_body; EXCEPTION WHEN OTHERS THEN NULL; END;")
+            out.append("        RAISE;")
+            out.append("    END;")
+            out.append("    pell_finally_body;")
         else:
-            out.append("    NULL;")
+            if body_stmt_lines:
+                out.extend(body_stmt_lines)
+            else:
+                out.append("    NULL;")
         out.append(f"  END {fn_pl_name(fn.name)};")
         return "\n".join(out)
 
@@ -600,6 +639,14 @@ class Emitter:
             for flag in self._tx_stack:
                 prefix.append(f"{indent}COMMIT;")
                 prefix.append(f"{indent}{flag} := TRUE;")
+        # If the enclosing fn has a `finally` clause, prepend a call to it
+        # on the success path (Err returns get the EXCEPTION handler's call).
+        if (
+            self._current_fn is not None
+            and self._current_fn.finally_body is not None
+            and not (s.value is not None and isinstance(s.value, A.ErrExpr))
+        ):
+            prefix.append(f"{indent}pell_finally_body;")
         if s.value is None:
             return prefix + [f"{indent}RETURN;"]
         # `return Err(...)` → set payload + RAISE (always, even in procedures)

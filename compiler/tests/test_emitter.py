@@ -174,6 +174,32 @@ def test_no_size_on_param_types():
     assert "IN VARCHAR2" in sql
 
 
+def test_finally_block_emitted():
+    sql = compile_to_sql("""
+        module m;
+        pub fn charge(id: number) {
+          sql! { insert into audit(id) values (:id) };
+        } finally {
+          log::info("done");
+        }
+    """)
+    assert "PROCEDURE pell_finally_body IS" in sql
+    assert "log.info('done')" in sql
+    assert "EXCEPTION" in sql
+    # The finally should be called in both the success path AND
+    # the WHEN OTHERS handler path (then re-raise).
+    body_calls = sql.count("pell_finally_body")
+    assert body_calls >= 4  # decl, the IS line, error-path, success-path
+
+
+def test_no_finally_no_wrapping():
+    sql = compile_to_sql("""
+        module m;
+        pub fn simple() { log::info("hi"); }
+    """)
+    assert "pell_finally_body" not in sql
+
+
 def test_for_update_modifier():
     sql = compile_to_sql("""
         module m;

@@ -327,6 +327,7 @@ class FnDef(Item):
     params: list[Param] = field(default_factory=list)
     return_type: Optional[TypeRef] = None
     body: list[Stmt] = field(default_factory=list)
+    finally_body: Optional[list[Stmt]] = None  # `fn ... { ... } finally { ... }`
 
 
 @dataclass

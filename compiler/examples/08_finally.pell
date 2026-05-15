@@ -1,0 +1,20 @@
+// finally { } runs on both the success and error paths — replaces the
+// PL/SQL `WHEN OTHERS THEN log; RAISE;` idiom that's really "cleanup,
+// not handling" (see design.md §6.3).
+
+module audit.charges;
+
+import std::log;
+
+pub fn charge_account(id: number, amount: number) -> number {
+  let new_id = sql! {
+    insert into ledger(account_id, amount, ts)
+    values (:id, :amount, sysdate)
+    returning entry_id
+  }
+    .returning::<number>()
+    .one();
+  return new_id;
+} finally {
+  log::info("charge_account exit");
+}

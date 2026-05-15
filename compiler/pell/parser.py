@@ -200,6 +200,9 @@ class Parser:
         if self._eat("ARROW"):
             return_type = self._parse_type()
         body = self._parse_block()
+        finally_body: Optional[list[A.Stmt]] = None
+        if self._eat_keyword("finally"):
+            finally_body = self._parse_block()
         return A.FnDef(
             loc=kw.loc,
             annotations=annotations,
@@ -208,6 +211,7 @@ class Parser:
             params=params,
             return_type=return_type,
             body=body,
+            finally_body=finally_body,
         )
 
     def _parse_record_def(self, annotations: list[A.Annotation], is_pub: bool) -> A.RecordDef:
