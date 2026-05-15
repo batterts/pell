@@ -15,7 +15,7 @@ from .ast import Loc
 
 
 KEYWORDS = {
-    "module", "import", "pub", "fn", "let", "var", "return",
+    "module", "import", "pub", "fn", "let", "var", "return", "yield",
     "if", "else", "for", "forall", "in", "match", "transaction",
     "record", "error", "true", "false", "Some", "None", "Ok", "Err",
     "unsafe", "finally", "and", "or", "not",
@@ -112,7 +112,7 @@ class Lexer:
                 toks.append(self._read_string())
                 continue
             # multi-char operators (longest first)
-            for two in ("..=", "::", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "..",):
+            for two in ("..=", "::", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "..", "|>",):
                 if self._starts_with(two):
                     loc = self._loc()
                     self._advance(len(two))
@@ -253,6 +253,7 @@ _PUNCT: dict[str, str] = {
     "->": "ARROW", "=>": "FATARROW",
     "==": "EQEQ", "!=": "BANGEQ", "<=": "LE", ">=": "GE",
     "&&": "AMPAMP", "||": "PIPEPIPE",
+    "|>": "PIPEGT",
 }
 
 

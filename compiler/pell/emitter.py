@@ -149,6 +149,14 @@ class Emitter:
         self._list_locals: dict[str, str] = {}  # name -> element type spelling
         # name → PL/SQL identifier override (used by list-loop shadows)
         self._loop_var_override: dict[str, str] = {}
+        # Schema-level CREATE TYPE statements emitted before the package
+        self._schema_types: list[str] = []
+        self._schema_types_emitted: set[str] = set()
+        # the record types whose OBJECT form we've emitted (for PIPELINED returns)
+        self._obj_emitted: set[str] = set()
+        # When emitting an @pipelined fn, remember the cursor parameter name
+        # so `for x in <cursor>` lowers to FETCH BULK COLLECT INTO ... LIMIT
+        self._cursor_params: dict[str, str] = {}  # param name → element record name
         # cursor FOR-loop variables in scope — referenced bare, no l_ prefix
         self._loop_vars: list[set[str]] = []
         # stack of "currently inside a transaction" — outer-most flag identifier
@@ -160,18 +168,101 @@ class Emitter:
         self._fns: list[A.FnDef] = [i for i in module.items if isinstance(i, A.FnDef)]
         # all module-private and module-public fn names
         self._fn_names: set[str] = {f.name for f in self._fns}
+        self._pipelined_fn_names: set[str] = {
+            f.name for f in self._fns
+            if any(a.name == "pipelined" for a in f.annotations)
+        }
 
     # ---- entry point ----------------------------------------------------
 
     def emit(self) -> str:
+        # Pre-walk fns so schema-level types (for @pipelined returns) get
+        # registered before the package header is emitted.
+        for fn in self._fns:
+            if any(a.name == "pipelined" for a in fn.annotations):
+                self._prepare_pipelined_schema_types(fn)
         chunks: list[str] = []
         chunks.append(self._emit_header())
         if self._errors:
             chunks.append(self._emit_runtime_section())
+        if self._schema_types:
+            chunks.append("\n".join(self._schema_types))
+            chunks.append("")
         chunks.append(self._emit_spec())
         chunks.append("")
         chunks.append(self._emit_body())
         return "\n".join(chunks)
+
+    # ---- pipelined schema types ----------------------------------------
+
+    def _prepare_pipelined_schema_types(self, fn: A.FnDef) -> None:
+        """Emit the OBJECT + nested-table CREATE TYPEs needed by an @pipelined
+        function: one for each cursor parameter's element type, and one for the
+        return element type."""
+        # cursor params — only need the OBJECT (used as the bulk-fetch buffer type)
+        for p in fn.params:
+            elem = self._cursor_element_type(p.type_ref)
+            if elem is not None:
+                self._emit_obj_type(elem, fn.loc, with_table=False)
+        # return type — needs both OBJECT and nested table
+        rt = fn.return_type
+        elem = self._stream_element_type(rt)
+        if elem is None:
+            raise EmitError(
+                f"@pipelined fn {fn.name!r} must return stream<T> where T is a record",
+                fn.loc,
+            )
+        self._emit_obj_type(elem, fn.loc, with_table=True)
+
+    def _emit_obj_type(self, rec_name: str, loc: A.Loc, *, with_table: bool) -> None:
+        rec = self._lookup_record(rec_name)
+        if rec is None:
+            raise EmitError(
+                f"pipelined fn references record {rec_name!r} which is not declared in this module",
+                loc,
+            )
+        obj_name = f"{self.pkg}_{rec.name.lower()}_obj"
+        if obj_name not in self._obj_emitted:
+            # OBJECT attribute types DO take size specifiers (unlike parameter
+            # types), so we use the non-param lowering here.
+            field_lines = [
+                f"  {f.name.lower()} {lower_type(f.type_ref)}"
+                for f in rec.fields
+            ]
+            self._schema_types.append(
+                f"CREATE OR REPLACE TYPE {obj_name} AS OBJECT (\n"
+                + ",\n".join(field_lines)
+                + "\n);\n/"
+            )
+            self._obj_emitted.add(obj_name)
+        if with_table:
+            nt_name = f"{self.pkg}_{rec.name.lower()}_nt"
+            nt_key = f"NT:{nt_name}"
+            if nt_key not in self._obj_emitted:
+                self._schema_types.append(
+                    f"CREATE OR REPLACE TYPE {nt_name} AS TABLE OF {obj_name};\n/"
+                )
+                self._obj_emitted.add(nt_key)
+
+    def _stream_element_type(self, t: Optional[A.TypeRef]) -> Optional[str]:
+        if isinstance(t, A.GenericType) and t.base == "stream" and t.params:
+            inner = t.params[0]
+            if isinstance(inner, A.NamedType):
+                return inner.name
+        return None
+
+    def _cursor_element_type(self, t: A.TypeRef) -> Optional[str]:
+        if isinstance(t, A.GenericType) and t.base == "cursor" and t.params:
+            inner = t.params[0]
+            if isinstance(inner, A.NamedType):
+                return inner.name
+        return None
+
+    def _lookup_record(self, name: str) -> Optional[A.RecordDef]:
+        for r in self._records:
+            if r.name == name:
+                return r
+        return None
 
     def _emit_header(self) -> str:
         return (
@@ -250,6 +341,24 @@ class Emitter:
     # ---- fn signatures & bodies -----------------------------------------
 
     def _fn_signature(self, fn: A.FnDef) -> str:
+        ann_names = {a.name for a in fn.annotations}
+        is_pipelined = "pipelined" in ann_names
+        # Pipelined fns get a custom signature: cursor params become SYS_REFCURSOR
+        # and the return type is the schema-level nested table.
+        if is_pipelined:
+            params = ", ".join(
+                f"{param_name(p.name)} IN {self._pipelined_param_type(p.type_ref)}"
+                for p in fn.params
+            )
+            elem = self._stream_element_type(fn.return_type)
+            assert elem is not None, "checked earlier"
+            rec_name = elem.lower()
+            nt_name = f"{self.pkg}_{rec_name}_nt"
+            sig = f"FUNCTION {fn_pl_name(fn.name)}"
+            if params:
+                sig += f"({params})"
+            sig += f" RETURN {nt_name} PIPELINED"
+            return sig
         params = ", ".join(
             f"{param_name(p.name)} IN {lower_type(p.type_ref, param=True)}"
             for p in fn.params
@@ -264,12 +373,20 @@ class Emitter:
         if not (ret is None or _is_unit_like(ret)):
             sig += f" RETURN {lower_type(ret, param=True)}"
         # signature-level annotations: DETERMINISTIC, RESULT_CACHE
-        ann_names = {a.name for a in fn.annotations}
         if "deterministic" in ann_names:
             sig += " DETERMINISTIC"
         if "result_cache" in ann_names:
             sig += " RESULT_CACHE"
         return sig
+
+    def _pipelined_param_type(self, t: A.TypeRef) -> str:
+        """Lower a parameter type when inside a pipelined fn.
+
+        cursor<T> -> SYS_REFCURSOR, everything else uses the normal rules.
+        """
+        if isinstance(t, A.GenericType) and t.base == "cursor":
+            return "SYS_REFCURSOR"
+        return lower_type(t, param=True)
 
     def _fn_body_pragmas(self, fn: A.FnDef) -> list[str]:
         """Body-level pragmas: PRAGMA UDF, PRAGMA AUTONOMOUS_TRANSACTION."""
@@ -300,6 +417,11 @@ class Emitter:
         self._current_fn = fn
         self._local_types = {}
         self._list_locals = {}
+        self._cursor_params = {}
+        for p in fn.params:
+            elem = self._cursor_element_type(p.type_ref)
+            if elem is not None:
+                self._cursor_params[p.name] = elem
 
         self._check_annotation_conflicts(fn)
 
@@ -362,6 +484,9 @@ class Emitter:
                 out.extend(body_stmt_lines)
             else:
                 out.append("    NULL;")
+        # PIPELINED fns must terminate with `RETURN;`
+        if "pipelined" in {a.name for a in fn.annotations}:
+            out.append("    RETURN;")
         out.append(f"  END {fn_pl_name(fn.name)};")
         return "\n".join(out)
 
@@ -395,7 +520,33 @@ class Emitter:
             return self._emit_transaction(s, indent)
         if isinstance(s, A.ExprStmt):
             return self._emit_expr_stmt(s, indent)
+        if isinstance(s, A.YieldStmt):
+            return self._emit_yield(s, indent)
         return [f"{indent}-- TODO: stmt {type(s).__name__}"]
+
+    def _emit_yield(self, s: A.YieldStmt, indent: str) -> list[str]:
+        """`yield Foo { a: 1, b: 2 };` → `PIPE ROW(<pkg>_foo_obj(1, 2));`.
+
+        Only legal inside an @pipelined fn (the typer doesn't enforce this yet
+        — a stray yield will simply emit a reference to an undeclared obj).
+        """
+        v = s.value
+        if not isinstance(v, A.StructLit):
+            raise EmitError("yield must be a record literal", s.loc)
+        rec = self._lookup_record(v.type_name)
+        if rec is None:
+            raise EmitError(f"yield: unknown record type {v.type_name!r}", s.loc)
+        # field order: emit in record-declaration order, looking up each field's value
+        provided = {f.name: f.value for f in v.fields}
+        missing = [f.name for f in rec.fields if f.name not in provided]
+        if missing:
+            raise EmitError(
+                f"yield {v.type_name}: missing fields {missing}",
+                s.loc,
+            )
+        obj_name = f"{self.pkg}_{v.type_name.lower()}_obj"
+        args = ", ".join(self._emit_expr(provided[f.name]) for f in rec.fields)
+        return [f"{indent}PIPE ROW({obj_name}({args}));"]
 
     def _emit_let(self, s: A.LetStmt, indent: str) -> list[str]:
         nm = local_name(s.name)
@@ -483,6 +634,10 @@ class Emitter:
 
     def _emit_assign_to(self, target: str, expr: A.Expr, indent: str) -> list[str]:
         """Emit one or more PL/SQL statements that assign `expr` to `target`."""
+        # Reduce any pipeline expressions first so the downstream dispatch can
+        # see the underlying SqlBlock or method call shape.
+        if isinstance(expr, A.PipelineExpr):
+            expr = self._reduce_pipeline(expr)
         if isinstance(expr, A.QuestionMark):
             inner = expr.inner
             # if it's a sql!{}.one()? pattern, emit a select-into; the RAISE on no-data is the propagation
@@ -794,6 +949,49 @@ class Emitter:
         return out
 
     def _emit_for(self, s: A.ForStmt, indent: str) -> list[str]:
+        # for x in <cursor param>: streaming bulk-fetch loop
+        if isinstance(s.iterable, A.Ident) and s.iterable.name in self._cursor_params:
+            cursor_param = param_name(s.iterable.name)
+            elem_rec_name = self._cursor_params[s.iterable.name]
+            rec = self._lookup_record(elem_rec_name)
+            if rec is None:
+                raise EmitError(
+                    f"cursor element type {elem_rec_name!r} must be a declared record",
+                    s.loc,
+                )
+            obj_name = f"{self.pkg}_{elem_rec_name.lower()}_obj"
+            buf_type = f"t_{elem_rec_name.lower()}_buf"
+            buf_local = local_name(s.var_name) + "_buf"
+            # declarations — buffer type and instance
+            self._decl(f"TYPE {buf_type} IS TABLE OF {obj_name} INDEX BY PLS_INTEGER;")
+            self._decl(f"{buf_local} {buf_type};")
+            idx = f"i_{s.var_name}"
+            # Inside the body, references to `s.var_name` resolve to
+            # `<buf_local>(idx)`, and `:s.var_name` in sql!{} likewise.
+            self._loop_vars.append({s.var_name})
+            prev_override = self._loop_var_override.get(s.var_name)
+            self._loop_var_override[s.var_name] = f"{buf_local}({idx})"
+            body_lines: list[str] = []
+            for stmt in s.body:
+                body_lines.extend(self._emit_stmt(stmt, indent + "    "))
+            self._loop_vars.pop()
+            if prev_override is None:
+                del self._loop_var_override[s.var_name]
+            else:
+                self._loop_var_override[s.var_name] = prev_override
+            out = [
+                f"{indent}LOOP",
+                f"{indent}  FETCH {cursor_param} BULK COLLECT INTO {buf_local} LIMIT 100;",
+                f"{indent}  EXIT WHEN {buf_local}.COUNT = 0;",
+                f"{indent}  FOR {idx} IN 1 .. {buf_local}.COUNT LOOP",
+            ]
+            out.extend(body_lines)
+            out += [
+                f"{indent}  END LOOP;",
+                f"{indent}END LOOP;",
+                f"{indent}CLOSE {cursor_param};",
+            ]
+            return out
         # for x in sql!{...} — cursor FOR loop
         if isinstance(s.iterable, A.SqlBlock):
             sql_text = self._rewrite_binds(s.iterable.sql).strip().rstrip(";")
@@ -1045,6 +1243,8 @@ class Emitter:
     # ---- expressions ----------------------------------------------------
 
     def _emit_expr(self, e: A.Expr) -> str:
+        if isinstance(e, A.PipelineExpr):
+            return self._emit_expr(self._reduce_pipeline(e))
         if isinstance(e, A.NumberLit):
             return e.value
         if isinstance(e, A.TextLit):
@@ -1096,6 +1296,95 @@ class Emitter:
         if op == "MOD":
             return f"MOD({left}, {right})"
         return f"({left} {op} {right})"
+
+    def _reduce_pipeline(self, pe: A.PipelineExpr) -> A.Expr:
+        """Reduce `source |> target` to a non-pipeline AST node.
+
+        Cases (target):
+          1. Ident(fn) where fn is @pipelined          → wrap as SELECT * FROM
+                                                          TABLE(fn(CURSOR(<source SQL>)))
+          2. Call(Ident(fn), args) where fn is @pipelined → same as (1) with extra args
+          3. Ident(method) ∈ {collect, one, first, ...} → method call on source
+          4. Call(Ident(method), args) ∈ {…}            → method call with args
+        Source is reduced first if it's itself a PipelineExpr.
+        """
+        source = pe.source
+        if isinstance(source, A.PipelineExpr):
+            source = self._reduce_pipeline(source)
+        target = pe.target
+        # Unwrap to (callee_name, args, type_args)
+        callee_name: Optional[str] = None
+        args: list[A.Expr] = []
+        type_args: list[A.TypeRef] = []
+        if isinstance(target, A.Ident):
+            callee_name = target.name
+        elif isinstance(target, A.Call) and isinstance(target.callee, A.Ident):
+            callee_name = target.callee.name
+            args = target.args
+            type_args = target.type_args
+        if callee_name is None:
+            raise EmitError(
+                "|> target must be a fn name or a method-style call (collect()/one()/…)",
+                pe.loc,
+            )
+        if callee_name in self._pipelined_fn_names:
+            return self._wrap_pipelined(source, callee_name, args, pe.loc)
+        # treat as a method on the (already-reduced) source
+        return A.Call(
+            loc=pe.loc,
+            callee=A.MemberAccess(loc=pe.loc, obj=source, field=callee_name),
+            args=args,
+            type_args=type_args,
+        )
+
+    def _wrap_pipelined(
+        self,
+        source: A.Expr,
+        fn_name: str,
+        extra_args: list[A.Expr],
+        loc: A.Loc,
+    ) -> A.SqlBlock:
+        """Synthesize `select <fields> from table(<fn>(cursor(<source>), <extra>)) t`.
+
+        We project the OBJECT's attributes by name so the downstream caller can
+        BULK COLLECT INTO a record-table whose fields match.
+        """
+        if not isinstance(source, A.SqlBlock):
+            raise EmitError(
+                "|> requires the upstream of a pipelined fn to be a sql!{ select ... } block",
+                loc,
+            )
+        # Look up the fn to find its return element type's fields
+        target_fn = next((f for f in self._fns if f.name == fn_name), None)
+        if target_fn is None:
+            raise EmitError(f"|> target {fn_name!r} not found in this module", loc)
+        elem = self._stream_element_type(target_fn.return_type)
+        if elem is None:
+            raise EmitError(
+                f"|> target {fn_name!r} must return stream<T>",
+                loc,
+            )
+        rec = self._lookup_record(elem)
+        if rec is None:
+            raise EmitError(
+                f"|> target {fn_name!r}: element type {elem!r} is not a declared record",
+                loc,
+            )
+        projection = ", ".join(f"t.{f.name.lower()}" for f in rec.fields)
+        inner_sql = source.sql.strip().rstrip(";")
+        extra = ", ".join(self._emit_expr(a) for a in extra_args)
+        extra_str = f", {extra}" if extra else ""
+        wrapped = (
+            f"select {projection} from table({fn_name.lower()}"
+            f"(cursor({inner_sql}){extra_str})) t"
+        )
+        return A.SqlBlock(
+            loc=loc,
+            sql=wrapped,
+            binds=source.binds,
+            is_dml=False,
+            has_returning=False,
+        )
 
     def _emit_text_lit(self, e: A.TextLit) -> str:
         """A text literal with `{expr}` placeholders lowers to `'lit ' || <expr>`.

@@ -108,6 +108,8 @@ END hello;
 | `xs.len()` / `xs.first()` / `xs.last()` / `xs.at(i)` | `09_bulk.pell` | direct lowerings to `xs.COUNT` / `xs.FIRST` / `xs.LAST` / `xs(i)` |
 | `for i in xs.indices() { ... }` | `09_bulk.pell` | `FOR i IN l_xs.FIRST .. l_xs.LAST LOOP` |
 | String interp with arbitrary expressions: `"x is {p.field}, n is {bulk.rowcount(i)}"` | `09_bulk.pell` | interpolation lexes + parses the brace content as a pell expression |
+| `@pipelined fn foo(rows: cursor<T>) -> stream<U> { for r in rows { yield U { … }; } }` | `10_pipelined.pell` | emits schema-level OBJECT + nested-table types, a `FUNCTION … RETURN U_nt PIPELINED` with bulk-FETCH/LIMIT loop, and `PIPE ROW(U_obj(…))` for yields |
+| `source |> fn |> collect()` | `10_pipelined.pell` | `|>` rewrites to `SELECT … FROM TABLE(fn(CURSOR(source))) t` and chains the terminator |
 
 ## What doesn't work yet
 

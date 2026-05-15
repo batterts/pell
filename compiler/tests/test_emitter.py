@@ -174,6 +174,77 @@ def test_no_size_on_param_types():
     assert "IN VARCHAR2" in sql
 
 
+def test_pipelined_emits_schema_types():
+    sql = compile_to_sql("""
+        module m;
+        pub record Src { id: number, n: number }
+        pub record Out { id: number, n: number }
+        @pipelined
+        pub fn pipe(rows: cursor<Src>) -> stream<Out> {
+          for s in rows {
+            yield Out { id: s.id, n: s.n * 2 };
+          }
+        }
+    """)
+    # OBJECT types for both Src (cursor element) and Out (yield element)
+    assert "CREATE OR REPLACE TYPE m_src_obj AS OBJECT" in sql
+    assert "CREATE OR REPLACE TYPE m_out_obj AS OBJECT" in sql
+    # Nested table for the return type
+    assert "CREATE OR REPLACE TYPE m_out_nt AS TABLE OF m_out_obj" in sql
+
+
+def test_pipelined_fn_signature():
+    sql = compile_to_sql("""
+        module m;
+        pub record Src { id: number }
+        pub record Out { id: number }
+        @pipelined
+        pub fn pipe(rows: cursor<Src>) -> stream<Out> {
+          for s in rows {
+            yield Out { id: s.id };
+          }
+        }
+    """)
+    assert "FUNCTION pipe(p_rows IN SYS_REFCURSOR) RETURN m_out_nt PIPELINED" in sql
+
+
+def test_pipelined_body_pipe_row_and_fetch():
+    sql = compile_to_sql("""
+        module m;
+        pub record Src { x: number }
+        pub record Out { y: number }
+        @pipelined
+        pub fn pipe(rows: cursor<Src>) -> stream<Out> {
+          for s in rows {
+            yield Out { y: s.x * 3 };
+          }
+        }
+    """)
+    assert "FETCH p_rows BULK COLLECT INTO" in sql
+    assert "LIMIT 100" in sql
+    assert "PIPE ROW(m_out_obj(" in sql
+    assert "CLOSE p_rows" in sql
+    assert "RETURN;" in sql
+
+
+def test_pipeline_pipe_operator():
+    sql = compile_to_sql("""
+        module m;
+        pub record Src { id: number }
+        pub record Out { id: number }
+        @pipelined
+        pub fn pipe(rows: cursor<Src>) -> stream<Out> {
+          for s in rows { yield Out { id: s.id }; }
+        }
+        pub fn caller() -> number {
+          let xs: list<Out> = sql! { select id from t } |> pipe |> collect();
+          return xs.len();
+        }
+    """)
+    assert "TABLE(PIPE(CURSOR(SELECT ID FROM T)))" in sql.upper()
+    assert "BULK COLLECT INTO l_xs" in sql
+
+
 def test_bulk_rowcount_and_total():
     sql = compile_to_sql("""
         module m;

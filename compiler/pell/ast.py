@@ -313,6 +313,25 @@ class ExprStmt(Stmt):
     expr: Expr
 
 
+@dataclass
+class YieldStmt(Stmt):
+    """`yield expr;` — only valid inside an @pipelined fn. Lowers to PL/SQL
+    `PIPE ROW(<obj_constructor>(...));`."""
+    value: Expr
+
+
+@dataclass
+class PipelineExpr(Expr):
+    """`source |> target` — pipe a SQL source through a @pipelined fn.
+
+    Lowers to `select * from table(<target>(cursor(<source>)))` (when source is
+    sql!{}) and back to a SQL iterator. If target is itself a method call like
+    `collect()`, it can apply to a previous pipeline stage.
+    """
+    source: Expr
+    target: Expr
+
+
 # ---------------------------------------------------------------------------
 # Top-level items
 # ---------------------------------------------------------------------------

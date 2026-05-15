@@ -1,0 +1,28 @@
+// Streaming table function — pell maps directly to PL/SQL PIPELINED.
+//
+// The @pipelined annotation, plus `cursor<T>` / `stream<T>` / `yield`, give
+// us Feuerstein's "Streaming Table Function" pattern: rows flow through the
+// transformation without being staged in a temp table.
+//
+// Caller uses `|>` to chain: `<sql source> |> <pipelined fn> |> <terminator>`.
+
+module market.feeds;
+
+pub record Stock  { sym: text, price: number }
+pub record Ticker { sym: text, price: number }
+
+// The pipelined transform: read Stocks, emit Tickers (1-to-N possible).
+@pipelined
+pub fn stockpivot(rows: cursor<Stock>) -> stream<Ticker> {
+  for s in rows {
+    yield Ticker { sym: s.sym, price: s.price * 1.10 };
+  }
+}
+
+// Caller: SQL source piped through the transform, materialized to a list.
+pub fn shifted_prices() -> number {
+  let tickers: list<Ticker> = sql! { select sym, price from stocktable }
+    |> stockpivot
+    |> collect();
+  return tickers.len();
+}

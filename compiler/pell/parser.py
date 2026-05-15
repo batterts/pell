@@ -322,6 +322,8 @@ class Parser:
             return self._parse_match_stmt()
         if self._at_keyword("transaction"):
             return self._parse_transaction_stmt()
+        if self._at_keyword("yield"):
+            return self._parse_yield_stmt()
         # expression-statement or assignment
         expr = self._parse_expr()
         if self._eat("EQ"):
@@ -465,6 +467,12 @@ class Parser:
             return A.LiteralPattern(loc=cur.loc, value=(cur.value == "true"))
         raise ParseError(f"expected pattern, got {cur.kind} ({cur.value!r})", cur.loc)
 
+    def _parse_yield_stmt(self) -> A.YieldStmt:
+        kw = self._expect("KW_YIELD")
+        value = self._parse_expr()
+        self._expect("SEMI")
+        return A.YieldStmt(loc=kw.loc, value=value)
+
     def _parse_transaction_stmt(self) -> A.TransactionStmt:
         kw = self._expect("KW_TRANSACTION")
         body = self._parse_block()
@@ -473,7 +481,14 @@ class Parser:
     # ---- expressions ----------------------------------------------------
 
     def _parse_expr(self) -> A.Expr:
-        return self._parse_logical_or()
+        return self._parse_pipeline()
+
+    def _parse_pipeline(self) -> A.Expr:
+        left = self._parse_logical_or()
+        while self._eat("PIPEGT"):
+            right = self._parse_logical_or()
+            left = A.PipelineExpr(loc=left.loc, source=left, target=right)
+        return left
 
     def _parse_logical_or(self) -> A.Expr:
         left = self._parse_logical_and()

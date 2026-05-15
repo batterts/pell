@@ -492,6 +492,100 @@ String interpolation `"foo {expr} bar"` accepts arbitrary `pell`
 expressions inside `{ ... }`, including method calls
 (`"got {bulk.rowcount(i)}"`). Use `{{` and `}}` to escape braces.
 
+### 4.5.6 Streaming table functions — `@pipelined`, `yield`, `|>`
+
+PL/SQL pipelined table functions let you stream rows through a
+transformation without materializing intermediate result sets. They're
+the right tool for big ETL-style pivots and per-row transforms that you
+want to chain into a SQL query.
+
+```pell
+pub record Stock  { sym: text, price: number }
+pub record Ticker { sym: text, price: number }
+
+@pipelined
+pub fn stockpivot(rows: cursor<Stock>) -> stream<Ticker> {
+  for s in rows {
+    yield Ticker { sym: s.sym, price: s.price * 1.10 };
+    // yield 0, 1, or many per input — the pivot pattern is just a
+    // multi-yield body.
+  }
+}
+
+// Caller — `|>` pipes a SQL source through the transform:
+let tickers: list<Ticker> = sql! { select sym, price from stocktable }
+  |> stockpivot
+  |> collect();
+```
+
+Lowers to (full output in `compiler/expected/10_pipelined.sql`):
+
+```plsql
+-- schema-level, emitted before the package:
+CREATE OR REPLACE TYPE market_feeds_stock_obj  AS OBJECT (sym VARCHAR2(4000), price NUMBER);
+/
+CREATE OR REPLACE TYPE market_feeds_ticker_obj AS OBJECT (sym VARCHAR2(4000), price NUMBER);
+/
+CREATE OR REPLACE TYPE market_feeds_ticker_nt  AS TABLE OF market_feeds_ticker_obj;
+/
+
+-- inside the package body:
+FUNCTION stockpivot(p_rows IN SYS_REFCURSOR)
+   RETURN market_feeds_ticker_nt PIPELINED
+IS
+  TYPE t_stock_buf IS TABLE OF market_feeds_stock_obj INDEX BY PLS_INTEGER;
+  l_s_buf t_stock_buf;
+BEGIN
+  LOOP
+    FETCH p_rows BULK COLLECT INTO l_s_buf LIMIT 100;
+    EXIT WHEN l_s_buf.COUNT = 0;
+    FOR i_s IN 1 .. l_s_buf.COUNT LOOP
+      PIPE ROW(market_feeds_ticker_obj(l_s_buf(i_s).sym, l_s_buf(i_s).price * 1.10));
+    END LOOP;
+  END LOOP;
+  CLOSE p_rows;
+  RETURN;
+END;
+
+-- caller:
+SELECT t.sym, t.price
+  BULK COLLECT INTO l_tickers
+  FROM TABLE(stockpivot(CURSOR(SELECT sym, price FROM stocktable))) t;
+```
+
+**Rules and constraints:**
+
+- The fn must carry `@pipelined`, take exactly one `cursor<T>` parameter,
+  and return `stream<U>` where `T` and `U` are both `pub record`s in the
+  current module.
+- The body must iterate the cursor with `for x in <cursor_param>` — that
+  loop lowers to the canonical PL/SQL bulk-fetch-with-LIMIT pattern. The
+  `LIMIT` is hard-coded to 100 in v0; an `@pipelined(batch = N)` arg is
+  a v0.x knob.
+- Inside the loop, `yield <Record> { fields… }` emits one row via
+  `PIPE ROW(<obj_constructor>(…))`. You can yield zero (filter), one
+  (map), or many (pivot/explode) per input row.
+- `|>` is left-associative. `source |> fn |> collect()` reduces to
+  `(source |> fn).collect()`, where the inner stage produces a synthetic
+  `sql!{ select … from table(fn(cursor(<source SQL>))) t }` and the outer
+  stage is the BULK COLLECT INTO terminator.
+- `|>` upstream of a pipelined fn must be a `sql!{ select … }` block.
+  Piping arbitrary expressions into a pipelined fn isn't legal in v0 —
+  the cursor wrap only knows how to wrap a SELECT.
+
+**Schema-level types:** every `@pipelined` fn adds two `CREATE OR REPLACE
+TYPE` statements (the OBJECT for the element + the nested table) plus,
+implicitly, one OBJECT per cursor input element type. They appear in the
+emitted `.sql` before the `CREATE OR REPLACE PACKAGE`. These are deploy
+artifacts that need to be applied before the package; `pell deploy` (M4)
+will sequence them automatically.
+
+**What this enables:** chaining transforms in pell as if they were Unix
+filters, with PL/SQL doing the actual streaming. The same pattern works
+for multi-stage chains: `source |> filter_fn |> enrich_fn |> collect()`
+lowers to a nested `TABLE(enrich_fn(CURSOR(SELECT … FROM TABLE(filter_fn(…)))))`
+expression — fully streaming, no intermediate staging.
+
 ### 4.6 Pipelines
 
 ```pell
