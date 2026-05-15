@@ -174,6 +174,65 @@ def test_no_size_on_param_types():
     assert "IN VARCHAR2" in sql
 
 
+def test_bulk_rowcount_and_total():
+    sql = compile_to_sql("""
+        module m;
+        pub fn run() {
+          let xs: list<number> = [1, 2, 3];
+          forall x in xs {
+            sql! { insert into t(n) values (:x) };
+          }
+          for i in xs.indices() {
+            log::info("rows: {bulk.rowcount(i)} total {bulk.total()}");
+          }
+        }
+    """)
+    assert "SQL%BULK_ROWCOUNT(i)" in sql
+    assert "SQL%ROWCOUNT" in sql
+
+
+def test_list_accessor_methods():
+    sql = compile_to_sql("""
+        module m;
+        pub fn run() -> number {
+          let xs: list<number> = [10, 20, 30];
+          let n = xs.len();
+          let first = xs.first();
+          let last = xs.last();
+          let third = xs.at(3);
+          return n + first + last + third;
+        }
+    """)
+    assert "l_xs.COUNT" in sql
+    assert "l_xs.FIRST" in sql
+    assert "l_xs.LAST" in sql
+    assert "l_xs(3)" in sql
+
+
+def test_for_indices_loop():
+    sql = compile_to_sql("""
+        module m;
+        pub fn run() {
+          let xs: list<number> = [1, 2, 3];
+          for i in xs.indices() {
+            log::info("at {i}");
+          }
+        }
+    """)
+    assert "FOR i IN l_xs.FIRST .. l_xs.LAST LOOP" in sql
+
+
+def test_interpolation_supports_method_calls():
+    sql = compile_to_sql("""
+        module m;
+        pub fn run() {
+          let xs: list<number> = [1];
+          log::info("len is {xs.len()}");
+        }
+    """)
+    assert "'len is ' || l_xs.COUNT" in sql
+
+
 def test_forall_bulk_insert():
     sql = compile_to_sql("""
         module m;

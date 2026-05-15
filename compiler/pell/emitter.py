@@ -807,6 +807,25 @@ class Emitter:
             self._loop_vars.pop()
             out.append(f"{indent}END LOOP;")
             return out
+        # `for i in xs.indices()` — iterate integer index range FIRST..LAST
+        if (
+            isinstance(s.iterable, A.Call)
+            and isinstance(s.iterable.callee, A.MemberAccess)
+            and s.iterable.callee.field == "indices"
+            and isinstance(s.iterable.callee.obj, A.Ident)
+            and s.iterable.callee.obj.name in self._list_locals
+            and not s.iterable.args
+        ):
+            list_local = local_name(s.iterable.callee.obj.name)
+            out = [
+                f"{indent}FOR {s.var_name} IN {list_local}.FIRST .. {list_local}.LAST LOOP"
+            ]
+            self._loop_vars.append({s.var_name})
+            for stmt in s.body:
+                out.extend(self._emit_stmt(stmt, indent + "  "))
+            self._loop_vars.pop()
+            out.append(f"{indent}END LOOP;")
+            return out
         # for x in <list-typed local>: iterate via assoc-array FOR loop
         if isinstance(s.iterable, A.Ident) and s.iterable.name in self._list_locals:
             list_local = local_name(s.iterable.name)
@@ -1079,35 +1098,61 @@ class Emitter:
         return f"({left} {op} {right})"
 
     def _emit_text_lit(self, e: A.TextLit) -> str:
-        """A text literal with `{name}` placeholders lowers to `'lit ' || name`.
+        """A text literal with `{expr}` placeholders lowers to `'lit ' || <expr>`.
 
-        Only simple identifier interpolation is supported in v0; complex
-        `{a.b}` etc. are emitted as concatenations of those identifiers (the
-        rest of the expression lowering kicks in).
+        The placeholder content is lexed and parsed as a pell expression, so
+        identifiers, member access, and method calls all work
+        (`{name}`, `{p.field}`, `{bulk.rowcount(i)}`).
+        Brace doubling escapes: `{{` → `{`, `}}` → `}`.
         """
         import re
+        from .lexer import tokenize
+        from .parser import Parser, ParseError
         s = e.value
-        if "{" not in s:
+        if "{" not in s and "}" not in s:
             return _sql_string(s)
-        parts = re.split(r"\{([A-Za-z_][A-Za-z0-9_.]*)\}", s)
-        # parts alternates: literal, name, literal, name, ...
+        # walk the string, accumulating literal runs and {expr} interpolations
         chunks: list[str] = []
-        for i, p in enumerate(parts):
-            if i % 2 == 0:
-                if p:
-                    chunks.append(_sql_string(p))
-            else:
-                # name may contain `.` for field access; treat as `obj.field`
-                if "." in p:
-                    head, *rest = p.split(".")
-                    expr = self._lower_ident(head)
-                    for r in rest:
-                        expr = f"{expr}.{r.lower()}"
-                    chunks.append(expr)
-                else:
-                    chunks.append(self._lower_ident(p))
+        buf: list[str] = []
+        i = 0
+        while i < len(s):
+            ch = s[i]
+            if ch == "{" and i + 1 < len(s) and s[i + 1] == "{":
+                buf.append("{")
+                i += 2
+                continue
+            if ch == "}" and i + 1 < len(s) and s[i + 1] == "}":
+                buf.append("}")
+                i += 2
+                continue
+            if ch == "{":
+                # find the matching `}` (no nested {} expected in v0)
+                end = s.find("}", i + 1)
+                if end == -1:
+                    raise EmitError(f"unterminated `{{` in string literal at {e.loc}", e.loc)
+                if buf:
+                    chunks.append(_sql_string("".join(buf)))
+                    buf = []
+                expr_src = s[i + 1 : end]
+                try:
+                    expr_toks = tokenize(expr_src, str(e.loc))
+                    p = Parser(expr_toks)
+                    sub_expr = p._parse_expr()
+                except (ParseError, Exception) as err:
+                    raise EmitError(
+                        f"bad interpolation `{{{expr_src}}}`: {err}", e.loc
+                    )
+                chunks.append(self._emit_expr(sub_expr))
+                i = end + 1
+                continue
+            buf.append(ch)
+            i += 1
+        if buf:
+            chunks.append(_sql_string("".join(buf)))
         if not chunks:
             return "''"
+        if len(chunks) == 1:
+            return chunks[0]
         return "(" + " || ".join(chunks) + ")"
 
     def _emit_call_expr(self, e: A.Call) -> str:
@@ -1115,6 +1160,29 @@ class Emitter:
         if isinstance(e.callee, A.MemberAccess):
             recv = e.callee.obj
             method = e.callee.field
+            # bulk.rowcount(i) / bulk.total() — magic accessors valid right after
+            # a FORALL or any DML; lowered to SQL%BULK_ROWCOUNT(i) / SQL%ROWCOUNT.
+            # The compiler does not yet enforce "must follow a FORALL" statically.
+            if isinstance(recv, A.Ident) and recv.name == "bulk":
+                if method == "rowcount" and len(e.args) == 1:
+                    return f"SQL%BULK_ROWCOUNT({self._emit_expr(e.args[0])})"
+                if method == "total" and not e.args:
+                    return "SQL%ROWCOUNT"
+                raise EmitError(
+                    f"unknown bulk.{method}; expected `bulk.rowcount(i)` or `bulk.total()`",
+                    e.loc,
+                )
+            # List-typed receivers: .len() / .first() / .last() / .at(i)
+            if isinstance(recv, A.Ident) and recv.name in self._list_locals:
+                list_local = local_name(recv.name)
+                if method == "len" and not e.args:
+                    return f"{list_local}.COUNT"
+                if method == "first" and not e.args:
+                    return f"{list_local}.FIRST"
+                if method == "last" and not e.args:
+                    return f"{list_local}.LAST"
+                if method == "at" and len(e.args) == 1:
+                    return f"{list_local}({self._emit_expr(e.args[0])})"
             if method == "into" and e.type_args:
                 # value.into::<T>() — for the MVP we just copy fields, but here in
                 # expression position we can't easily decompose; rely on type compatibility.

@@ -12,7 +12,6 @@ CREATE OR REPLACE PACKAGE BODY bulk_demo AS
 
   PROCEDURE insert_many IS
     l_nums t_number_list;
-    l_n_iter NUMBER;
   BEGIN
     l_nums(1) := 1;
     l_nums(2) := 3;
@@ -21,24 +20,21 @@ CREATE OR REPLACE PACKAGE BODY bulk_demo AS
     l_nums(5) := 11;
     FORALL i_n IN l_nums.FIRST .. l_nums.LAST
       insert into num_table(n) values (l_nums(i_n));
-    FOR i_n IN l_nums.FIRST .. l_nums.LAST LOOP
-      l_n_iter := l_nums(i_n);
-      log.info(('queued ' || l_n_iter));
+    FOR i IN l_nums.FIRST .. l_nums.LAST LOOP
+      log.info(('Inserted ' || SQL%BULK_ROWCOUNT(i) || ' row(s) on iteration ' || i));
     END LOOP;
   END insert_many;
 
   FUNCTION read_all RETURN NUMBER IS
     l_rows t_number_list;
     l_total NUMBER;
-    l_r_iter NUMBER;
   BEGIN
     select n
       BULK COLLECT INTO l_rows
       FROM num_table order by n;
     l_total := 0;
-    FOR i_r IN l_rows.FIRST .. l_rows.LAST LOOP
-      l_r_iter := l_rows(i_r);
-      l_total := (l_total + l_r_iter);
+    FOR i IN l_rows.FIRST .. l_rows.LAST LOOP
+      l_total := (l_total + l_rows(i));
     END LOOP;
     RETURN l_total;
   END read_all;
