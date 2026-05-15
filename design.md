@@ -127,10 +127,16 @@ fn promote(id: number) -> Result<Unit, NotFound | PolicyViolation> {
 Key points:
 
 - `Result<T, E>` and `Option<T>` are part of the prelude. `?` propagates on
-  either; for `Option`, it propagates the *current function's* declared error
-  variant (`NotFound` is inferred for `find_employee` because the iterator
-  helper `.first()` returns `Result<Row, NotFound>` when called on a SQL
-  iterator — see §5).
+  either: on `Result<T, E>`, the `E` must be assignable into the enclosing
+  fn's declared error union. On `Option<T>`, the `?` desugars to
+  `match { Some(v) -> v, None -> return Err(<from_none>) }` and requires the
+  enclosing fn's error union to contain a variant marked
+  `@from_none_of(<call site type>)`. In the prelude, `NotFound` is so marked
+  for `Option<Row>` produced by `.first()`. (This avoids the surprise of `?`
+  on a plain `Option<T>` silently converting to whatever single variant
+  happens to be in scope.) In the example above, `find_employee`'s declared
+  `NotFound` is what `?` propagates to — and only because `NotFound` is the
+  prelude variant for the `Option<Row>` → `Result<Row, _>` conversion.
 - Errors form a closed sum at each function boundary (`E1 | E2`); callers must
   handle or re-declare them. There is no implicit `WHEN OTHERS`.
 - When emitted to PL/SQL, each `error` becomes a numbered `EXCEPTION` plus a
@@ -151,6 +157,17 @@ match promote(emp_id) {
 Non-exhaustive matches are a compile error. There is no `_ -> ...` catch-all
 unless explicitly written; if written, the compiler warns if all variants are
 already covered.
+
+**Recompilation hazard.** Exhaustiveness is checked against the *callee's
+currently declared* error union. If a callee adds a new variant to its
+signature (`Result<T, A | B>` → `Result<T, A | B | C>`), every caller's
+exhaustive `match` becomes non-exhaustive on the next compile — which is a
+hard error, not a silent fall-through. This is by design: adding an error
+variant is a breaking change to the function's signature, and we want the
+type system to surface it. The mitigation for callers who really want to
+absorb future variants is to write an explicit `Err(_) -> …` arm and accept
+the "all variants already covered" warning that arm currently produces;
+that warning is downgraded to silence as soon as a new variant exists.
 
 ### 4.5 SQL embedding
 
@@ -256,16 +273,43 @@ fn compound(p: number, r: number, n: number) -> number {
 
 - Primitives: `number(p, s)`, `int`, `text`, `bool`, `date`, `timestamp`,
   `interval`, `bytes`, `json`.
-- `T?` for nullable; `Option<T>` is a library alias.
+- `T?` for nullable; **`Option<T>` is the canonical name and `T?` is sugar
+  that desugars to it before type checking**. They are *the same type*,
+  not two types that print the same way. Consequences:
+    - `T??` is rejected at parse time; nesting `Option` requires the explicit
+      `Option<Option<T>>` form (and is legal, since the inner and outer
+      `None`/`Some(None)` are distinguishable at runtime — see lowering).
+    - There is exactly one `None` constructor per type instantiation.
+    - The PL/SQL lowering of an `Option<T>` field is **not** "a `T` slot with
+      NULL allowed". It is an object type `option_T(tag pls_integer, val T)`,
+      with `tag = 0` for `None` and `tag = 1` for `Some`. Plain non-`Option`
+      fields lower with `NOT NULL` constraints as before; `Option<T>` fields
+      do not (the tag distinguishes presence). This means `Option<Option<T>>`
+      is representable: the outer tag and inner tag are independent.
+    - Scalar `Option<T>` *parameters* and *locals* of a primitive `T` may, as
+      an optimization, lower to a bare nullable `T` slot when the compiler
+      can prove the `Option` never nests and never crosses a generic
+      boundary. This optimization is invisible to the surface language.
 - `Result<T, E>` where `E` may be a single error type or a `|` union of error
-  types declared in scope.
-- `record { … }` — nominal, structural conversion only via explicit `.into`.
+  types declared in scope. Error unions are **closed structural sums**,
+  normalized by the typer to a canonical, deduplicated, sorted form:
+  `A | B | A` and `B | A` are the *same* type. `Result<T, E1>` is *not* a
+  subtype of `Result<T, E1 | E2>`; widening across a call boundary is
+  inserted by the typer at the call site. `E` may be empty (`Result<T, !>`
+  is the prelude `Infallible`); `?` on such a value is a no-op.
+- `record { … }` — nominal: two records with identical fields but different
+  names are different types. Structural conversion is opt-in via `.into`
+  (see §5.1.5).
 - `enum` — closed sum with payloads (lower to integer discriminator + per-arm
   record fields, or to a JSON tagged object when stored in a column).
 - `list<T>`, `map<K,V>`, `set<T>` — see §5.1 for the surface API and the
   PL/SQL collection types each one lowers to.
-- No generics in v1 *except* for the built-ins above. Reconsider in v2 once we
-  see real pain.
+- No user-written generics in v1. The built-ins `Option`, `Result`, `list`,
+  `map`, `set` are compiler-intrinsic: each instantiation `Option<Employee>`,
+  `list<number>`, etc. is monomorphized by the emitter into a concrete
+  PL/SQL type with a mangled name. Methods on these intrinsics (`xs.first()`,
+  `opt.expect(msg)`) are also intrinsic — they are *not* evidence of a
+  general generic-method facility. See §11.3.
 - No traits/interfaces in v1. Function overloading is also out.
 
 ### 5.1 Collections — one surface, three backing types
@@ -408,8 +452,19 @@ PL/SQL associative arrays only index by `PLS_INTEGER` or `VARCHAR2(N)`.
 Anything else is a compile error in v1. The canonicalization rules live in
 the prelude as `Key::to_key(&self) -> text` (or `pls_integer`); user records
 opt in with `derive Key`, which generates a deterministic key from the
-record's fields in declaration order. No `Hash` trait, no rebalancing
-concerns — PL/SQL handles the hashing under the hood.
+record's fields in declaration order (see §5.1.6). No `Hash` trait, no
+rebalancing concerns — PL/SQL handles the hashing under the hood.
+
+**Key-width overflow.** For `map<text, V>` (default `varchar2(4000)`) or
+`map<text(N), V>`, attempting to `insert`, look up, or remove with a key
+whose UTF-8 byte length exceeds the declared width is a **runtime invariant
+panic** (§6.5.1), not a truncation and not a regular error. Rationale:
+truncation aliases distinct keys, and surfacing a `Result<…, KeyTooLong>`
+on every map operation would poison the ergonomics of the most common
+collection. Callers who can produce unbounded keys must hash or truncate
+*before* the map boundary — and pick the policy explicitly. The compiler
+emits a static warning if it can prove the key expression's type is
+`text(M)` with `M > N`.
 
 ### 5.1.4 SQL bridging
 
@@ -431,6 +486,54 @@ This is the only place the surface language exposes the difference between
 the backing types, and it's intentional — silently copying a 10M-entry map
 into a nested table to satisfy SQL would be a foot-gun worse than naming the
 copy.
+
+### 5.1.5 Record conversion: `.into`
+
+`record` is nominal; `Row` returned from a `sql!{}` is its own anonymous
+nominal type. `value.into::<Target>()` is the *only* way to cross record
+identities. It is compiler-derived, not reflective:
+
+- The typer accepts the conversion iff `Target`'s fields are a subset of the
+  source's fields *by name and type* (or by name and `T → Option<T>`
+  widening). Extra fields on the source are dropped; missing fields on the
+  target are a compile error.
+- There is no user-written `impl Into for X`. v1 ships exactly one form: the
+  derived field-by-field copy. If you need a transformation, write a regular
+  `fn`.
+- `.into` between two declared `record` types still requires the same
+  structural compatibility; the nominal distinction is preserved everywhere
+  *except* at the explicit `.into` call.
+
+### 5.1.6 `derive Key` — canonical encoding
+
+A record annotated `derive Key` may be used as `K` in `map<K, V>`. The
+generated `to_key()` produces a `varchar2` from the fields in declaration
+order, using a length-prefixed encoding that is collision-free across all
+field types currently allowed:
+
+- each field is encoded as `<len>:<canonical>` where `<canonical>` is the
+  type's own `to_key` form (ISO-8601 for dates, `to_char` with full
+  precision for numbers, the bytes themselves quoted for `text`),
+- fields are joined with an unambiguous separator (`\x1f`),
+- the record's type identity is prefixed (`module.RecordName|`) so two
+  records of different types with identical fields produce different keys.
+
+**Restrictions enforced by the typer** (anything else is a compile error
+in v1):
+
+- All fields must themselves be `Key`-eligible primitives or nested
+  `derive Key` records.
+- **`list<T>`, `map<K,V>`, `set<T>`, `Option<T>`, and `json` fields cannot
+  appear in a `derive Key` record.** Their canonical encoding is either
+  undefined (`json`) or invites footguns (deep equality on a 10k-element
+  list at every map probe). If you need them, write a regular `fn` that
+  derives a key explicitly and use `map<text, V>` keyed by its output.
+
+The total encoded length must fit in the map's key width
+(default `varchar2(4000)`). Exceeding it is a **runtime panic** (§6.5.1),
+not a silent truncation — silent truncation would cause aliasing of
+distinct keys, which is exactly the bug `derive Key` exists to prevent.
+See §5.1.3 for the parallel rule on `map<text(N), V>`.
 
 ## 6. Error model — deeper dive
 
@@ -602,6 +705,22 @@ This gives Shaun's two cases distinct, syntactically obvious forms:
 
 Generalization: `.expect` / `.unwrap` are also available on `Option<T>` and
 `Result<T, E>` everywhere, not just on SQL terminators. Same semantics.
+
+**Composition.** `.expect` and `.unwrap` peel exactly **one** layer. Their
+return types are:
+
+| Receiver | `.expect(msg)` returns |
+|---|---|
+| `Option<T>` | `T` (panics on `None`) |
+| `Result<T, E>` | `T` (panics on any `Err`, message includes the variant) |
+| `Result<Option<T>, E>` | `Option<T>` (panics on `Err`, *not* on `Ok(None)`) |
+| `Option<Result<T, E>>` | `Result<T, E>` (panics on `None`) |
+
+To collapse both layers, chain: `r.expect("e").expect("none")`. There is no
+silent double-unwrap. The first form is the most common stumble — a caller
+who writes `find_user(id).expect("must exist")` against a fn returning
+`Result<Option<User>, DbError>` gets an `Option<User>` back and a type
+error one line later, which is the right outcome.
 
 ### 6.6 Lowering strategy (errors)
 
@@ -777,7 +896,7 @@ LSP do.
 | Annotation | Target | Effect |
 |---|---|---|
 | `@deprecated("reason")` | fn, record, error | Warning at every call/use site; appears in `pell doc` output and LSP hover. |
-| `@must_use` | fn | Caller must bind, `match`, or `?` the return value. Default for any fn returning `Result<…>`; opt-in elsewhere. |
+| `@must_use` | fn | Caller must bind, `match`, or `?` the return value. **Default for any fn returning `Result<…>` or `Option<T>` (equivalently `T?`).** Opt-in elsewhere. Discarding the result of such a fn requires an explicit `let _ = …` to make the intent visible at the call site. |
 | `@panics("when …")` | fn | Documents that the fn may raise an invariant violation (§6.5.1). Surfaces in LSP hover so callers can see it without reading the body. |
 | `@unsafe` | fn | Calling it requires an `unsafe { … }` block. Used by `unsafe::cursor!{}` and any FFI. |
 
@@ -841,9 +960,18 @@ ergonomics. Go is a close second. Python is rejected for distribution reasons.
    bind-var typos and unknown columns at compile time), or treat it as an
    opaque string and rely on the DB to validate at deploy time? *Bias*: parse
    enough to extract binds and column names; let the DB validate semantics.
-3. **Generics**: any in v1, or none? Leaning **none**, because PL/SQL has no
-   parametric polymorphism and monomorphizing across the type universe is
-   painful. Library code (`Option`, `Result`, `list`) is compiler-blessed.
+3. **Generics**: any in v1, or none? Leaning **none for user code**, because
+   PL/SQL has no parametric polymorphism and monomorphizing across an open
+   type universe is painful. Library code (`Option`, `Result`, `list`,
+   `map`, `set`) is compiler-intrinsic: each used instantiation is
+   monomorphized into a uniquely named PL/SQL type at emit time, with the
+   set of instantiations closed over what the whole project actually uses.
+   Methods on these intrinsics (`xs.first()`, `opt.expect(…)`, `r?`) are
+   typed and lowered by the compiler per instantiation — this is *not*
+   evidence of a general generic-method facility, and any future v2
+   generics proposal needs its own design pass (especially: how to keep
+   PL/SQL type-name explosion bounded when `pub fn foo<T>` can be
+   instantiated by downstream packages).
 4. **DDL**: in scope or out? *Bias*: out for v1. Tables/indexes/sequences stay
    in plain `.sql`. `pell` only generates packages, types, and triggers.
 5. **Triggers**: support as a first-class construct (`trigger on employees
