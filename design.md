@@ -411,6 +411,64 @@ Constraints, enforced by the typer:
 - Mutually exclusive with `.nowait()` / `.wait(N)` / `.skip_locked()` — the
   typer enforces "at most one wait policy."
 
+### 4.5.5 Bulk DML — `forall` and `BULK COLLECT INTO`
+
+Two related forms, both leaning on PL/SQL's bulk-binding mechanics.
+
+**`forall x in xs { sql! { … :x … } }`** lowers to PL/SQL `FORALL`. The
+loop body must be exactly one DML `sql!{}` statement; the loop variable
+substitutes directly into bind references as `<list_local>(i_<x>)` (no
+intermediate per-iteration local, since `FORALL` uses the iterator as the
+bind-array index directly):
+
+```pell
+let nums: list<number> = [1, 3, 5, 7, 11];
+forall n in nums {
+  sql! { insert into num_table(n) values (:n) };
+}
+```
+
+lowers to:
+
+```plsql
+TYPE t_number_list IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
+l_nums t_number_list;
+…
+l_nums(1) := 1; l_nums(2) := 3; l_nums(3) := 5; l_nums(4) := 7; l_nums(5) := 11;
+FORALL i_n IN l_nums.FIRST .. l_nums.LAST
+  insert into num_table(n) values (l_nums(i_n));
+```
+
+Constraints, enforced by the typer:
+
+- Body must be exactly one DML `sql!{}` (insert/update/delete/merge).
+  Anything else is a compile error — `FORALL` doesn't allow general PL/SQL
+  in its body.
+- Iterable must be a list-typed local.
+
+**`.collect()` on a read iterator** lowers to `SELECT … BULK COLLECT INTO`.
+The target's element type is taken from the surrounding `let`'s annotation:
+
+```pell
+let rows: list<number> = sql! {
+  select n from num_table order by n
+}.collect();
+```
+
+lowers to:
+
+```plsql
+l_rows t_number_list;
+…
+SELECT n
+  BULK COLLECT INTO l_rows
+  FROM num_table ORDER BY n;
+```
+
+Open question for v0.x: `SQL%BULK_ROWCOUNT(i)` — the per-iteration affected
+row count after a `FORALL`. No surface for it yet; a `.bulk_rowcount(i)`
+accessor on the iteration index is the obvious shape.
+
 ### 4.6 Pipelines
 
 ```pell

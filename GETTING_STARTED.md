@@ -100,6 +100,10 @@ END hello;
 | `.for_update()` / `.nowait()` / `.skip_locked()` / `.wait(N)` / `.for_update_of(cols)` | `07_full.pell` | locking modifiers on read iterators |
 | `pell runtime` CLI subcommand | — | aggregates all error decls from a project into a merged `pell_runtime.sql` |
 | `fn name() { ... } finally { ... }` | `08_finally.pell` | nested `pell_finally_body` procedure called on both success and error paths; RAISE on error path |
+| `let xs: list<T> = [v1, v2, ...]` | `09_bulk.pell` | declares `TYPE t_T_list IS TABLE OF T INDEX BY PLS_INTEGER` at the package body, emits per-index assignments |
+| `for x in xs { ... }` over a list | `09_bulk.pell` | `FOR i_x IN l_xs.FIRST .. l_xs.LAST LOOP` with a shadow local for the loop variable |
+| `forall x in xs { sql! { ... :x ... } }` | `09_bulk.pell` | emits PL/SQL `FORALL` over the list; body must be a single DML sql!{}; `:x` substitutes directly to `l_xs(i_x)` |
+| `let rows: list<T> = sql! { select … }.collect();` | `09_bulk.pell` | emits `SELECT … BULK COLLECT INTO l_rows FROM …` and declares the assoc-array list type |
 
 ## What doesn't work yet
 
