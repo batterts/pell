@@ -23,9 +23,9 @@ CREATE OR REPLACE PACKAGE BODY billing_charges AS
     l_src t_account;
   BEGIN
     DECLARE
-      l_committed BOOLEAN := FALSE;
+      l_committed_0 BOOLEAN := FALSE;
     BEGIN
-      SAVEPOINT pell_sp;
+      SAVEPOINT pell_sp_0;
       BEGIN
         select id, balance
       INTO l_src
@@ -41,10 +41,10 @@ CREATE OR REPLACE PACKAGE BODY billing_charges AS
       update accounts set balance = balance - p_amt where id = p_from_id;
       update accounts set balance = balance + p_amt where id = p_to_id;
       COMMIT;
-      l_committed := TRUE;
+      l_committed_0 := TRUE;
     EXCEPTION
       WHEN OTHERS THEN
-        IF NOT l_committed THEN ROLLBACK TO pell_sp; END IF;
+        IF NOT l_committed_0 THEN ROLLBACK TO pell_sp_0; END IF;
         RAISE;
     END;
     RETURN;

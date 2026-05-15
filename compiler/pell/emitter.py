@@ -143,6 +143,9 @@ class Emitter:
         self._local_types: dict[str, str] = {}
         # cursor FOR-loop variables in scope — referenced bare, no l_ prefix
         self._loop_vars: list[set[str]] = []
+        # stack of "currently inside a transaction" — outer-most flag identifier
+        # we use to mark committed.
+        self._tx_stack: list[str] = []
         # collected once per module
         self._records: list[A.RecordDef] = [i for i in module.items if isinstance(i, A.RecordDef)]
         self._errors: list[A.ErrorDef] = [i for i in module.items if isinstance(i, A.ErrorDef)]
@@ -590,18 +593,25 @@ class Emitter:
             self._current_fn is not None
             and (self._current_fn.return_type is None or _is_unit_like(self._current_fn.return_type))
         )
+        prefix: list[str] = []
+        # If we're inside one or more transaction blocks, commit them before
+        # returning normally. Err returns raise and let the handler roll back.
+        if self._tx_stack and not (s.value is not None and isinstance(s.value, A.ErrExpr)):
+            for flag in self._tx_stack:
+                prefix.append(f"{indent}COMMIT;")
+                prefix.append(f"{indent}{flag} := TRUE;")
         if s.value is None:
-            return [f"{indent}RETURN;"]
+            return prefix + [f"{indent}RETURN;"]
         # `return Err(...)` → set payload + RAISE (always, even in procedures)
         if isinstance(s.value, A.ErrExpr):
             return self._emit_err_return(s.value.inner, indent)
         # In a procedure, the value is conventionally Ok(()); just RETURN;
         if is_proc:
-            return [f"{indent}RETURN;"]
+            return prefix + [f"{indent}RETURN;"]
         # `return Ok(x)` → RETURN x;
         if isinstance(s.value, A.OkExpr):
-            return [f"{indent}RETURN {self._emit_expr(s.value.inner)};"]
-        return [f"{indent}RETURN {self._emit_expr(s.value)};"]
+            return prefix + [f"{indent}RETURN {self._emit_expr(s.value.inner)};"]
+        return prefix + [f"{indent}RETURN {self._emit_expr(s.value)};"]
 
     def _emit_err_return(self, payload_expr: A.Expr, indent: str) -> list[str]:
         """Lower `return Err(<variant>)` to: set SYS_CONTEXT payload + RAISE."""
@@ -750,21 +760,24 @@ class Emitter:
         return "TRUE  -- TODO: pattern"
 
     def _emit_transaction(self, s: A.TransactionStmt, indent: str) -> list[str]:
-        sp = "pell_sp"
+        sp = f"pell_sp_{len(self._tx_stack)}"
+        committed_flag = f"l_committed_{len(self._tx_stack)}"
         out = [
             f"{indent}DECLARE",
-            f"{indent}  l_committed BOOLEAN := FALSE;",
+            f"{indent}  {committed_flag} BOOLEAN := FALSE;",
             f"{indent}BEGIN",
             f"{indent}  SAVEPOINT {sp};",
         ]
+        self._tx_stack.append(committed_flag)
         for stmt in s.body:
             out.extend(self._emit_stmt(stmt, indent + "  "))
+        self._tx_stack.pop()
         out += [
             f"{indent}  COMMIT;",
-            f"{indent}  l_committed := TRUE;",
+            f"{indent}  {committed_flag} := TRUE;",
             f"{indent}EXCEPTION",
             f"{indent}  WHEN OTHERS THEN",
-            f"{indent}    IF NOT l_committed THEN ROLLBACK TO {sp}; END IF;",
+            f"{indent}    IF NOT {committed_flag} THEN ROLLBACK TO {sp}; END IF;",
             f"{indent}    RAISE;",
             f"{indent}END;",
         ]

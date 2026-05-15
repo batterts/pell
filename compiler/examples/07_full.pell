@@ -1,0 +1,111 @@
+// A more realistic module exercising most of v0:
+//   records, typed errors, Result, ? propagation,
+//   sql!{} reads (with .one()? and .first()),
+//   sql!{} writes (with .returning::<T>().one() and .rowcount()),
+//   transactions, for-update locking, annotations,
+//   string interpolation, error returns, and field access.
+
+module orders.fulfillment;
+
+import std::log;
+
+pub record Order {
+  id: number,
+  customer_id: number,
+  status: text,
+  total: number,
+}
+
+pub record OrderLine {
+  id: number,
+  order_id: number,
+  sku_id: number,
+  qty: number,
+}
+
+pub error OrderNotFound { id: number }
+pub error InvalidStatus { id: number, status: text }
+pub error InsufficientInventory { sku_id: number, requested: number, available: number }
+
+pub fn fetch_order(id: number) -> Result<Order, OrderNotFound> {
+  let row = sql! {
+    select id, customer_id, status, total from orders where id = :id
+  }.one()?;
+  return Ok(row);
+}
+
+@deterministic
+@result_cache
+pub fn count_lines(order_id: number) -> number {
+  let n = sql! {
+    select count(*) from order_lines where order_id = :order_id
+  }.one();
+  return n;
+}
+
+pub fn add_line(order_id: number, sku_id: number, qty: number)
+  -> Result<number, OrderNotFound | InsufficientInventory>
+{
+  transaction {
+    // annotate because row type differs from this fn's Result<number, _>
+    let ord: Order = sql! {
+      select id, customer_id, status, total from orders where id = :order_id
+    }.for_update().one()?;
+
+    let available: number = sql! {
+      select qty from skus where id = :sku_id
+    }.for_update().one();
+
+    if available < qty {
+      return Err(InsufficientInventory {
+        sku_id: sku_id,
+        requested: qty,
+        available: available,
+      });
+    }
+
+    sql! {
+      update skus set qty = qty - :qty where id = :sku_id
+    };
+
+    let new_line_id = sql! {
+      insert into order_lines(order_id, sku_id, qty)
+      values (:order_id, :sku_id, :qty)
+      returning id
+    }
+      .returning::<number>()
+      .one();
+
+    log::info("added line {new_line_id} to order {order_id}");
+    return Ok(new_line_id);
+  }
+  return Err(OrderNotFound { id: order_id });
+}
+
+@autonomous
+pub fn audit(event: text, order_id: number) {
+  sql! {
+    insert into audit_log(event, order_id, occurred_at)
+    values (:event, :order_id, sysdate)
+  };
+}
+
+pub fn cancel_stale() -> number {
+  let n = sql! {
+    update orders set status = 'cancelled'
+    where status = 'pending'
+    and created_at < sysdate - 7
+  }.rowcount();
+  return n;
+}
+
+pub fn print_recent(after: date) {
+  for row in sql! {
+    select id, status, total
+    from orders
+    where created_at >= :after
+    order by created_at desc
+  } {
+    log::info("order {row.id}: {row.status}");
+  }
+}
