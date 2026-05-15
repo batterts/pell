@@ -141,6 +141,14 @@ class Emitter:
         self._current_fn: Optional[A.FnDef] = None
         # local-name -> declared PL/SQL type (so we can pick record-field projections)
         self._local_types: dict[str, str] = {}
+        # module-level list-of-T types we've already declared (so we don't redeclare)
+        self._list_types_emitted: set[str] = set()
+        # list-type declarations to inject into the package body header
+        self._list_type_decls: list[str] = []
+        # which locals are lists (kept so for-loops over them iterate correctly)
+        self._list_locals: dict[str, str] = {}  # name -> element type spelling
+        # name → PL/SQL identifier override (used by list-loop shadows)
+        self._loop_var_override: dict[str, str] = {}
         # cursor FOR-loop variables in scope — referenced bare, no l_ prefix
         self._loop_vars: list[set[str]] = []
         # stack of "currently inside a transaction" — outer-most flag identifier
@@ -209,16 +217,23 @@ class Emitter:
         return "\n".join(out)
 
     def _emit_body(self) -> str:
+        # walk fns first so list-type declarations get registered
+        fn_chunks: list[str] = []
+        for fn in self._fns:
+            fn_chunks.append(self._fn_body(fn))
         out: list[str] = []
         out.append(f"CREATE OR REPLACE PACKAGE BODY {self.pkg} AS")
         # private record types
         for rec in self._records:
             if not rec.is_pub:
                 out.append(self._render_record_type(rec, indent="  "))
+        # collected list types (assoc array INDEX BY PLS_INTEGER)
+        for decl in self._list_type_decls:
+            out.append(decl)
         # all fns
-        for fn in self._fns:
+        for chunk in fn_chunks:
             out.append("")
-            out.append(self._fn_body(fn))
+            out.append(chunk)
         out.append(f"END {self.pkg};")
         out.append("/")
         return "\n".join(out)
@@ -284,6 +299,7 @@ class Emitter:
         self._params = {p.name for p in fn.params}
         self._current_fn = fn
         self._local_types = {}
+        self._list_locals = {}
 
         self._check_annotation_conflicts(fn)
 
@@ -383,6 +399,14 @@ class Emitter:
         nm = local_name(s.name)
         # decide type for declaration
         ty = lower_type(s.type_annot) if s.type_annot else None
+        # Special case: `let x: list<T> = [a, b, c];` — declare an INDEX BY
+        # PLS_INTEGER table, then emit per-index assignments.
+        if (
+            isinstance(s.type_annot, A.GenericType)
+            and s.type_annot.base == "list"
+            and isinstance(s.value, A.ListLit)
+        ):
+            return self._emit_list_let(s, nm, indent)
         # generic type lookup if we can do it cheaply
         if ty is None:
             ty = self._infer_decl_type(s.value)
@@ -397,6 +421,37 @@ class Emitter:
             return []
         # special handling if the expression is a QuestionMark on a Result-typed call
         return self._emit_assign_to(nm, s.value, indent)
+
+    def _emit_list_let(self, s: A.LetStmt, nm: str, indent: str) -> list[str]:
+        """Lower `let xs: list<T> = [v1, v2, ...];` to:
+
+            -- module-level:
+            TYPE t_<T>_list IS TABLE OF <T> INDEX BY PLS_INTEGER;
+            -- DECLARE:
+            l_xs t_<T>_list;
+            -- BEGIN body:
+            l_xs(1) := v1;
+            l_xs(2) := v2;
+            ...
+        """
+        assert isinstance(s.type_annot, A.GenericType)
+        assert isinstance(s.value, A.ListLit)
+        elem_t = s.type_annot.params[0]
+        elem_sql = lower_type(elem_t)
+        # PLS_INTEGER for the index — matches BINARY_INTEGER in older syntax
+        list_type = f"t_{_safe(_render_type(elem_t))}_list"
+        if list_type not in self._list_types_emitted:
+            self._list_type_decls.append(
+                f"  TYPE {list_type} IS TABLE OF {elem_sql} INDEX BY PLS_INTEGER;"
+            )
+            self._list_types_emitted.add(list_type)
+        self._decl(f"{nm} {list_type};")
+        self._local_types[s.name] = list_type
+        self._list_locals[s.name] = elem_sql
+        lines: list[str] = []
+        for i, el in enumerate(s.value.elements, start=1):
+            lines.append(f"{indent}{nm}({i}) := {self._emit_expr(el)};")
+        return lines
 
     def _emit_assign_to(self, target: str, expr: A.Expr, indent: str) -> list[str]:
         """Emit one or more PL/SQL statements that assign `expr` to `target`."""
@@ -705,6 +760,34 @@ class Emitter:
             self._loop_vars.pop()
             out.append(f"{indent}END LOOP;")
             return out
+        # for x in <list-typed local>: iterate via assoc-array FOR loop
+        if isinstance(s.iterable, A.Ident) and s.iterable.name in self._list_locals:
+            list_local = local_name(s.iterable.name)
+            elem_t = self._list_locals[s.iterable.name]
+            # Use an integer loop variable and bind the loop name to list_local(i)
+            idx = f"i_{s.var_name}"
+            out = [f"{indent}FOR {idx} IN {list_local}.FIRST .. {list_local}.LAST LOOP"]
+            # Make the loop variable reference the array element inside the body
+            # by introducing a per-iteration local. Cheapest: declare it once at
+            # the function level and reassign each iteration.
+            shadow = local_name(s.var_name) + "_iter"
+            self._decl(f"{shadow} {elem_t};")
+            out.append(f"{indent}  {shadow} := {list_local}({idx});")
+            # Push a shadow scope: references to `var_name` inside the body
+            # resolve to `shadow` (via _loop_vars + a dedicated map).
+            self._loop_vars.append({s.var_name})
+            # We map the loop var name to the shadow via an override stack.
+            prev_override = self._loop_var_override.get(s.var_name)
+            self._loop_var_override[s.var_name] = shadow
+            for stmt in s.body:
+                out.extend(self._emit_stmt(stmt, indent + "  "))
+            self._loop_vars.pop()
+            if prev_override is None:
+                del self._loop_var_override[s.var_name]
+            else:
+                self._loop_var_override[s.var_name] = prev_override
+            out.append(f"{indent}END LOOP;")
+            return out
         # for i in range expressions — generic numeric for
         if isinstance(s.iterable, A.BinOp) and s.iterable.op in ("..", "..="):
             lo = self._emit_expr(s.iterable.left)
@@ -970,20 +1053,25 @@ class Emitter:
         # cursor FOR-loop variables are referenced bare, no prefix
         for scope in reversed(self._loop_vars):
             if name in scope:
-                return name
+                # honor any override (list-loop shadow); else use the name as-is
+                return self._loop_var_override.get(name, name)
         return local_name(name)
 
     # ---- bind rewriting -------------------------------------------------
 
     def _rewrite_binds(self, sql: str) -> str:
-        """:name in the SQL refers to a pell binding (param or local); lower to PL/SQL
-        variable references using the correct prefix.
+        """:name in the SQL refers to a pell binding (param, local, or loop variable);
+        lower to PL/SQL variable references using the correct prefix.
         """
         import re
         def repl(m: "re.Match[str]") -> str:
             name = m.group(1)
             if name in self._params:
                 return param_name(name)
+            # check active loop-variable overrides (for list-iter shadow names)
+            for scope in reversed(self._loop_vars):
+                if name in scope:
+                    return self._loop_var_override.get(name, name)
             return local_name(name)
         return re.sub(r"(?<![A-Za-z0-9_]):([A-Za-z_][A-Za-z0-9_]*)", repl, sql)
 

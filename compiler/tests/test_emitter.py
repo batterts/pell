@@ -174,6 +174,24 @@ def test_no_size_on_param_types():
     assert "IN VARCHAR2" in sql
 
 
+def test_list_literal_and_loop():
+    sql = compile_to_sql("""
+        module m;
+        pub fn run() {
+          let xs: list<number> = [1, 3, 5];
+          for x in xs {
+            sql! { insert into t(n) values (:x) };
+          }
+        }
+    """)
+    assert "TYPE t_number_list IS TABLE OF NUMBER INDEX BY PLS_INTEGER" in sql
+    assert "l_xs(1) := 1;" in sql
+    assert "l_xs(2) := 3;" in sql
+    assert "l_xs(3) := 5;" in sql
+    assert "FOR i_x IN l_xs.FIRST .. l_xs.LAST LOOP" in sql
+    assert "insert into t(n) values (l_x_iter)" in sql
+
+
 def test_finally_block_emitted():
     sql = compile_to_sql("""
         module m;

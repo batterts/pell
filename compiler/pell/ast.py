@@ -235,6 +235,13 @@ class NoneExpr(Expr):
     pass  # None
 
 
+@dataclass
+class ListLit(Expr):
+    """A list literal `[e1, e2, ...]`. Element type is taken from context
+    (the `let` annotation or the surrounding expression's expected type)."""
+    elements: list[Expr] = field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Statements
 # ---------------------------------------------------------------------------

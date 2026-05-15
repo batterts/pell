@@ -610,6 +610,17 @@ class Parser:
             e = self._parse_expr()
             self._expect("RPAREN")
             return e
+        if cur.kind == "LBRACKET":
+            self.pos += 1
+            elements: list[A.Expr] = []
+            if not self._at("RBRACKET"):
+                elements.append(self._parse_expr())
+                while self._eat("COMMA"):
+                    if self._at("RBRACKET"):
+                        break  # allow trailing comma
+                    elements.append(self._parse_expr())
+            self._expect("RBRACKET")
+            return A.ListLit(loc=cur.loc, elements=elements)
         if cur.kind == "IDENT":
             # could be ident, qualified path, struct literal, or a call
             loc = cur.loc
