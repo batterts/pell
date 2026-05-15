@@ -47,6 +47,9 @@ or stack-trace clarity is a regression even if it shortens the source.
 | Collections | Nested tables, varrays, assoc. arrays | One `list<T>`, one `map<K,V>` (lower to assoc. arrays) |
 | SQL embedding | Implicit | `sql!{ … }` block, params explicit |
 | Cursors | `OPEN/FETCH/CLOSE` or `FOR…IN` | `for row in sql!{…} { }`, iterators |
+| Transactions | Ambient + explicit `COMMIT` / `ROLLBACK` | `transaction { … }` block, auto-commit on exit, rollback on error, nested = savepoint (§4.8) |
+| `RETURNING INTO` / `SQL%ROWCOUNT` | Implicit cursor attrs | `DmlResult` from a write `sql!{}` with `.returning::<T>()` and `.rowcount()` (§4.5.3) |
+| `SELECT … FOR UPDATE` | In-SQL keyword | `.for_update()` modifier on the read iterator, requires `transaction { … }` (§4.5.4) |
 | Boolean in SQL | Available in 23 — use it | Used natively |
 | Compiler hints | `PRAGMA AUTONOMOUS_TRANSACTION;` / `PRAGMA INLINE(…)` / `PRAGMA UDF;` / `DETERMINISTIC` / `RESULT_CACHE` clauses, each with its own placement rules | Uniform `@name(args)` annotations, closed set, validated combinations (§9) |
 
@@ -312,6 +315,95 @@ LSP responsibilities at the injection boundary:
   *not* in v1 — it would require coordinating across `.pell` and the schema,
   and that's a footgun without a real refactor engine on the DB side.
 
+### 4.5.3 Writes — `DmlResult`, `.rowcount()`, `.returning::<T>()`
+
+A `sql!{}` whose top-level statement is `INSERT` / `UPDATE` / `DELETE` /
+`MERGE` evaluates to a `DmlResult` instead of an iterator. The compiler
+chooses the return type by parsing the SQL; reads stay reads, writes
+become writes, no extra keyword. Reaching for `.first()` or `.one()` on a
+`DmlResult` is a compile error; reaching for `.rowcount()` or
+`.returning::<T>()` on a read iterator is a compile error.
+
+```pell
+// Fire-and-forget write — the DmlResult is discarded (and the compiler
+// allows that here because DmlResult is *not* @must_use).
+sql! { update users set active = 0 where id = :id };
+
+// Need the row count.
+let n = sql! { delete from sessions where expires_at < :cutoff }.rowcount();
+
+// Need the generated PK back.
+let new_id = sql! {
+  insert into users(name, email) values (:name, :email)
+  returning id
+}
+  .returning::<number>()
+  .one()?;
+
+// Bulk update returning every affected id.
+let touched: list<number> = sql! {
+  update orders set status = 'shipped'
+  where status = 'ready' and ship_after <= :now
+  returning id
+}
+  .returning::<number>()
+  .collect();
+```
+
+Rules:
+
+- The DML executes eagerly on `sql!{}` evaluation. `.rowcount()` and
+  `.returning::<T>()` read already-materialized state and can be called
+  any number of times in any order.
+- `.returning::<T>()` on a statement without a `RETURNING` clause is a
+  compile error caught by the SQL parser.
+- The element type `T` is checked against the `RETURNING` projection at
+  compile time (when a DB connection is configured; otherwise at first
+  run). `T` may be a primitive, a `record`, or an anonymous row type.
+- Multi-row `RETURNING` lowers to `BULK COLLECT INTO` a nested table of
+  `T`'s lowered form; single-row `.one()` lowers to a scalar
+  `RETURNING … INTO`.
+- `.rowcount()` returns `int`, never `Option<int>` or `Result`. `0` means
+  "no rows affected"; that's a legitimate outcome, not an error.
+
+### 4.5.4 Row-level locking — `.for_update()`
+
+`SELECT … FOR UPDATE` is expressed as a modifier on the read iterator:
+
+```pell
+transaction {
+  let acct = sql! {
+    select id, balance from accounts where id = :id
+  }
+    .for_update()
+    .one()?;
+
+  sql! {
+    update accounts set balance = :new_balance where id = :acct.id
+  };
+}  // commit here; locks released
+```
+
+Variants:
+
+| Call | Lowers to |
+|---|---|
+| `.for_update()` | `FOR UPDATE` |
+| `.for_update().nowait()` | `FOR UPDATE NOWAIT` |
+| `.for_update().wait(seconds)` | `FOR UPDATE WAIT N` |
+| `.for_update().skip_locked()` | `FOR UPDATE SKIP LOCKED` |
+| `.for_update_of(cols)` | `FOR UPDATE OF col1, col2` |
+
+Constraints, enforced by the typer:
+
+- `.for_update()` is **only legal inside an enclosing `transaction { … }`
+  block** (§4.8). Outside one it's a compile error — autocommit would
+  release the lock immediately, which is never what you meant.
+- It can only attach to a read iterator. Calling it on a `DmlResult` is a
+  compile error.
+- Mutually exclusive with `.nowait()` / `.wait(N)` / `.skip_locked()` — the
+  typer enforces "at most one wait policy."
+
 ### 4.6 Pipelines
 
 ```pell
@@ -346,6 +438,68 @@ fn compound(p: number, r: number, n: number) -> number {
   return balance;
 }
 ```
+
+### 4.8 Transactions
+
+PL/SQL's "every statement participates in the ambient transaction, and you
+call `COMMIT`/`ROLLBACK` when you mean it" model is the source of more
+bugs than every cursor mistake combined. `pell` replaces it with a scoped
+construct:
+
+```pell
+fn transfer(from: number, to: number, amt: number)
+  -> Result<Unit, NotFound | Overdraft>
+{
+  transaction {
+    let src = sql! {
+      select id, balance from accounts where id = :from
+    }.for_update().one()?;
+
+    if src.balance < amt {
+      return Err(Overdraft { account: from });   // rolls back
+    }
+
+    sql! { update accounts set balance = balance - :amt where id = :from };
+    sql! { update accounts set balance = balance + :amt where id = :to };
+  }  // commits here on normal exit
+  return Ok(());
+}
+```
+
+Semantics:
+
+- Normal exit from the block → `COMMIT`.
+- Any propagated error (`?`, explicit `return Err(…)` out of the block,
+  invariant panic) → `ROLLBACK`.
+- The block is an expression of type `Unit` (or `Result<Unit, …>` if any
+  enclosed statement can fail); you can't return a value out of it
+  without writing `let x = transaction { … x };`.
+- **Nesting = `SAVEPOINT`.** An inner `transaction { … }` opens a savepoint
+  on entry; normal exit releases it, error path rolls back to it without
+  unwinding the outer transaction. This is the only legal way to write
+  partial-failure logic.
+- **Outside a `transaction { … }`, DML autocommits.** This is intentional
+  for ergonomic one-shot scripts and tests, but `pell fmt` and the linter
+  warn on any DML statement at fn-body scope that isn't either (a) the
+  sole statement in the fn, or (b) inside a `transaction { … }`. The
+  warning is `dml_outside_transaction`, opt out with `@allow(...)`.
+- `@autonomous` (§9.2) opens a *separate* transaction context that does
+  not nest into the outer one. An `@autonomous` block inside a
+  `transaction { … }` is allowed; its commit/rollback doesn't affect the
+  outer.
+- `finally { … }` blocks run after the transaction's commit/rollback has
+  been issued. A `finally` cannot rescue a transaction that has already
+  rolled back, but it can log the outcome.
+
+Why not implicit per-fn transactions? Because most real fns either don't
+touch the database or want fine-grained control over what's in the unit
+of work. Implicit per-fn is fine for trivial CRUD and a mess for anything
+real.
+
+Why not PL/SQL-style "ambient + explicit commit"? Because the structured
+boundary is exactly what enables: (1) automatic rollback on `?`, (2) safe
+`finally` semantics, (3) honest `FOR UPDATE` (§4.5.4), and (4) the
+exception-safety guarantees the rest of the language leans on.
 
 ## 5. Type system (v1)
 
