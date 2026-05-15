@@ -14,11 +14,14 @@ The three things that must be better than PL/SQL:
    spec + body duplication / `IS` vs `AS`), modern keywords, expression-oriented
    where it doesn't fight SQL.
 2. **Exception handling** — typed errors with structured payloads, `Result<T,E>`
-   and `Option<T>` (a.k.a. `T?`), a `?` propagation operator, and *no implicit*
+   and `T?` for nullables, a `?` propagation operator, and *no implicit*
    `WHEN OTHERS THEN NULL` ever.
 3. **Tooling** — formatter, LSP, test runner, and package manager from day one.
    The compiler must be usable without an Oracle install (it emits text);
    verifying generated PL/SQL against a real DB is a separate, optional step.
+
+Non-goal of this goal list: "more concise." Brevity that hurts grep-ability
+or stack-trace clarity is a regression even if it shortens the source.
 
 ## 2. Non-goals
 
@@ -45,8 +48,7 @@ The three things that must be better than PL/SQL:
 | SQL embedding | Implicit | `sql!{ … }` block, params explicit |
 | Cursors | `OPEN/FETCH/CLOSE` or `FOR…IN` | `for row in sql!{…} { }`, iterators |
 | Boolean in SQL | Available in 23 — use it | Used natively |
-| Comments | `--` / `/* */` | `//` / `/* */` (kept familiar) |
-| Compiler hints | `PRAGMA AUTONOMOUS_TRANSACTION;` / `PRAGMA INLINE(…)` / `PRAGMA UDF;` / `DETERMINISTIC` / `RESULT_CACHE` clauses | `@autonomous`, `@inline`, `@udf`, `@deterministic`, `@result_cache` — uniform `@name(args)` (§9) |
+| Compiler hints | `PRAGMA AUTONOMOUS_TRANSACTION;` / `PRAGMA INLINE(…)` / `PRAGMA UDF;` / `DETERMINISTIC` / `RESULT_CACHE` clauses, each with its own placement rules | Uniform `@name(args)` annotations, closed set, validated combinations (§9) |
 
 ## 4. Surface syntax — by example
 
@@ -155,20 +157,29 @@ already covered.
 ### 4.5 SQL embedding
 
 `sql!{ … }` is an *expression* that yields an iterator over typed rows. Bound
-variables are referenced by `:name` and must resolve to in-scope `pell`
-identifiers; bind types are checked against the SQL plan at compile time when
-a DB connection is configured, otherwise at first run.
+variables are referenced by `:name` and resolve to in-scope `pell` identifiers
+by ordinary lexical scope — no separate binding clause. Bind types are checked
+against the SQL plan at compile time when a DB connection is configured,
+otherwise at first run.
 
 ```pell
+let status  = "ACTIVE";
+let dept_id = my_dept;
+
 let active = sql! {
   select id, name from employees
   where status = :status and dept_id = :dept_id
-} with (status = "ACTIVE", dept_id = my_dept);
+};
 
 for row in active {
   log::info(row.name);
 }
 ```
+
+If a bind needs renaming, do it with an ordinary `let`. We considered a
+trailing `with (status = "ACTIVE", dept_id = my_dept)` clause and dropped it:
+in every realistic case the locals already exist with the right names, and
+the clause was pure ceremony repeating them.
 
 Bulk operations:
 
@@ -237,6 +248,12 @@ is small/local, or (b) pure SQL when the operations are SQL-expressible
 (early v1: only the latter when the user writes `|> sql` explicitly; auto-
 fusion is a v2 idea).
 
+Honest caveat: until auto-fusion lands, a pipeline over a `sql!{}` source
+materializes the rows into PL/SQL collections and runs `filter`/`map` in PL/SQL.
+That's fine for small result sets and a performance trap for large ones. If
+you can express the work in SQL, write it in SQL — pipelines are not a free
+abstraction over `WHERE`.
+
 ### 4.7 No `BEGIN`/`END`, no `DECLARE`
 
 Locals are introduced with `let` (immutable) and `var` (mutable). Block scope
@@ -256,7 +273,10 @@ fn compound(p: number, r: number, n: number) -> number {
 
 - Primitives: `number(p, s)`, `int`, `text`, `bool`, `date`, `timestamp`,
   `interval`, `bytes`, `json`.
-- `T?` for nullable; `Option<T>` is a library alias.
+- `T?` for nullable. `Option<T>` is an internal alias used by the prelude
+  signatures (`.first()` returns `Option<Row>`, etc.); surface code should
+  prefer `T?` in type annotations. `fmt` rewrites `Option<T>` annotations to
+  `T?` outside the prelude.
 - `Result<T, E>` where `E` may be a single error type or a `|` union of error
   types declared in scope.
 - `record { … }` — nominal, structural conversion only via explicit `.into`.
@@ -317,11 +337,17 @@ sql! {
 };
 ```
 
-Lowering of indexed access deliberately returns `Option<T>` for `xs[i]`, not
+Lowering of indexed access deliberately returns `T?` for `xs[i]`, not
 a raw `T`. PL/SQL's nested-table indexing raises `SUBSCRIPT_BEYOND_COUNT` or
 `SUBSCRIPT_OUTSIDE_LIMIT`; we catch those at the boundary the same way §6.5
 handles `NO_DATA_FOUND` for `.first()`. If you want the panic-on-miss
 semantics, write `.expect("…")`.
+
+Tradeoff: this means a tight numeric loop over a list with `xs[i]` is more
+verbose than the PL/SQL equivalent (every access has to handle `None`), and
+the obvious workaround — iterate with `for x in xs` or `for (i, x) in
+xs.enumerate()` — needs to be the documented norm. Indexed access is for
+random access, not iteration.
 
 ### 5.1.2 `map<K, V>` — surface
 
@@ -493,9 +519,18 @@ END;
 ```pell
 // After
 do_stuff() finally {
-  log::error("do_stuff failed");   // only logs on error? no — always logs.
+  log::info("do_stuff done");   // runs on both success and error
 }
 ```
+
+**Foot-gun.** `finally` runs on the success path *and* the error path. The
+PL/SQL `WHEN OTHERS THEN log; RAISE;` idiom looks superficially similar but
+only ran on error. Mechanically swapping one for the other will start logging
+on every successful call. The compiler emits a warning when a `finally` body
+contains a string literal matching `/(?i)\b(fail|error|exception|abort|panic)\b/`
+without also referencing the caught error — opt out with
+`@allow(finally_error_log)`. This isn't elegant, but it catches the migration
+mistake before it ships.
 
 If you only want to run cleanup on the error path, write it explicitly:
 
@@ -548,10 +583,18 @@ choose your meaning by which terminator you call on the iterator:
 
 | Call site | Return type | 0 rows | 1 row | 2+ rows |
 |---|---|---|---|---|
+| `.one()` | `Result<Row, NotFound \| TooMany>` | `Err(NotFound)` | `Ok(r)` | `Err(TooMany)` |
 | `.first()` | `Option<Row>` | `None` | `Some(r)` | `Some(first)` |
 | `.one_or_none()` | `Result<Option<Row>, TooMany>` | `Ok(None)` | `Ok(Some(r))` | `Err(TooMany)` |
-| `.one()` | `Result<Row, NotFound \| TooMany>` | `Err(NotFound)` | `Ok(r)` | `Err(TooMany)` |
 | `.expect("…")` (chained on any of the above) | `Row` | **invariant panic** | `r` | **invariant panic** |
+
+`.one()` is the boring default: it forces the caller to deal with both
+absence and duplicates, which is the safest assumption for code that names
+"the row." Reach for `.first()` only when absence is genuinely a value (the
+`/users/:id` rendering case), and `.one_or_none()` only when the query is
+known-singleton by an index but the caller still wants to treat absence as
+data rather than an error. If you find yourself reaching for `.one_or_none()`
+more than once in a module, the query probably wanted `.one()` or `.first()`.
 
 The three intents map cleanly:
 
@@ -599,6 +642,14 @@ This gives Shaun's two cases distinct, syntactically obvious forms:
 
 - *catch and release* → use `.one()` and `?`, or `match` on the `Result`.
 - *this shouldn't happen* → use `.expect("invariant: …")`.
+
+**Honesty caveat.** "Uncatchable" is a `pell`-surface claim, not a PL/SQL
+runtime claim. The emitted `RAISE_APPLICATION_ERROR(-20001, …)` is a normal
+Oracle exception and any hand-written PL/SQL upstream of the `pell` code can
+catch it with `WHEN OTHERS`. We can keep `pell` itself from writing such a
+catch, but if your call graph crosses a boundary into legacy PL/SQL, that
+legacy code can swallow invariant panics. Document this; don't pretend
+otherwise.
 
 Generalization: `.expect` / `.unwrap` are also available on `Option<T>` and
 `Result<T, E>` everywhere, not just on SQL terminators. Same semantics.
@@ -887,29 +938,14 @@ Suggested ordering, each ~self-contained:
 
 ## 14. Naming
 
-`pell` is a placeholder. Candidates:
-
-| Name | Pros | Cons |
-|---|---|---|
-| **pell** | Short, unused, `.pell` extension is clean, CLI is `pell` | Means nothing; might collide later |
-| **plux** | "pl" + "lux"; hints at PL/SQL ancestry | Sounds like a product |
-| **oralite** | Says what it is | Tied to Oracle branding |
-| **quill** | Writerly, clean | Heavily used elsewhere |
-| **modus** | Modern + modus operandi | Existing Prolog-based language |
-
-Pick last; doesn't gate anything.
+`pell` is a placeholder; naming doesn't gate anything and gets decided last.
 
 ---
 
 ## Next steps
-
-Once this draft has been argued with for a round or two:
 
 1. Lock the syntax-style decision (Rust/Kotlin-ish vs the alternatives shown
    earlier).
 2. Pick error-lowering (A) vs (B) — or commit to prototyping both in M3.
 3. Start M0: tree-sitter grammar + a handful of canonical `.pell` examples
    that exercise every construct in §4.
-
-Argue with anything. The §3 table and §6 (errors) are the bits that will
-shape every subsequent decision.
