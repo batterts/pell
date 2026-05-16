@@ -1,0 +1,15 @@
+// B3 — direct INSERT INTO ... SELECT.
+// One SQL statement, no PL/SQL fetch loop. Should be the fastest method
+// when the transform is pure SQL.
+
+module bench.b3;
+
+pub fn run() -> number {
+  let t0: number = dbms_utility::get_time();
+  sql! {
+    insert into ml_ratings_b3(user_id, movie_id, rating, ts)
+    select user_id, movie_id, rating, ts from ml_ratings_src
+  };
+  let t1: number = dbms_utility::get_time();
+  return (t1 - t0) * 10;
+}

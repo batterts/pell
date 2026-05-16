@@ -1,0 +1,17 @@
+// B1 — row-by-row pell insert.
+// Cursor FOR loop over the source; one INSERT statement per row.
+// Worst case — one round-trip per row at the SQL layer.
+
+module bench.b1;
+
+pub fn run() -> number {
+  let t0: number = dbms_utility::get_time();
+  for r in sql! { select user_id, movie_id, rating, ts from ml_ratings_src } {
+    sql! {
+      insert into ml_ratings_b1(user_id, movie_id, rating, ts)
+      values (:r.user_id, :r.movie_id, :r.rating, :r.ts)
+    };
+  }
+  let t1: number = dbms_utility::get_time();
+  return (t1 - t0) * 10;
+}

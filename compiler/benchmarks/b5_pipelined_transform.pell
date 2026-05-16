@@ -1,0 +1,36 @@
+// B5 — pipelined transform with computation.
+// Same shape as B4 but yields a transformed value (doubles `ts`) so we
+// can measure whether non-trivial per-row work in a pipelined fn adds
+// noticeable cost over identity.
+
+module bench.b5;
+
+pub record Rating {
+  user_id:  number,
+  movie_id: number,
+  rating:   number,
+  ts:       number,
+}
+
+@pipelined
+pub fn doubler(rows: cursor<Rating>) -> stream<Rating> {
+  for r in rows {
+    yield Rating {
+      user_id:  r.user_id,
+      movie_id: r.movie_id,
+      rating:   r.rating,
+      ts:       r.ts * 2,
+    };
+  }
+}
+
+pub fn run() -> number {
+  let t0: number = dbms_utility::get_time();
+  sql! {
+    insert into ml_ratings_b5(user_id, movie_id, rating, ts)
+    select t.user_id, t.movie_id, t.rating, t.ts
+    from table(doubler(cursor(select user_id, movie_id, rating, ts from ml_ratings_src))) t
+  };
+  let t1: number = dbms_utility::get_time();
+  return (t1 - t0) * 10;
+}

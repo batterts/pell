@@ -1,0 +1,37 @@
+// B4 — pipelined identity transform.
+// Streams rows through a @pipelined fn that yields each input unchanged,
+// then INSERT INTO ... SELECT ... FROM TABLE(fn(CURSOR(...))).
+// Measures the per-row overhead of the pipelined transform on top of
+// what would otherwise be B3.
+
+module bench.b4;
+
+pub record Rating {
+  user_id:  number,
+  movie_id: number,
+  rating:   number,
+  ts:       number,
+}
+
+@pipelined
+pub fn passthru(rows: cursor<Rating>) -> stream<Rating> {
+  for r in rows {
+    yield Rating {
+      user_id:  r.user_id,
+      movie_id: r.movie_id,
+      rating:   r.rating,
+      ts:       r.ts,
+    };
+  }
+}
+
+pub fn run() -> number {
+  let t0: number = dbms_utility::get_time();
+  sql! {
+    insert into ml_ratings_b4(user_id, movie_id, rating, ts)
+    select t.user_id, t.movie_id, t.rating, t.ts
+    from table(passthru(cursor(select user_id, movie_id, rating, ts from ml_ratings_src))) t
+  };
+  let t1: number = dbms_utility::get_time();
+  return (t1 - t0) * 10;
+}

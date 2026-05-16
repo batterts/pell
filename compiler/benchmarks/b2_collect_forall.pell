@@ -1,0 +1,27 @@
+// B2 — collect-then-forall.
+// One BULK COLLECT INTO list<Rating> loads all 100k rows into PGA,
+// then a single FORALL inserts them in one bulk-bind operation.
+
+module bench.b2;
+
+pub record Rating {
+  user_id:  number,
+  movie_id: number,
+  rating:   number,
+  ts:       number,
+}
+
+pub fn run() -> number {
+  let t0: number = dbms_utility::get_time();
+  let rows: list<Rating> = sql! {
+    select user_id, movie_id, rating, ts from ml_ratings_src
+  }.collect();
+  forall r in rows {
+    sql! {
+      insert into ml_ratings_b2(user_id, movie_id, rating, ts)
+      values (:r.user_id, :r.movie_id, :r.rating, :r.ts)
+    };
+  }
+  let t1: number = dbms_utility::get_time();
+  return (t1 - t0) * 10;
+}

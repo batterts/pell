@@ -1,0 +1,24 @@
+// Rating distribution: count + share of total per rating value 1..5.
+
+module reports.rating_dist;
+
+pub record Bucket {
+  rating: number,
+  n:      number,
+  pct:    number,
+}
+
+pub fn dist() -> list<Bucket> {
+  let total: number = sql! {
+    select count(*) from ml_ratings_src
+  }.one();
+  let rows: list<Bucket> = sql! {
+    select rating,
+           count(*),
+           round(100 * count(*) / :total, 2)
+    from   ml_ratings_src
+    group  by rating
+    order  by rating
+  }.collect();
+  return rows;
+}

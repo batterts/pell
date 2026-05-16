@@ -1,0 +1,27 @@
+// Top 10 movies by average rating, requiring at least 50 ratings.
+// Pell-side: aggregate with SQL, BULK COLLECT INTO a list, return.
+
+module reports.top_movies;
+
+pub record TopMovie {
+  movie_id:     number,
+  title:        text,
+  rating_count: number,
+  avg_rating:   number,
+}
+
+pub fn top_n(min_ratings: number) -> list<TopMovie> {
+  let rows: list<TopMovie> = sql! {
+    select r.movie_id,
+           m.title,
+           count(*),
+           round(avg(r.rating), 3)
+    from   ml_ratings_src r
+    join   ml_movies m on m.id = r.movie_id
+    group  by r.movie_id, m.title
+    having count(*) >= :min_ratings
+    order  by avg(r.rating) desc, count(*) desc
+    fetch  first 10 rows only
+  }.collect();
+  return rows;
+}

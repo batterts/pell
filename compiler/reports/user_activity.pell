@@ -1,0 +1,22 @@
+// Top N most-active raters with their rating count and average rating.
+
+module reports.user_activity;
+
+pub record UserStat {
+  user_id:      number,
+  rating_count: number,
+  avg_rating:   number,
+}
+
+pub fn top_raters(top_n: number) -> list<UserStat> {
+  let rows: list<UserStat> = sql! {
+    select user_id,
+           count(*),
+           round(avg(rating), 3)
+    from   ml_ratings_src
+    group  by user_id
+    order  by count(*) desc
+    fetch  first :top_n rows only
+  }.collect();
+  return rows;
+}

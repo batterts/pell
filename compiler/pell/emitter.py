@@ -322,19 +322,47 @@ class Emitter:
     # ---- spec & body ----------------------------------------------------
 
     def _emit_spec(self) -> str:
+        # Pre-walk public fns to register any list types referenced in their
+        # signatures so we can emit them in the spec (alongside records).
+        spec_list_types: list[str] = []
+        seen: set[str] = set()
+        for fn in self._fns:
+            if not fn.is_pub:
+                continue
+            for t in [fn.return_type] + [p.type_ref for p in fn.params]:
+                decl = self._list_type_decl_for(t)
+                if decl is not None and decl[0] not in seen:
+                    seen.add(decl[0])
+                    spec_list_types.append(decl[1])
         out: list[str] = []
         out.append(f"CREATE OR REPLACE PACKAGE {self.pkg} AS")
         # records (declare types public so callers can reference them)
         for rec in self._records:
             if rec.is_pub:
                 out.append(self._render_record_type(rec, indent="  "))
+        # list types referenced by public fn signatures
+        for line in spec_list_types:
+            out.append(line)
         # public fn signatures
         for fn in self._fns:
             if fn.is_pub:
                 out.append("  " + self._fn_signature(fn) + ";")
         out.append(f"END {self.pkg};")
         out.append("/")
+        # Pre-seed the body's dedup set so we don't redeclare the same TYPE.
+        self._list_types_emitted.update(seen)
         return "\n".join(out)
+
+    def _list_type_decl_for(self, t: Optional[A.TypeRef]) -> Optional[tuple[str, str]]:
+        """If t is a list<X>, return (type_name, full decl string for the spec).
+        Otherwise None."""
+        if not isinstance(t, A.GenericType) or t.base != "list" or not t.params:
+            return None
+        elem_t = t.params[0]
+        elem_sql = self._lt(elem_t)
+        list_type = f"t_{_safe(_render_type(elem_t))}_list"
+        decl = f"  TYPE {list_type} IS TABLE OF {elem_sql} INDEX BY PLS_INTEGER;"
+        return (list_type, decl)
 
     def _emit_body(self) -> str:
         # walk fns first so list-type declarations get registered
@@ -347,7 +375,8 @@ class Emitter:
         for rec in self._records:
             if not rec.is_pub:
                 out.append(self._render_record_type(rec, indent="  "))
-        # collected list types (assoc array INDEX BY PLS_INTEGER)
+        # collected list types (assoc array INDEX BY PLS_INTEGER) — those
+        # referenced by public fn signatures were already emitted in the spec.
         for decl in self._list_type_decls:
             out.append(decl)
         # all fns
