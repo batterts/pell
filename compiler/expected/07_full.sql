@@ -42,7 +42,9 @@ CREATE OR REPLACE PACKAGE BODY orders_fulfillment AS
       INTO l_row
       FROM orders where id = p_id;
     EXCEPTION
-      WHEN NO_DATA_FOUND THEN RAISE;
+      WHEN NO_DATA_FOUND THEN
+        pell_runtime.set_err('orders_fulfillment_ordernotfound:1', '');
+        RAISE pell_runtime.orders_fulfillment_ordernotfound;
       WHEN TOO_MANY_ROWS THEN RAISE;
     END;
     RETURN l_row;
@@ -76,7 +78,9 @@ CREATE OR REPLACE PACKAGE BODY orders_fulfillment AS
       INTO l_ord
       FROM orders where id = p_order_id FOR UPDATE;
       EXCEPTION
-        WHEN NO_DATA_FOUND THEN RAISE;
+        WHEN NO_DATA_FOUND THEN
+          pell_runtime.set_err('orders_fulfillment_ordernotfound:1', '');
+          RAISE pell_runtime.orders_fulfillment_ordernotfound;
         WHEN TOO_MANY_ROWS THEN RAISE;
       END;
       BEGIN
@@ -84,7 +88,9 @@ CREATE OR REPLACE PACKAGE BODY orders_fulfillment AS
       INTO l_available
       FROM skus where id = p_sku_id FOR UPDATE;
       EXCEPTION
-        WHEN NO_DATA_FOUND THEN RAISE;
+        WHEN NO_DATA_FOUND THEN
+          pell_runtime.set_err('orders_fulfillment_ordernotfound:1', '');
+          RAISE pell_runtime.orders_fulfillment_ordernotfound;
         WHEN TOO_MANY_ROWS THEN RAISE;
       END;
       IF (l_available < p_qty) THEN

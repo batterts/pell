@@ -13,7 +13,7 @@ CREATE OR REPLACE PACKAGE hr_employees AS
     id NUMBER,
     name VARCHAR2(4000),
     email VARCHAR2(4000),
-    level NUMBER
+    grade NUMBER
   );
   FUNCTION find_employee(p_id IN NUMBER) RETURN t_employee;
   PROCEDURE promote(p_id IN NUMBER);
@@ -26,11 +26,13 @@ CREATE OR REPLACE PACKAGE BODY hr_employees AS
     l_row t_employee;
   BEGIN
     BEGIN
-      select id, name, email, level
+      select id, name, email, grade
       INTO l_row
       FROM employees where id = p_id;
     EXCEPTION
-      WHEN NO_DATA_FOUND THEN RAISE;
+      WHEN NO_DATA_FOUND THEN
+        pell_runtime.set_err('hr_employees_notfound:1', '');
+        RAISE pell_runtime.hr_employees_notfound;
       WHEN TOO_MANY_ROWS THEN RAISE;
     END;
     RETURN l_row;
@@ -40,11 +42,11 @@ CREATE OR REPLACE PACKAGE BODY hr_employees AS
     l_e t_employee;
   BEGIN
     l_e := find_employee(p_id);
-    IF (l_e.level >= 9) THEN
-      pell_runtime.set_err('hr_employees_policyviolation:1', 'reason=' || 'already at max level');
+    IF (l_e.grade >= 9) THEN
+      pell_runtime.set_err('hr_employees_policyviolation:1', 'reason=' || 'already at max grade');
       RAISE pell_runtime.hr_employees_policyviolation;
     END IF;
-    update employees set level = level + 1 where id = p_id;
+    update employees set grade = grade + 1 where id = p_id;
     RETURN;
   END promote;
 END hr_employees;

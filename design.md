@@ -1251,15 +1251,14 @@ Each `error` variant declared in `pell` lowers to two artifacts:
 2. A session context, declared once at deploy time:
 
    ```plsql
-   CREATE OR REPLACE CONTEXT pell_err
-     USING pell_runtime
-     ACCESSED LOCALLY;
+   CREATE OR REPLACE CONTEXT pell_err USING pell_runtime;
    ```
 
    The `USING pell_runtime` binding restricts `DBMS_SESSION.SET_CONTEXT`
    writes to that package — no other code in the schema can mutate the
-   payload state. `ACCESSED LOCALLY` keeps it session-private (it doesn't
-   participate in Oracle's global-application-context machinery).
+   payload state. Session-private behavior is the default (Oracle's
+   `ACCESSED GLOBALLY` clause exists only for cross-session global
+   contexts, which we don't want).
 
 **Raise** (compiler-generated, from `Err(NotFound { entity: "user", id: 99 })`):
 

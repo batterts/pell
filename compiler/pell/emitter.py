@@ -230,14 +230,10 @@ class Emitter:
 
     def _prepare_pipelined_schema_types(self, fn: A.FnDef) -> None:
         """Emit the OBJECT + nested-table CREATE TYPEs needed by an @pipelined
-        function: one for each cursor parameter's element type, and one for the
-        return element type."""
-        # cursor params — only need the OBJECT (used as the bulk-fetch buffer type)
-        for p in fn.params:
-            elem = self._cursor_element_type(p.type_ref)
-            if elem is not None:
-                self._emit_obj_type(elem, fn.loc, with_table=False)
-        # return type — needs both OBJECT and nested table
+        function's *return* element type. The cursor input's element type only
+        needs the package-private RECORD type (declared in the spec); BULK
+        COLLECT INTO won't accept a table-of-OBJECT from a multi-column cursor,
+        so we don't need a schema-level OBJECT for cursor inputs."""
         rt = fn.return_type
         elem = self._stream_element_type(rt)
         if elem is None:
@@ -872,7 +868,9 @@ class Emitter:
         """Lower a single-row SELECT INTO.
 
         PL/SQL requires INTO between the SELECT list and FROM, so we splice
-        it in at that boundary.
+        it in at that boundary. If the enclosing fn returns Result<T, ...>
+        and its error union contains a NotFound-named variant, NO_DATA_FOUND
+        is mapped to that typed error; otherwise re-raised as-is.
         """
         import re
         sql_text = self._rewrite_binds(sql.sql).strip().rstrip(";")
@@ -883,14 +881,48 @@ class Emitter:
             spliced = f"{head}\n      INTO {target}\n      FROM {tail}"
         else:
             spliced = f"{sql_text}\n      INTO {target}"
+        # NO_DATA_FOUND handler: typed mapping if fn declares a NotFound variant
+        nf_variant = self._notfound_variant_for_current_fn()
+        if nf_variant is not None:
+            exn = self._exception_name(nf_variant)
+            nf_handler = (
+                f"{indent}  WHEN NO_DATA_FOUND THEN\n"
+                f"{indent}    pell_runtime.set_err('{exn}:1', '');\n"
+                f"{indent}    RAISE pell_runtime.{exn};"
+            )
+        else:
+            nf_handler = f"{indent}  WHEN NO_DATA_FOUND THEN RAISE;"
         return [
             f"{indent}BEGIN",
             f"{indent}  {spliced.strip()};",
             f"{indent}EXCEPTION",
-            f"{indent}  WHEN NO_DATA_FOUND THEN RAISE;",
+            nf_handler,
             f"{indent}  WHEN TOO_MANY_ROWS THEN RAISE;",
             f"{indent}END;",
         ]
+
+    def _notfound_variant_for_current_fn(self) -> Optional[str]:
+        """If the current fn returns Result<T, ...> and the error union
+        contains a variant named `NotFound` (or ending in `NotFound`),
+        return that variant's name. Otherwise None.
+        """
+        if self._current_fn is None or self._current_fn.return_type is None:
+            return None
+        rt = self._current_fn.return_type
+        if not (isinstance(rt, A.GenericType) and rt.base == "Result" and len(rt.params) >= 2):
+            return None
+        err = rt.params[1]
+        variants: list[str] = []
+        if isinstance(err, A.NamedType):
+            variants.append(err.name)
+        elif isinstance(err, A.ErrorUnionType):
+            for v in err.variants:
+                if isinstance(v, A.NamedType):
+                    variants.append(v.name)
+        for v in variants:
+            if v == "NotFound" or v.endswith("NotFound"):
+                return v
+        return None
 
     def _emit_first_loop(self, target: str, sql: A.SqlBlock, indent: str, propagate_none: bool) -> list[str]:
         """Lower a `.first()` to a cursor FOR loop with FETCH FIRST 1 ROWS ONLY."""
@@ -992,11 +1024,13 @@ class Emitter:
                     f"cursor element type {elem_rec_name!r} must be a declared record",
                     s.loc,
                 )
-            obj_name = f"{self.pkg}_{elem_rec_name.lower()}_obj"
+            # Bulk-fetch buffer holds RECORDS, not OBJECTs — Oracle won't
+            # BULK COLLECT INTO a table-of-OBJECT from a multi-column cursor.
+            # The OBJECT type is only needed for PIPE ROW output.
+            rec_type = _record_type_name(elem_rec_name)
             buf_type = f"t_{elem_rec_name.lower()}_buf"
             buf_local = local_name(s.var_name) + "_buf"
-            # declarations — buffer type and instance
-            self._decl(f"TYPE {buf_type} IS TABLE OF {obj_name} INDEX BY PLS_INTEGER;")
+            self._decl(f"TYPE {buf_type} IS TABLE OF {rec_type} INDEX BY PLS_INTEGER;")
             self._decl(f"{buf_local} {buf_type};")
             idx = f"i_{s.var_name}"
             # Inside the body, references to `s.var_name` resolve to

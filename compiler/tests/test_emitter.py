@@ -188,12 +188,10 @@ def test_target_19c_lowers_bool_in_object_to_number_one():
     """
     sql_23 = emit(parse(src), target="23")
     sql_19c = emit(parse(src), target="19c")
-    # 23: OBJECT attributes use BOOLEAN
+    # 23: OBJECT attributes use BOOLEAN (only Out is emitted at schema level)
     assert "ok BOOLEAN" in sql_23
-    assert "active BOOLEAN" in sql_23
     # 19c: OBJECT attributes use NUMBER(1)
     assert "ok NUMBER(1)" in sql_19c
-    assert "active NUMBER(1)" in sql_19c
 
 
 def test_target_19c_lowers_json_to_varchar2():
@@ -258,11 +256,14 @@ def test_pipelined_emits_schema_types():
           }
         }
     """)
-    # OBJECT types for both Src (cursor element) and Out (yield element)
-    assert "CREATE OR REPLACE TYPE m_src_obj AS OBJECT" in sql
+    # OBJECT type for Out (yield element) — needed for PIPE ROW
     assert "CREATE OR REPLACE TYPE m_out_obj AS OBJECT" in sql
     # Nested table for the return type
     assert "CREATE OR REPLACE TYPE m_out_nt AS TABLE OF m_out_obj" in sql
+    # Cursor element is a package-private RECORD type, not a schema OBJECT —
+    # BULK COLLECT INTO won't accept a table-of-OBJECT from a multi-column cursor
+    assert "TYPE t_src IS RECORD" in sql
+    assert "m_src_obj" not in sql
 
 
 def test_pipelined_fn_signature():

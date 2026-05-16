@@ -9,7 +9,7 @@ pub record Employee {
   id: number,
   name: text,
   email: text,
-  level: number,
+  grade: number,
 }
 
 pub error NotFound { entity: text, id: number }
@@ -17,16 +17,16 @@ pub error PolicyViolation { reason: text }
 
 pub fn find_employee(id: number) -> Result<Employee, NotFound> {
   let row = sql! {
-    select id, name, email, level from employees where id = :id
+    select id, name, email, grade from employees where id = :id
   }.one()?;
   return Ok(row);
 }
 
 pub fn promote(id: number) -> Result<Unit, NotFound | PolicyViolation> {
   let e = find_employee(id)?;
-  if e.level >= 9 {
-    return Err(PolicyViolation { reason: "already at max level" });
+  if e.grade >= 9 {
+    return Err(PolicyViolation { reason: "already at max grade" });
   }
-  sql! { update employees set level = level + 1 where id = :id };
+  sql! { update employees set grade = grade + 1 where id = :id };
   return Ok(());
 }
