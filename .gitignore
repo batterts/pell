@@ -4,3 +4,9 @@ __pycache__/
 .venv/
 *.egg-info/
 .pytest_cache/
+
+# SQLcl / JVM crash dumps
+javacore.*.txt
+heapdump.*.phd
+Snap.*.trc
+*.dmp
