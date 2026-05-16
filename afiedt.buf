@@ -1,7 +1,0 @@
-declare
-lastnotnull number:=0;
-Begin
-  :sqlcl_int_first:=:sqlcl_int_first;
-  :sqlcl_int_runme:='edit '||:sqlcl_int_first||' ';
-end;
-/
