@@ -56,3 +56,23 @@ mapping. See `compiler/expected/02_employees.sql` for the literal output.
 
 For everything else — what's implemented, what isn't, how to add a feature,
 how the runtime works — see [GETTING_STARTED.md](./GETTING_STARTED.md).
+
+## License
+
+pell is licensed under the **Apache License, Version 2.0** — see
+[LICENSE](./LICENSE) for the full text.
+
+The PL/SQL output the pell compiler produces is **not** a derivative work
+of pell and is **not** subject to pell's license. You own your compiled
+output and can license it however you choose.
+
+That output is provided **as-is**. pell makes no warranty that the
+generated PL/SQL is correct, complete, fit for any particular purpose,
+free of defects, or compatible with any specific Oracle Database version,
+schema, or workload. You are responsible for reviewing, testing, and
+validating the emitted code before deploying it. See the "Compiled output
+disclaimer" section at the bottom of [LICENSE](./LICENSE).
+
+"Oracle" and "PL/SQL" are trademarks of Oracle Corporation. They are used
+here descriptively to identify the compilation target; pell is not
+affiliated with, endorsed by, or sponsored by Oracle.
