@@ -174,6 +174,30 @@ def test_no_size_on_param_types():
     assert "IN VARCHAR2" in sql
 
 
+def test_rowtype_lowers_to_percent_rowtype():
+    sql = compile_to_sql("""
+        module m;
+        pub fn fetch_one() -> rowtype<accounts> {
+          let r: rowtype<accounts> = sql! {
+            select * from accounts where id = 1
+          }.one();
+          return r;
+        }
+    """)
+    assert "RETURN accounts%ROWTYPE" in sql
+    assert "l_r accounts%ROWTYPE" in sql
+
+
+def test_rowtype_in_param_position():
+    sql = compile_to_sql("""
+        module m;
+        pub fn process(r: rowtype<accounts>) {
+          log::info(r.id);
+        }
+    """)
+    assert "p_r IN accounts%ROWTYPE" in sql
+
+
 def test_target_19c_lowers_bool_in_object_to_number_one():
     from pell.emitter import emit
     from pell.parser import parse

@@ -93,6 +93,18 @@ def lower_type(
         # Loses Option<Option<T>>; documented limitation for v0.
         return lower_type(t.inner, param=param, target=target, sql_context=sql_context)
     if isinstance(t, A.GenericType):
+        if t.base == "rowtype" and t.params:
+            # rowtype<table_or_view> → table_or_view%ROWTYPE.
+            # The argument's name is used verbatim (case-folded to lower);
+            # pell does no validation — Oracle resolves the table at compile
+            # time. LSP can squiggle missing/typo'd field accesses against
+            # the schema snapshot when that lands.
+            inner = t.params[0]
+            if isinstance(inner, A.NamedType):
+                return f"{inner.name.lower()}%ROWTYPE"
+            raise ValueError(
+                f"rowtype<...> must take a table or view name, got {type(inner).__name__}"
+            )
         if t.base == "Option" and t.params:
             return lower_type(t.params[0], param=param, target=target, sql_context=sql_context)
         if t.base == "Result" and t.params:

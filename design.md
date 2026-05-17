@@ -731,6 +731,47 @@ exception-safety guarantees the rest of the language leans on.
   general generic-method facility. See §11.2.
 - No traits/interfaces in v1. Function overloading is also out.
 
+### 5.0.1 `rowtype<T>` — table-shaped records
+
+For "I want a record matching this table's columns, and I want it to track
+whatever the table currently is," pell provides `rowtype<T>`:
+
+```pell
+let r: rowtype<accounts> = sql! { select * from accounts where id = :id }.one()?;
+log::info("balance = " || r.balance);   // resolved by Oracle at compile time
+```
+
+Lowers verbatim to PL/SQL's `%ROWTYPE`:
+
+```plsql
+l_r accounts%ROWTYPE;
+SELECT * INTO l_r FROM accounts WHERE id = p_id;
+```
+
+- The argument is the table or view name; pell does not parse or validate it.
+- Field accesses (`r.balance`) pass through to PL/SQL unchanged; Oracle
+  resolves them against the current shape of the table at compile time.
+- If the table grows a column, code that uses `rowtype<T>` picks it up on
+  the next pell rebuild + Oracle recompile — no source changes needed.
+- Pell side gives up field-name validation for that benefit. The intent
+  is that the LSP will eventually squiggle missing/typo'd accesses by
+  consulting the schema snapshot (M4), giving most of the safety back
+  without committing pell to baking column lists into emitted source.
+
+Use `rowtype<T>` when:
+- You want the "live" mutation-tolerant behavior (table evolves, code
+  doesn't).
+- The record is a throwaway local — no need to declare a `pub record`.
+- The record never needs to cross the SQL OBJECT boundary (i.e. it's
+  not a parameter to a `@pipelined` cursor input or a `stream<T>`
+  return — those require column enumeration for `CREATE TYPE … AS
+  OBJECT`).
+
+For records that DO need to participate in the SQL OBJECT machinery (e.g.,
+`@pipelined stream<T>` returns), use an explicit `pub record T { … }`
+or, when the schema snapshot infrastructure (M4) lands, `pub record T
+from <table>` to pell-side-bake the columns from the snapshot.
+
 ### 5.1 Collections — one surface, three backing types
 
 PL/SQL ships three collection types with very different semantics:
