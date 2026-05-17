@@ -525,6 +525,7 @@ class Emitter:
         for p in body_pragmas:
             out.append(f"    {p}")
         out.append(f"  BEGIN")
+        is_autonomous = "autonomous" in {a.name for a in fn.annotations}
         if has_finally:
             out.append("    BEGIN")
             if body_stmt_lines:
@@ -537,6 +538,22 @@ class Emitter:
             out.append("        RAISE;")
             out.append("    END;")
             out.append("    pell_finally_body;")
+        elif is_autonomous:
+            # Autonomous transactions must close with COMMIT or ROLLBACK before
+            # the procedure returns (Oracle raises ORA-06519 otherwise). Wrap
+            # the body in BEGIN/EXCEPTION: COMMIT on success, ROLLBACK+RAISE
+            # on error.
+            out.append("    BEGIN")
+            if body_stmt_lines:
+                out.extend(body_stmt_lines)
+            else:
+                out.append("      NULL;")
+            out.append("      COMMIT;")
+            out.append("    EXCEPTION")
+            out.append("      WHEN OTHERS THEN")
+            out.append("        ROLLBACK;")
+            out.append("        RAISE;")
+            out.append("    END;")
         else:
             if body_stmt_lines:
                 out.extend(body_stmt_lines)

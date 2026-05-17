@@ -4,6 +4,8 @@
 
 module audit.charges;
 
+// note: avoiding `log::info` here because Oracle's built-in LOG() math
+// function shadows user packages named `log` — known v0 issue.
 import std::log;
 
 pub fn charge_account(id: number, amount: number) -> number {
@@ -16,5 +18,5 @@ pub fn charge_account(id: number, amount: number) -> number {
     .one();
   return new_id;
 } finally {
-  log::info("charge_account exit");
+  dbms_output::put_line("charge_account exit");
 }

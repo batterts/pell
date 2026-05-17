@@ -15,5 +15,6 @@ pub fn country_name(code: text) -> text {
 
 @autonomous
 pub fn audit_log(event: text) {
-  sql! { insert into audit(event, ts) values (:event, sysdate) };
+  // note: `audit` is an Oracle reserved word, so use audit_tbl
+  sql! { insert into audit_tbl(event, ts) values (:event, sysdate) };
 }

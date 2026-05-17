@@ -12,7 +12,7 @@ CREATE OR REPLACE PACKAGE BODY audit_charges AS
     l_new_id NUMBER;
     PROCEDURE pell_finally_body IS
     BEGIN
-      log.info('charge_account exit');
+      dbms_output.put_line('charge_account exit');
     END pell_finally_body;
   BEGIN
     BEGIN

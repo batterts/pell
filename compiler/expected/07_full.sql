@@ -117,8 +117,15 @@ CREATE OR REPLACE PACKAGE BODY orders_fulfillment AS
   PROCEDURE audit(p_event IN VARCHAR2, p_order_id IN NUMBER) IS
     PRAGMA AUTONOMOUS_TRANSACTION;
   BEGIN
+    BEGIN
     insert into audit_log(event, order_id, occurred_at)
         values (p_event, p_order_id, sysdate);
+      COMMIT;
+    EXCEPTION
+      WHEN OTHERS THEN
+        ROLLBACK;
+        RAISE;
+    END;
   END audit;
 
   FUNCTION cancel_stale RETURN NUMBER IS

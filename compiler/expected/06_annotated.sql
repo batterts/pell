@@ -27,7 +27,14 @@ CREATE OR REPLACE PACKAGE BODY lookups_country AS
   PROCEDURE audit_log(p_event IN VARCHAR2) IS
     PRAGMA AUTONOMOUS_TRANSACTION;
   BEGIN
-    insert into audit(event, ts) values (p_event, sysdate);
+    BEGIN
+    insert into audit_tbl(event, ts) values (p_event, sysdate);
+      COMMIT;
+    EXCEPTION
+      WHEN OTHERS THEN
+        ROLLBACK;
+        RAISE;
+    END;
   END audit_log;
 END lookups_country;
 /
