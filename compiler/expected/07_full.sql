@@ -43,7 +43,7 @@ CREATE OR REPLACE PACKAGE BODY orders_fulfillment AS
       FROM orders where id = p_id;
     EXCEPTION
       WHEN NO_DATA_FOUND THEN
-        pell_runtime.set_err('orders_fulfillment_ordernotfound:1', '');
+        pell_runtime.set_err('orders_fulfillment_ordernotfound:1', '{}');
         RAISE pell_runtime.orders_fulfillment_ordernotfound;
       WHEN TOO_MANY_ROWS THEN RAISE;
     END;
@@ -79,7 +79,7 @@ CREATE OR REPLACE PACKAGE BODY orders_fulfillment AS
       FROM orders where id = p_order_id FOR UPDATE;
       EXCEPTION
         WHEN NO_DATA_FOUND THEN
-          pell_runtime.set_err('orders_fulfillment_ordernotfound:1', '');
+          pell_runtime.set_err('orders_fulfillment_ordernotfound:1', '{}');
           RAISE pell_runtime.orders_fulfillment_ordernotfound;
         WHEN TOO_MANY_ROWS THEN RAISE;
       END;
@@ -89,12 +89,12 @@ CREATE OR REPLACE PACKAGE BODY orders_fulfillment AS
       FROM skus where id = p_sku_id FOR UPDATE;
       EXCEPTION
         WHEN NO_DATA_FOUND THEN
-          pell_runtime.set_err('orders_fulfillment_ordernotfound:1', '');
+          pell_runtime.set_err('orders_fulfillment_ordernotfound:1', '{}');
           RAISE pell_runtime.orders_fulfillment_ordernotfound;
         WHEN TOO_MANY_ROWS THEN RAISE;
       END;
       IF (l_available < p_qty) THEN
-        pell_runtime.set_err('orders_fulfillment_insufficientinventory:1', 'sku_id=' || p_sku_id || '|' || 'requested=' || p_qty || '|' || 'available=' || l_available);
+        pell_runtime.set_err('orders_fulfillment_insufficientinventory:1', JSON_OBJECT('sku_id' VALUE p_sku_id, 'requested' VALUE p_qty, 'available' VALUE l_available));
         RAISE pell_runtime.orders_fulfillment_insufficientinventory;
       END IF;
       update skus set qty = qty - p_qty where id = p_sku_id;
@@ -110,7 +110,7 @@ CREATE OR REPLACE PACKAGE BODY orders_fulfillment AS
         IF NOT l_committed_0 THEN ROLLBACK TO pell_sp_0; END IF;
         RAISE;
     END;
-    pell_runtime.set_err('orders_fulfillment_ordernotfound:1', 'id=' || p_order_id);
+    pell_runtime.set_err('orders_fulfillment_ordernotfound:1', JSON_OBJECT('id' VALUE p_order_id));
     RAISE pell_runtime.orders_fulfillment_ordernotfound;
   END add_line;
 

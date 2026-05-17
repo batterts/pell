@@ -794,6 +794,20 @@ class Emitter:
 
     def _emit_questionmark_call(self, target: str, inner_call: A.Call, indent: str) -> list[str]:
         """Emit `target := <call>?` — propagate Err via RAISE."""
+        # Match the explicit chain form: sql!{}.one()[.if_empty(X)][.if_many(Y)]
+        # (each .if_* is optional, order-independent). When matched, the
+        # WHEN handlers raise the user-specified typed errors instead of the
+        # prelude / name-matched ones.
+        base, if_empty_arg, if_many_arg = self._peel_select_chain(inner_call)
+        if base is not None:
+            recv, sql = self._strip_lock_modifiers(base.callee.obj)
+            if sql is not None:
+                return self._emit_select_into(
+                    target, sql, indent,
+                    expect_exactly_one=True,
+                    if_empty_arg=if_empty_arg,
+                    if_many_arg=if_many_arg,
+                )
         # If the inner call is sql!{}[.for_update()...].one() — turn into a SELECT INTO.
         if isinstance(inner_call.callee, A.MemberAccess) and inner_call.callee.field == "one":
             recv, sql = self._strip_lock_modifiers(inner_call.callee.obj)
@@ -806,6 +820,40 @@ class Emitter:
                 return self._emit_first_loop(target, sql, indent, propagate_none=True)
         # general: assume the call returns the value and may raise (already-shaped errors via RAISE)
         return [f"{indent}{target} := {self._emit_expr(inner_call)};"]
+
+    def _peel_select_chain(
+        self, call: A.Call,
+    ) -> tuple[Optional[A.Call], Optional[A.StructLit], Optional[A.StructLit]]:
+        """Walk inward through `.if_empty(X)` / `.if_many(Y)` method calls and
+        return `(one_call, if_empty_arg, if_many_arg)` if the chain bottoms out
+        at a `.one()` call on some receiver. Otherwise `(None, None, None)`.
+
+        Each `.if_*` call may appear at most once; order doesn't matter.
+        """
+        if_empty: Optional[A.StructLit] = None
+        if_many:  Optional[A.StructLit] = None
+        cur: A.Expr = call
+        # peel at most 2 layers, then expect .one()
+        for _ in range(3):
+            if not (isinstance(cur, A.Call) and isinstance(cur.callee, A.MemberAccess)):
+                return (None, None, None)
+            method = cur.callee.field
+            if method == "if_empty" and if_empty is None and len(cur.args) == 1:
+                if not isinstance(cur.args[0], A.StructLit):
+                    return (None, None, None)
+                if_empty = cur.args[0]
+                cur = cur.callee.obj
+            elif method == "if_many" and if_many is None and len(cur.args) == 1:
+                if not isinstance(cur.args[0], A.StructLit):
+                    return (None, None, None)
+                if_many = cur.args[0]
+                cur = cur.callee.obj
+            elif method == "one" and not cur.args:
+                # Found base .one() — return it (caller pulls receiver SQL out).
+                return (cur, if_empty, if_many)
+            else:
+                return (None, None, None)
+        return (None, None, None)
 
     def _strip_lock_modifiers(self, expr: A.Expr) -> tuple[Optional[A.Expr], Optional[A.SqlBlock]]:
         """Unwrap `.for_update()` / `.nowait()` / `.skip_locked()` modifiers and
@@ -910,13 +958,26 @@ class Emitter:
             f"{indent}{target} := SQL%ROWCOUNT;",
         ]
 
-    def _emit_select_into(self, target: str, sql: A.SqlBlock, indent: str, expect_exactly_one: bool) -> list[str]:
+    def _emit_select_into(
+        self,
+        target: str,
+        sql: A.SqlBlock,
+        indent: str,
+        expect_exactly_one: bool,
+        *,
+        if_empty_arg: Optional[A.StructLit] = None,
+        if_many_arg: Optional[A.StructLit] = None,
+    ) -> list[str]:
         """Lower a single-row SELECT INTO.
 
         PL/SQL requires INTO between the SELECT list and FROM, so we splice
-        it in at that boundary. If the enclosing fn returns Result<T, ...>
-        and its error union contains a NotFound-named variant, NO_DATA_FOUND
-        is mapped to that typed error; otherwise re-raised as-is.
+        it in at that boundary.
+
+        Error-handler dispatch order:
+          1. `if_empty_arg` / `if_many_arg` (explicit chain) take precedence.
+          2. Else, NO_DATA_FOUND maps to the fn's NotFound-named variant if
+             present (legacy name-matching).
+          3. Else, NO_DATA_FOUND and TOO_MANY_ROWS re-raise as-is.
         """
         import re
         sql_text = self._rewrite_binds(sql.sql).strip().rstrip(";")
@@ -927,23 +988,43 @@ class Emitter:
             spliced = f"{head}\n      INTO {target}\n      FROM {tail}"
         else:
             spliced = f"{sql_text}\n      INTO {target}"
-        # NO_DATA_FOUND handler: typed mapping if fn declares a NotFound variant
-        nf_variant = self._notfound_variant_for_current_fn()
-        if nf_variant is not None:
-            exn = self._exception_name(nf_variant)
+        # NO_DATA_FOUND handler
+        if if_empty_arg is not None:
+            exn = self._exception_name(if_empty_arg.type_name)
+            payload = self._struct_lit_to_json(if_empty_arg)
             nf_handler = (
                 f"{indent}  WHEN NO_DATA_FOUND THEN\n"
-                f"{indent}    pell_runtime.set_err('{exn}:1', '');\n"
+                f"{indent}    pell_runtime.set_err('{exn}:1', {payload});\n"
                 f"{indent}    RAISE pell_runtime.{exn};"
             )
         else:
-            nf_handler = f"{indent}  WHEN NO_DATA_FOUND THEN RAISE;"
+            nf_variant = self._notfound_variant_for_current_fn()
+            if nf_variant is not None:
+                exn = self._exception_name(nf_variant)
+                nf_handler = (
+                    f"{indent}  WHEN NO_DATA_FOUND THEN\n"
+                    f"{indent}    pell_runtime.set_err('{exn}:1', '{{}}');\n"
+                    f"{indent}    RAISE pell_runtime.{exn};"
+                )
+            else:
+                nf_handler = f"{indent}  WHEN NO_DATA_FOUND THEN RAISE;"
+        # TOO_MANY_ROWS handler
+        if if_many_arg is not None:
+            exn = self._exception_name(if_many_arg.type_name)
+            payload = self._struct_lit_to_json(if_many_arg)
+            tm_handler = (
+                f"{indent}  WHEN TOO_MANY_ROWS THEN\n"
+                f"{indent}    pell_runtime.set_err('{exn}:1', {payload});\n"
+                f"{indent}    RAISE pell_runtime.{exn};"
+            )
+        else:
+            tm_handler = f"{indent}  WHEN TOO_MANY_ROWS THEN RAISE;"
         return [
             f"{indent}BEGIN",
             f"{indent}  {spliced.strip()};",
             f"{indent}EXCEPTION",
             nf_handler,
-            f"{indent}  WHEN TOO_MANY_ROWS THEN RAISE;",
+            tm_handler,
             f"{indent}END;",
         ]
 
@@ -1029,15 +1110,15 @@ class Emitter:
         return prefix + [f"{indent}RETURN {self._emit_expr(s.value)};"]
 
     def _emit_err_return(self, payload_expr: A.Expr, indent: str) -> list[str]:
-        """Lower `return Err(<variant>)` to: set SYS_CONTEXT payload + RAISE."""
+        """Lower `return Err(<variant>)` to: set SYS_CONTEXT payload + RAISE.
+
+        Payload is encoded as a JSON object so the catch side can read
+        individual fields back via JSON_VALUE without string parsing.
+        """
         if isinstance(payload_expr, A.StructLit):
             err_name = payload_expr.type_name
             exn = self._exception_name(err_name)
-            fields = " || '|' || ".join(
-                f"'{f.name}=' || {self._emit_expr(f.value)}"
-                for f in payload_expr.fields
-            )
-            payload = fields if fields else "''"
+            payload = self._struct_lit_to_json(payload_expr)
             return [
                 f"{indent}pell_runtime.set_err('{exn}:1', {payload});",
                 f"{indent}RAISE pell_runtime.{exn};",
@@ -1047,6 +1128,20 @@ class Emitter:
             exn = self._exception_name(payload_expr.name)
             return [f"{indent}RAISE pell_runtime.{exn};"]
         return [f"{indent}-- TODO: Err({type(payload_expr).__name__})"]
+
+    def _struct_lit_to_json(self, sl: A.StructLit) -> str:
+        """Render a pell struct literal as a PL/SQL JSON_OBJECT(...) call.
+
+        Each field becomes `'name' VALUE <emitted-expr>`. Zero-field structs
+        render as `'{}'` (literal JSON empty object).
+        """
+        if not sl.fields:
+            return "'{}'"
+        args = ", ".join(
+            f"'{f.name}' VALUE {self._emit_expr(f.value)}"
+            for f in sl.fields
+        )
+        return f"JSON_OBJECT({args})"
 
     def _emit_if(self, s: A.IfStmt, indent: str) -> list[str]:
         out = [f"{indent}IF {self._emit_expr(s.cond)} THEN"]

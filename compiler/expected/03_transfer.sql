@@ -35,7 +35,7 @@ CREATE OR REPLACE PACKAGE BODY billing_charges AS
         WHEN TOO_MANY_ROWS THEN RAISE;
       END;
       IF (l_src.balance < p_amt) THEN
-        pell_runtime.set_err('billing_charges_overdraft:1', 'account=' || p_from_id || '|' || 'requested=' || p_amt || '|' || 'available=' || l_src.balance);
+        pell_runtime.set_err('billing_charges_overdraft:1', JSON_OBJECT('account' VALUE p_from_id, 'requested' VALUE p_amt, 'available' VALUE l_src.balance));
         RAISE pell_runtime.billing_charges_overdraft;
       END IF;
       update accounts set balance = balance - p_amt where id = p_from_id;

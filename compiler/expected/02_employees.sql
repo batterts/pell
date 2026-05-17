@@ -31,7 +31,7 @@ CREATE OR REPLACE PACKAGE BODY hr_employees AS
       FROM employees where id = p_id;
     EXCEPTION
       WHEN NO_DATA_FOUND THEN
-        pell_runtime.set_err('hr_employees_notfound:1', '');
+        pell_runtime.set_err('hr_employees_notfound:1', '{}');
         RAISE pell_runtime.hr_employees_notfound;
       WHEN TOO_MANY_ROWS THEN RAISE;
     END;
@@ -43,7 +43,7 @@ CREATE OR REPLACE PACKAGE BODY hr_employees AS
   BEGIN
     l_e := find_employee(p_id);
     IF (l_e.grade >= 9) THEN
-      pell_runtime.set_err('hr_employees_policyviolation:1', 'reason=' || 'already at max grade');
+      pell_runtime.set_err('hr_employees_policyviolation:1', JSON_OBJECT('reason' VALUE 'already at max grade'));
       RAISE pell_runtime.hr_employees_policyviolation;
     END IF;
     update employees set grade = grade + 1 where id = p_id;
