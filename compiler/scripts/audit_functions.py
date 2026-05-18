@@ -13,11 +13,17 @@ Output: a markdown coverage table.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
 
-SQLTUN = "/tmp/run_as_pell.sh"
+# Connection wrapper — a script (or SQLcl invocation) that takes a `@file`
+# argument and runs it against your Oracle instance. Set
+# $PELL_SQL_RUNNER to a wrapper that pre-binds your credentials so the
+# username/password never reach source control. Falls back to `sql` on
+# PATH; you'll then need a tnsnames.ora or wallet for it to connect.
+SQLTUN = os.environ.get("PELL_SQL_RUNNER", "sql")
 
 
 # (slug, category, return_kind, pell_call_expression)

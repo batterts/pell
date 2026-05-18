@@ -13,7 +13,7 @@ comes out *today*.
 ## Quickstart
 
 ```sh
-# from /Users/shaun.batterton/code/plsql
+# from the repository root
 
 # compile a single file to stdout (default target is Oracle 23)
 ./pell build compiler/examples/01_hello.pell

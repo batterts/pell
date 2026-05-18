@@ -28,7 +28,7 @@ PyCharm, GoLand, …).
    - **(b) Add manually.** Settings → Languages & Frameworks →
      Language Servers → "+" → "New Language Server":
      - Name: `pell`
-     - Command: `/Users/shaun.batterton/code/plsql/lsp/run.sh`
+     - Command: absolute path to `lsp/run.sh` in your clone
      - Mappings → "Add File Name Patterns" → `*.pell`
      - Language ID: `pell`
 

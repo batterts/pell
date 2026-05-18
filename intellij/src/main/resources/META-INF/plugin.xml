@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>dev.pell.intellij</id>
     <name>pell</name>
-    <vendor email="hello@example.com" url="https://github.com/shaunbatterton/pell">pell</vendor>
+    <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
     <version>0.0.1</version>
 
     <description><![CDATA[

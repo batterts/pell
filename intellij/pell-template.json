@@ -1,6 +1,6 @@
 {
   "name": "pell",
-  "programArgs": "/Users/shaun.batterton/code/plsql/lsp/run.sh",
+  "programArgs": "${workspaceFolder}/lsp/run.sh",
   "fileType": {
     "name": "pell",
     "patterns": "*.pell"

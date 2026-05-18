@@ -138,7 +138,7 @@ up the on-disk worktrees once you've stopped consulting them:
 
 ```
 for slug in oracle-plsql type-system dx-tooling readability ide; do
-  git -C /Users/shaun.batterton/code/plsql worktree remove /tmp/pell-reviews/$slug
+  git worktree remove /tmp/pell-reviews/$slug
 done
 rmdir /tmp/pell-reviews
 ```
@@ -148,7 +148,7 @@ content redundant):
 
 ```
 for slug in oracle-plsql type-system dx-tooling readability ide; do
-  git -C /Users/shaun.batterton/code/plsql branch -d review/$slug
+  git branch -d review/$slug
 done
 ```
 
