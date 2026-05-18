@@ -59,6 +59,10 @@ PRIM_PARAM_MAP = {
 SUPPORTED_TARGETS = ("23", "19c")
 
 
+# Pell param mode → PL/SQL parameter mode keyword.
+PARAM_MODE_PL: dict[str, str] = {"in": "IN", "out": "OUT", "inout": "IN OUT"}
+
+
 # Method-style aliases — each lowers `recv.method(args...)` to a fixed SQL
 # fragment. The receiver is rendered exactly once; arguments are rendered
 # left-to-right. These are dispatched AFTER object/method dispatch on
@@ -532,7 +536,7 @@ class Emitter:
             sig += self._pipelined_parallel_clauses(fn)
             return sig
         params = ", ".join(
-            f"{param_name(p.name)} IN {self._lt(p.type_ref, param=True)}"
+            f"{param_name(p.name)} {PARAM_MODE_PL[p.mode]} {self._lt(p.type_ref, param=True)}"
             for p in fn.params
         )
         ret = fn.return_type
@@ -2606,7 +2610,7 @@ class Emitter:
         else:
             prefix_parts.append("FUNCTION")
         params = ", ".join(
-            f"{param_name(p.name)} {self._lt(p.type_ref, param=True)}"
+            f"{param_name(p.name)} {PARAM_MODE_PL[p.mode]} {self._lt(p.type_ref, param=True)}"
             for p in m.params
         )
         sig = f"  {' '.join(prefix_parts)} {m.name.lower()}"

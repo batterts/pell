@@ -358,6 +358,10 @@ class Param:
     loc: Loc
     name: str
     type_ref: TypeRef
+    # Parameter mode: "in" (default — value is read-only inside the body),
+    # "out" (caller variable is written), or "inout" (read-and-write).
+    # Lowered to PL/SQL `IN` / `OUT` / `IN OUT` respectively.
+    mode: str = "in"
 
 
 @dataclass

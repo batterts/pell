@@ -67,6 +67,7 @@ _KEYWORDS = {
     "unsafe", "finally", "and", "or", "not",
     "type", "sealed", "aggregate", "case", "self",
     "seq",
+    "out", "inout",
 }
 
 # Pell built-in primitive types — render as `type`, not `variable`.

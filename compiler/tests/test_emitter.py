@@ -631,7 +631,7 @@ def test_type_basic_emission():
     """)
     assert "CREATE OR REPLACE TYPE t_money AS OBJECT (" in sql
     assert "amount NUMBER" in sql
-    assert "MEMBER FUNCTION add(p_other t_money) RETURN t_money" in sql
+    assert "MEMBER FUNCTION add(p_other IN t_money) RETURN t_money" in sql
     assert "MAP MEMBER FUNCTION rank RETURN NUMBER" in sql
     assert "CREATE OR REPLACE TYPE BODY t_money AS" in sql
     assert "t_money((SELF.amount + p_other.amount), SELF.currency)" in sql
@@ -955,6 +955,41 @@ def test_method_alias_wrong_arity_errors():
             module m;
             pub fn f(s: text) -> bool { return s.contains(); }
         """)
+
+
+def test_out_inout_param_modes_emit_correctly():
+    sql = compile_to_sql("""
+        module m;
+        pub fn split_name(full: text, out firstname: text, out lastname: text) {
+            firstname = full;
+            lastname = full;
+        }
+        pub fn bump(inout n: number) { n = n + 1; }
+    """)
+    assert "p_full IN VARCHAR2" in sql
+    assert "p_firstname OUT VARCHAR2" in sql
+    assert "p_lastname OUT VARCHAR2" in sql
+    assert "p_n IN OUT NUMBER" in sql
+    # Body should ASSIGN to the OUT param (not declare a local for it).
+    assert "p_firstname := p_full;" in sql
+    assert "p_n := (p_n + 1);" in sql
+
+
+def test_caller_passes_locals_as_out_args():
+    """When a pell fn calls another fn with OUT params, the local variable
+    references lower correctly as `l_<name>` so PL/SQL accepts them as OUT
+    bind targets."""
+    sql = compile_to_sql("""
+        module m;
+        pub fn split(s: text, out a: text, out b: text) { a = s; b = s; }
+        pub fn demo() -> text {
+            var x: text = "";
+            var y: text = "";
+            split("hi", x, y);
+            return x;
+        }
+    """)
+    assert "split('hi', l_x, l_y);" in sql
 
 
 def test_sequence_currval_inferred_as_number():

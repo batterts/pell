@@ -187,6 +187,27 @@ class Parser:
             out.append(A.Annotation(loc=at.loc, name=name_tok.value, args=args, kwargs=kwargs))
         return out
 
+    def _parse_param_list(self) -> list[A.Param]:
+        """Parse a comma-separated parameter list inside `(...)`. Each param:
+            [out | inout] NAME : TYPE
+        Caller is responsible for consuming the surrounding LPAREN / RPAREN.
+        """
+        params: list[A.Param] = []
+        while not self._at("RPAREN"):
+            ploc = self._peek().loc
+            mode = "in"
+            if self._eat_keyword("out"):
+                mode = "out"
+            elif self._eat_keyword("inout"):
+                mode = "inout"
+            pname = self._expect("IDENT").value
+            self._expect("COLON")
+            ptype = self._parse_type()
+            params.append(A.Param(loc=ploc, name=pname, type_ref=ptype, mode=mode))
+            if not self._eat("COMMA"):
+                break
+        return params
+
     def _parse_seq_def(self, annotations: list[A.Annotation], is_pub: bool) -> A.SequenceDef:
         kw = self._expect("KW_SEQ")
         name = self._parse_qualified_ident()
@@ -203,15 +224,7 @@ class Parser:
         kw = self._expect("KW_FN")
         name = self._expect("IDENT").value
         self._expect("LPAREN")
-        params: list[A.Param] = []
-        while not self._at("RPAREN"):
-            ploc = self._peek().loc
-            pname = self._expect("IDENT").value
-            self._expect("COLON")
-            ptype = self._parse_type()
-            params.append(A.Param(loc=ploc, name=pname, type_ref=ptype))
-            if not self._eat("COMMA"):
-                break
+        params = self._parse_param_list()
         self._expect("RPAREN")
         return_type: Optional[A.TypeRef] = None
         if self._eat("ARROW"):
@@ -385,15 +398,7 @@ class Parser:
         name = name_tok.value
         is_constructor = (name == "new")
         self._expect("LPAREN")
-        params: list[A.Param] = []
-        while not self._at("RPAREN"):
-            ploc = self._peek().loc
-            pname = self._expect("IDENT").value
-            self._expect("COLON")
-            ptype = self._parse_type()
-            params.append(A.Param(loc=ploc, name=pname, type_ref=ptype))
-            if not self._eat("COMMA"):
-                break
+        params = self._parse_param_list()
         self._expect("RPAREN")
         return_type: Optional[A.TypeRef] = None
         if self._eat("ARROW"):
@@ -422,15 +427,7 @@ class Parser:
         name = self._expect("IDENT").value
         # signature: (param : T, ...) -> R
         self._expect("LPAREN")
-        params: list[A.Param] = []
-        while not self._at("RPAREN"):
-            ploc = self._peek().loc
-            pname = self._expect("IDENT").value
-            self._expect("COLON")
-            ptype = self._parse_type()
-            params.append(A.Param(loc=ploc, name=pname, type_ref=ptype))
-            if not self._eat("COMMA"):
-                break
+        params = self._parse_param_list()
         self._expect("RPAREN")
         return_type: Optional[A.TypeRef] = None
         if self._eat("ARROW"):
@@ -472,17 +469,8 @@ class Parser:
                 self.pos += 1
                 # optional param list overrides outer params
                 if self._eat("LPAREN"):
-                    sp: list[A.Param] = []
-                    while not self._at("RPAREN"):
-                        ploc = self._peek().loc
-                        pname = self._expect("IDENT").value
-                        self._expect("COLON")
-                        ptype = self._parse_type()
-                        sp.append(A.Param(loc=ploc, name=pname, type_ref=ptype))
-                        if not self._eat("COMMA"):
-                            break
+                    step_params = self._parse_param_list()
                     self._expect("RPAREN")
-                    step_params = sp
                 step_body = self._parse_block()
                 continue
             if cur.kind == "IDENT" and cur.value == "merge":

@@ -97,6 +97,63 @@ Note the compiler handles the spec/body split, name-mangling, and string
 interpolation lowering. Source maps are emitted so DB error stacks point back
 to `.pell` lines (§8).
 
+### 4.1.1 Parameter modes — `in` (default), `out`, `inout`
+
+Function parameters default to read-only (`IN` in PL/SQL). To write back
+to the caller's variable, mark the parameter `out` (caller-side variable
+must be set, body must assign before return) or `inout` (read-and-write):
+
+```pell
+pub fn split_name(full: text, out firstname: text, out lastname: text) {
+    let parts: list<text> = full.split(" ");
+    firstname = parts.at(parts.first());
+    lastname  = parts.at(parts.last());
+}
+
+pub fn bump(inout n: number) {
+    n = n + 1;
+}
+```
+
+Lowers to:
+
+```sql
+PROCEDURE split_name(p_full IN VARCHAR2, p_firstname OUT VARCHAR2, p_lastname OUT VARCHAR2);
+PROCEDURE bump(p_n IN OUT NUMBER);
+```
+
+**When to use OUT params vs. a record return**: the idiomatic pell pattern
+for "multiple outputs" is a record:
+
+```pell
+pub record Name { first: text, last: text }
+
+pub fn split_name(full: text) -> Name {
+    let parts: list<text> = full.split(" ");
+    return Name {
+        first: parts.at(parts.first()),
+        last:  parts.at(parts.last()),
+    };
+}
+```
+
+The record form is preferred because the result is a single composable
+value — passable, comparable, returnable from `match` arms. Reach for
+OUT/IN OUT when:
+
+- **Interop**: calling or mirroring an existing PL/SQL procedure that
+  already exposes OUT parameters (no choice).
+- **Hot loops**: avoiding the implicit record copy on every call when
+  the same caller-side variable is updated repeatedly.
+- **One assignment, no return**: a `pub fn` that's logically a
+  procedure with a single side effect already lowers to PL/SQL
+  `PROCEDURE` (no return type); IN OUT just makes the intent obvious.
+
+Pell does *not* enforce "OUT param must be assigned on every path" in
+v1 — Oracle's own compile check catches the obvious cases (unused OUT
+yields a PLW-warning). A future enhancement could lift this into a
+pell-level lint.
+
 ### 4.2 Records and nullability
 
 ```pell

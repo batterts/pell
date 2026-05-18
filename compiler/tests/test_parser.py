@@ -323,6 +323,30 @@ def test_sequence_def_simple():
     assert sd.is_pub
 
 
+def test_fn_with_out_and_inout_params():
+    m = parse("""
+        module m;
+        pub fn f(a: number, out b: text, inout c: number) {}
+    """)
+    fn = m.items[0]
+    assert isinstance(fn, A.FnDef)
+    assert [p.name for p in fn.params] == ["a", "b", "c"]
+    assert [p.mode for p in fn.params] == ["in", "out", "inout"]
+
+
+def test_method_param_modes():
+    m = parse("""
+        module m;
+        pub type T {
+            x: number;
+            fn touch(out received: number) { received = self.x; }
+        }
+    """)
+    td = m.items[0]
+    method = td.methods[0]
+    assert method.params[0].mode == "out"
+
+
 def test_sequence_def_qualified():
     m = parse("module m; pub seq hr::emp_seq;")
     sd = m.items[0]

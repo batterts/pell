@@ -26,6 +26,8 @@ KEYWORDS = {
     "type", "sealed", "aggregate", "case", "self",
     # External sequence references (no DDL).
     "seq",
+    # Parameter modes (default is IN; absent = IN).
+    "out", "inout",
 }
 
 

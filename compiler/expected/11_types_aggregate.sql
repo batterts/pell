@@ -6,12 +6,12 @@ CREATE OR REPLACE TYPE t_number_nt AS TABLE OF NUMBER;
 CREATE OR REPLACE TYPE t_money AS OBJECT (
   amount NUMBER,
   currency VARCHAR2(4000),
-  MEMBER FUNCTION plus(p_other t_money) RETURN t_money,
+  MEMBER FUNCTION plus(p_other IN t_money) RETURN t_money,
   MAP MEMBER FUNCTION rank RETURN NUMBER
 );
 /
 CREATE OR REPLACE TYPE BODY t_money AS
-  MEMBER FUNCTION plus(p_other t_money) RETURN t_money IS
+  MEMBER FUNCTION plus(p_other IN t_money) RETURN t_money IS
   BEGIN
     RETURN t_money((SELF.amount + p_other.amount), SELF.currency);
   END;
