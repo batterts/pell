@@ -1,0 +1,50 @@
+<idea-plugin>
+    <id>dev.pell.intellij</id>
+    <name>pell</name>
+    <vendor email="hello@example.com" url="https://github.com/shaunbatterton/pell">pell</vendor>
+    <version>0.0.1</version>
+
+    <description><![CDATA[
+        IntelliJ support for the <b>pell</b> language — a statically-typed
+        surface language that compiles to Oracle PL/SQL 23.
+        <br><br>
+        Wraps the <code>pell-lsp</code> server via LSP4IJ to provide:
+        <ul>
+          <li>Real-time diagnostics from the pell parser</li>
+          <li>Hover info for fns, records, and errors</li>
+          <li>Document symbols (outline view)</li>
+          <li>Basic completion (keywords, methods, annotations)</li>
+          <li>Go-to-definition within a file</li>
+        </ul>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.redhat.devtools.lsp4ij</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Register the .pell file type -->
+        <fileType
+            name="pell"
+            language="pell"
+            extensions="pell"
+            implementationClass="dev.pell.intellij.PellFileType"
+            fieldName="INSTANCE" />
+
+        <!-- Language definition (Plain language; PSI is handled by LSP4IJ) -->
+        <lang.parserDefinition
+            language="pell"
+            implementationClass="dev.pell.intellij.PellParserDefinition" />
+    </extensions>
+
+    <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">
+        <!-- Wire pell-lsp as a server. The path is taken from the plugin's
+             config UI; users set it once after install. -->
+        <server
+            id="pell-lsp"
+            name="pell"
+            factoryClass="dev.pell.intellij.PellLanguageServerFactory" />
+        <languageMapping
+            serverId="pell-lsp"
+            language="pell" />
+    </extensions>
+</idea-plugin>

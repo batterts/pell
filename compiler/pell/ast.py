@@ -242,6 +242,14 @@ class ListLit(Expr):
     elements: list[Expr] = field(default_factory=list)
 
 
+@dataclass
+class TupleLit(Expr):
+    """A parenthesized tuple `(a, b, c)`. Only meaningful in annotation
+    keyword-argument position today — e.g., `@parallel(order = (col1, col2))`.
+    A single `(x)` is parsed as a grouped expression, not a 1-tuple."""
+    elements: list[Expr] = field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Statements
 # ---------------------------------------------------------------------------
@@ -390,6 +398,104 @@ class ErrorDef(Item):
 @dataclass
 class ImportStmt(Item):
     path: str = ""  # e.g. std::log
+
+
+@dataclass
+class SequenceDef(Item):
+    """`pub seq employee_id_seq;` — declares an external Oracle sequence.
+
+    pell does not emit DDL for sequences (the user creates them via
+    `CREATE SEQUENCE …`). The declaration simply registers the name so
+    that `name.nextval` / `name.currval` read as bare references in
+    PL/SQL instead of getting the `l_` local-variable prefix.
+
+    Qualified names are allowed (`hr::employees_seq`) and lower to
+    `hr.employees_seq.nextval`.
+    """
+    name: str = ""
+
+
+# ---------------------------------------------------------------------------
+# `type` and `sealed type` (§5.2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MethodDef:
+    """Member function inside a `type` or `sealed type`.
+
+    `is_abstract=True` means the method has only a signature (body is empty)
+    and every case in a sealed hierarchy must implement it.
+    `is_map=True` means this is the type's MAP method (`map fn rank()`); at
+    most one per type, must return a primitive comparable type.
+    `is_constructor=True` means the method is named `new` and acts as a
+    smart constructor (returns `Self` or `Result<Self, _>`).
+    """
+    loc: Loc
+    name: str
+    params: list[Param] = field(default_factory=list)
+    return_type: Optional[TypeRef] = None
+    body: list[Stmt] = field(default_factory=list)
+    is_abstract: bool = False
+    is_map: bool = False
+    is_constructor: bool = False
+    is_overriding: bool = False  # set by emitter when method overrides a parent's
+    annotations: list["Annotation"] = field(default_factory=list)
+
+
+@dataclass
+class TypeDef(Item):
+    """`pub type T { fields; methods; }` — Oracle object type with member fns."""
+    name: str = ""
+    fields: list[FieldDef] = field(default_factory=list)
+    methods: list[MethodDef] = field(default_factory=list)
+
+
+@dataclass
+class CaseDef:
+    """A `case` inside a `sealed type`. Holds its own fields + method overrides."""
+    loc: Loc
+    name: str
+    fields: list[FieldDef] = field(default_factory=list)
+    methods: list[MethodDef] = field(default_factory=list)
+
+
+@dataclass
+class SealedTypeDef(Item):
+    """`pub sealed type T { fields; methods; case C1 { ... } case C2 { ... } }`.
+
+    Parent-level methods with bodies are inherited; with no body they are
+    abstract and every case must implement them. Parent-level fields are
+    inherited by every case.
+    """
+    name: str = ""
+    fields: list[FieldDef] = field(default_factory=list)
+    methods: list[MethodDef] = field(default_factory=list)
+    cases: list[CaseDef] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# `aggregate` (§5.3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AggregateDef(Item):
+    """`pub aggregate name(arg: T) -> R { state { ... } step ... merge ... finish ... }`.
+
+    Compiles to an ODCIAggregate object type plus a CREATE FUNCTION ... AGGREGATE USING.
+    `@parallel` annotation gates PARALLEL_ENABLE.
+    """
+    name: str = ""
+    params: list[Param] = field(default_factory=list)  # arg(s) to step
+    return_type: Optional[TypeRef] = None              # finish() return type
+    state_fields: list[FieldDef] = field(default_factory=list)
+    state_defaults: list[Expr] = field(default_factory=list)  # parallel to state_fields
+    step_body: list[Stmt] = field(default_factory=list)
+    step_params: list[Param] = field(default_factory=list)    # same as params for now
+    merge_body: Optional[list[Stmt]] = None
+    merge_other_name: str = "other"  # the name bound for the other Self
+    finish_body: list[Stmt] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

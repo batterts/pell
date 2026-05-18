@@ -59,6 +59,28 @@ PRIM_PARAM_MAP = {
 SUPPORTED_TARGETS = ("23", "19c")
 
 
+# Method-style aliases — each lowers `recv.method(args...)` to a fixed SQL
+# fragment. The receiver is rendered exactly once; arguments are rendered
+# left-to-right. These are dispatched AFTER object/method dispatch on
+# user-defined types (so `user_type.contains(x)` still calls the user's
+# method if defined) and AFTER list-method handling.
+_METHOD_ALIASES: dict[str, tuple[int, str]] = {
+    # String predicates
+    "contains":    (1, "(INSTR({recv}, {arg0}) > 0)"),
+    "starts_with": (1, "({recv} LIKE {arg0} || '%')"),
+    "ends_with":   (1, "({recv} LIKE '%' || {arg0})"),
+    "is_empty":    (0, "({recv} IS NULL OR LENGTH({recv}) = 0)"),
+    # Date / timestamp components
+    "year":        (0, "EXTRACT(YEAR FROM {recv})"),
+    "month":       (0, "EXTRACT(MONTH FROM {recv})"),
+    "day":         (0, "EXTRACT(DAY FROM {recv})"),
+    "hour":        (0, "EXTRACT(HOUR FROM {recv})"),
+    "minute":      (0, "EXTRACT(MINUTE FROM {recv})"),
+    "second":      (0, "EXTRACT(SECOND FROM {recv})"),
+    # Date arithmetic: omitted — `d + n` already works via BinOp.
+}
+
+
 def lower_type(
     t: A.TypeRef,
     *,
@@ -207,8 +229,28 @@ class Emitter:
         self._records: list[A.RecordDef] = [i for i in module.items if isinstance(i, A.RecordDef)]
         self._errors: list[A.ErrorDef] = [i for i in module.items if isinstance(i, A.ErrorDef)]
         self._fns: list[A.FnDef] = [i for i in module.items if isinstance(i, A.FnDef)]
+        self._types: list[A.TypeDef] = [i for i in module.items if isinstance(i, A.TypeDef)]
+        self._sealed_types: list[A.SealedTypeDef] = [i for i in module.items if isinstance(i, A.SealedTypeDef)]
+        self._aggregates: list[A.AggregateDef] = [i for i in module.items if isinstance(i, A.AggregateDef)]
+        self._sequences: list[A.SequenceDef] = [i for i in module.items if isinstance(i, A.SequenceDef)]
+        # Sequence names — used by _lower_ident to skip the `l_` local prefix
+        # and by type inference to type `<seq>.nextval` / `<seq>.currval` as NUMBER.
+        self._seq_names: set[str] = {s.name for s in self._sequences}
         # all module-private and module-public fn names
         self._fn_names: set[str] = {f.name for f in self._fns}
+        # names of declared types (so StructLit on a type emits an OBJECT constructor,
+        # not a record-style field-by-field assignment)
+        self._type_names: set[str] = {t.name for t in self._types} | {
+            c.name for st in self._sealed_types for c in st.cases
+        } | {st.name for st in self._sealed_types}
+        # method-emission state — set by _emit_method, used by _lower_ident
+        self._in_method_type: Optional[str] = None  # type name being emitted (for `self`)
+        # True while emitting an aggregate's `finish()` body — return X gets
+        # rewritten to `returnValue := X; RETURN ODCIConst.Success;`.
+        self._in_aggregate_terminate: bool = False
+        # Set when any `.split()` call is emitted — triggers a per-module
+        # private helper function `pell_split_text` in the package body.
+        self._needs_split_helper: bool = False
         # convenience wrapper that threads self.target through type lowering
         self._lt = lambda t, *, param=False, sql_context=False: lower_type(
             t, param=param, target=self.target, sql_context=sql_context
@@ -226,6 +268,14 @@ class Emitter:
         for fn in self._fns:
             if any(a.name == "pipelined" for a in fn.annotations):
                 self._prepare_pipelined_schema_types(fn)
+        # §5.2 / §5.3 — types, sealed hierarchies, aggregates emit schema-level
+        # CREATE TYPE / CREATE TYPE BODY / CREATE FUNCTION ... AGGREGATE USING.
+        for t in self._types:
+            self._emit_user_type(t)
+        for st in self._sealed_types:
+            self._emit_sealed_type(st)
+        for ag in self._aggregates:
+            self._emit_aggregate(ag)
         chunks: list[str] = []
         chunks.append(self._emit_header())
         if self._errors:
@@ -346,12 +396,37 @@ class Emitter:
                 if decl is not None and decl[0] not in seen:
                     seen.add(decl[0])
                     spec_list_types.append(decl[1])
+        # Pre-walk @pipelined fns with @parallel(partition=…) — those need a
+        # strongly-typed REF CURSOR declaration before the fn signature
+        # (Oracle PLS-00627 if SYS_REFCURSOR is used).
+        strong_cursor_decls: list[str] = []
+        seen_cursors: set[str] = set()
+        for fn in self._fns:
+            if not (any(a.name == "pipelined" for a in fn.annotations)):
+                continue
+            if not self._fn_has_parallel_partition(fn):
+                continue
+            for p in fn.params:
+                if isinstance(p.type_ref, A.GenericType) and p.type_ref.base == "cursor" and p.type_ref.params:
+                    inner = p.type_ref.params[0]
+                    if isinstance(inner, A.NamedType):
+                        cur_name = f"t_{inner.name.lower()}_cur"
+                        if cur_name in seen_cursors:
+                            continue
+                        seen_cursors.add(cur_name)
+                        rec_type = _record_type_name(inner.name)
+                        strong_cursor_decls.append(
+                            f"  TYPE {cur_name} IS REF CURSOR RETURN {rec_type};"
+                        )
         out: list[str] = []
         out.append(f"CREATE OR REPLACE PACKAGE {self.pkg} AS")
         # records (declare types public so callers can reference them)
         for rec in self._records:
             if rec.is_pub:
                 out.append(self._render_record_type(rec, indent="  "))
+        # strongly-typed cursors for parallel pipelined fns (must follow records).
+        for line in strong_cursor_decls:
+            out.append(line)
         # list types referenced by public fn signatures
         for line in spec_list_types:
             out.append(line)
@@ -391,6 +466,10 @@ class Emitter:
         # referenced by public fn signatures were already emitted in the spec.
         for decl in self._list_type_decls:
             out.append(decl)
+        # Generated helpers
+        if self._needs_split_helper:
+            out.append("")
+            out.append(self._split_helper_source())
         # all fns
         for chunk in fn_chunks:
             out.append("")
@@ -398,6 +477,28 @@ class Emitter:
         out.append(f"END {self.pkg};")
         out.append("/")
         return "\n".join(out)
+
+    def _split_helper_source(self) -> str:
+        """A package-private helper for `.split(delim)`. Splits using regexp."""
+        return (
+            "  FUNCTION pell_split_text(p_s VARCHAR2, p_delim VARCHAR2) RETURN t_text_list IS\n"
+            "    l_result t_text_list;\n"
+            "    l_idx PLS_INTEGER := 0;\n"
+            "  BEGIN\n"
+            "    IF p_s IS NULL OR p_delim IS NULL THEN RETURN l_result; END IF;\n"
+            "    FOR rec IN (\n"
+            "      SELECT REGEXP_SUBSTR(p_s, '[^' || p_delim || ']+', 1, LEVEL) AS part\n"
+            "      FROM dual\n"
+            "      CONNECT BY LEVEL <= REGEXP_COUNT(p_s, p_delim) + 1\n"
+            "    ) LOOP\n"
+            "      IF rec.part IS NOT NULL THEN\n"
+            "        l_idx := l_idx + 1;\n"
+            "        l_result(l_idx) := rec.part;\n"
+            "      END IF;\n"
+            "    END LOOP;\n"
+            "    RETURN l_result;\n"
+            "  END pell_split_text;"
+        )
 
     def _render_record_type(self, rec: A.RecordDef, indent: str = "") -> str:
         lines = [f"{indent}TYPE {_record_type_name(rec.name)} IS RECORD ("]
@@ -417,7 +518,7 @@ class Emitter:
         # and the return type is the schema-level nested table.
         if is_pipelined:
             params = ", ".join(
-                f"{param_name(p.name)} IN {self._pipelined_param_type(p.type_ref)}"
+                f"{param_name(p.name)} IN {self._pipelined_param_type(p.type_ref, fn)}"
                 for p in fn.params
             )
             elem = self._stream_element_type(fn.return_type)
@@ -428,6 +529,7 @@ class Emitter:
             if params:
                 sig += f"({params})"
             sig += f" RETURN {nt_name} PIPELINED"
+            sig += self._pipelined_parallel_clauses(fn)
             return sig
         params = ", ".join(
             f"{param_name(p.name)} IN {self._lt(p.type_ref, param=True)}"
@@ -449,14 +551,126 @@ class Emitter:
             sig += " RESULT_CACHE"
         return sig
 
-    def _pipelined_param_type(self, t: A.TypeRef) -> str:
+    def _pipelined_parallel_clauses(self, fn: A.FnDef) -> str:
+        """If the @pipelined fn carries @parallel(...), render the
+        PARALLEL_ENABLE / PARTITION BY / ORDER BY / CLUSTER BY clauses.
+
+        Supported partition forms:
+          partition = any                  → PARTITION p BY ANY
+          partition = hash(col1, col2, …)  → PARTITION p BY HASH(col1, col2, …)
+          partition = range(col)           → PARTITION p BY RANGE(col)
+
+        ORDER and CLUSTER each take a column tuple; specifying both is a
+        compile-time error (Oracle accepts only one).
+        """
+        ann = next((a for a in fn.annotations if a.name == "parallel"), None)
+        if ann is None:
+            return ""
+        # find the cursor parameter — that's what PARTITION/ORDER/CLUSTER reference
+        cursor_param = next(
+            (p for p in fn.params
+             if isinstance(p.type_ref, A.GenericType) and p.type_ref.base == "cursor"),
+            None,
+        )
+        if cursor_param is None:
+            raise EmitError(
+                f"@parallel on @pipelined fn {fn.name!r}: function must have a `cursor<T>` parameter",
+                ann.loc,
+            )
+        cursor_pl = param_name(cursor_param.name)
+        partition = ann.kwargs.get("partition")
+        order = ann.kwargs.get("order")
+        cluster = ann.kwargs.get("cluster")
+        if partition is None and (order is not None or cluster is not None):
+            raise EmitError(
+                f"@parallel on @pipelined fn {fn.name!r}: order/cluster require a partition= clause",
+                ann.loc,
+            )
+        if order is not None and cluster is not None:
+            raise EmitError(
+                f"@parallel on @pipelined fn {fn.name!r}: cannot specify both order and cluster",
+                ann.loc,
+            )
+        # Allow `@parallel` with no kwargs to mean "PARALLEL_ENABLE with no
+        # partition clause" — useful for stateless PTFs that Oracle can split
+        # freely. Equivalent to partition=any.
+        if partition is None and not ann.kwargs:
+            return " PARALLEL_ENABLE"
+        if partition is None:
+            return ""
+        partition_str = self._render_partition_spec(partition, ann)
+        out = f" PARALLEL_ENABLE(PARTITION {cursor_pl} BY {partition_str})"
+        if order is not None:
+            cols = self._render_col_tuple(order, ann, "order")
+            out += f"\n    ORDER {cursor_pl} BY ({cols})"
+        elif cluster is not None:
+            cols = self._render_col_tuple(cluster, ann, "cluster")
+            out += f"\n    CLUSTER {cursor_pl} BY ({cols})"
+        return out
+
+    def _render_partition_spec(self, expr: A.Expr, ann: A.Annotation) -> str:
+        """Render a partition= value as the Oracle BY-clause body."""
+        if isinstance(expr, A.Ident) and expr.name.lower() == "any":
+            return "ANY"
+        if isinstance(expr, A.Call) and isinstance(expr.callee, A.Ident):
+            kind = expr.callee.name.lower()
+            if kind in ("hash", "range"):
+                if not expr.args:
+                    raise EmitError(
+                        f"@parallel partition={kind}(...) requires at least one column",
+                        ann.loc,
+                    )
+                if kind == "range" and len(expr.args) != 1:
+                    raise EmitError(
+                        "@parallel partition=range(...) takes exactly one column",
+                        ann.loc,
+                    )
+                cols = ", ".join(self._render_col_name(a, ann) for a in expr.args)
+                return f"{kind.upper()}({cols})"
+        raise EmitError(
+            f"@parallel partition= must be `any`, `hash(col, …)`, or `range(col)`; got {type(expr).__name__}",
+            ann.loc,
+        )
+
+    def _render_col_tuple(self, expr: A.Expr, ann: A.Annotation, label: str) -> str:
+        """Render a column tuple expression `(c1, c2, …)` as a comma list."""
+        if isinstance(expr, A.TupleLit):
+            return ", ".join(self._render_col_name(e, ann) for e in expr.elements)
+        if isinstance(expr, A.Ident):
+            # A single column needn't be a tuple; accept `order = col`.
+            return self._render_col_name(expr, ann)
+        raise EmitError(
+            f"@parallel {label}= must be a column name or tuple of column names",
+            ann.loc,
+        )
+
+    def _render_col_name(self, expr: A.Expr, ann: A.Annotation) -> str:
+        if isinstance(expr, A.Ident) and "::" not in expr.name:
+            return expr.name.lower()
+        raise EmitError(
+            "@parallel column references must be plain identifiers",
+            ann.loc,
+        )
+
+    def _pipelined_param_type(self, t: A.TypeRef, fn: Optional[A.FnDef] = None) -> str:
         """Lower a parameter type when inside a pipelined fn.
 
-        cursor<T> -> SYS_REFCURSOR, everything else uses the normal rules.
+        cursor<T> -> SYS_REFCURSOR by default; if the fn has `@parallel(partition=…)`,
+        Oracle requires a STRONGLY-TYPED ref cursor (PLS-00627), so we emit
+        `t_<T>_cur` which is declared in the package spec.
         """
         if isinstance(t, A.GenericType) and t.base == "cursor":
+            if fn is not None and self._fn_has_parallel_partition(fn):
+                inner = t.params[0] if t.params else None
+                if isinstance(inner, A.NamedType):
+                    return f"t_{inner.name.lower()}_cur"
             return "SYS_REFCURSOR"
         return self._lt(t, param=True)
+
+    def _fn_has_parallel_partition(self, fn: A.FnDef) -> bool:
+        """True if fn has @parallel(...) with a `partition=` clause."""
+        ann = next((a for a in fn.annotations if a.name == "parallel"), None)
+        return ann is not None and "partition" in ann.kwargs
 
     def _fn_body_pragmas(self, fn: A.FnDef) -> list[str]:
         """Body-level pragmas: PRAGMA UDF, PRAGMA AUTONOMOUS_TRANSACTION."""
@@ -755,12 +969,27 @@ class Emitter:
             return self._infer_decl_type(value.inner)
         if isinstance(value, A.StructLit):
             return _record_type_name(value.type_name)
+        # `<seq>.nextval` / `<seq>.currval` → NUMBER.
+        if (
+            isinstance(value, A.MemberAccess)
+            and isinstance(value.obj, A.Ident)
+            and value.obj.name in self._seq_names
+            and value.field in ("nextval", "currval")
+        ):
+            return "NUMBER"
         return None
 
     def _infer_call_type(self, call: A.Call) -> Optional[str]:
         # .one() / .first() / .one_or_none() on a sql!{} (possibly wrapped in lock modifiers)
         if isinstance(call.callee, A.MemberAccess):
             method = call.callee.field
+            # Method-style aliases that return scalars.
+            if method in ("contains", "starts_with", "ends_with", "is_empty"):
+                return "BOOLEAN"
+            if method in ("year", "month", "day", "hour", "minute", "second"):
+                return "NUMBER"
+            if method == "split":
+                return "t_text_list"
             recv = call.callee.obj
             if method in ("one", "first", "one_or_none"):
                 _, sql = self._strip_lock_modifiers(recv)
@@ -1089,6 +1318,16 @@ class Emitter:
         return lines
 
     def _emit_return(self, s: A.ReturnStmt, indent: str) -> list[str]:
+        # Inside an aggregate's `finish()`, return must assign to the OUT
+        # parameter `returnValue` and yield ODCIConst.Success — the function
+        # signature is dictated by Oracle's ODCIAggregate contract, not the
+        # pell `-> T` declaration.
+        if self._in_aggregate_terminate and s.value is not None:
+            val = self._emit_expr(s.value)
+            return [
+                f"{indent}returnValue := {val};",
+                f"{indent}RETURN ODCIConst.Success;",
+            ]
         is_proc = (
             self._current_fn is not None
             and (self._current_fn.return_type is None or _is_unit_like(self._current_fn.return_type))
@@ -1339,11 +1578,14 @@ class Emitter:
     def _emit_match(self, s: A.MatchStmt, indent: str) -> list[str]:
         """Lower a match into an IF/ELSIF chain.
 
-        For v0: handles Ok(x)/Err(...)/Some(x)/None on a scrutinee that
-        will *already have raised* if Err. So the structure becomes a
-        BEGIN ... EXCEPTION ... END wrapper instead of a chain.
+        Special-case: when every arm pattern is a `case` of the same sealed type,
+        lower to a CASE expression that dispatches via `IS OF (<case_t>)`.
+        For arms that bind a value (`Circle(c) =>` / `Circle { radius } =>`), we
+        introduce a local typed as the case child and assign via TREAT().
         """
         scrut_code = self._emit_expr(s.scrutinee)
+        if self._is_sealed_match(s):
+            return self._emit_sealed_match(s, scrut_code, indent)
         # Detect whether this match has Err arms (then needs exception wrapping)
         has_err = any(isinstance(a.pattern, A.VariantPattern) and a.pattern.name == "Err" for a in s.arms)
         if has_err:
@@ -1366,6 +1608,112 @@ class Emitter:
                 out.append(f"{indent}  {self._emit_expr(body)};")
         out.append(f"{indent}END IF;")
         return out
+
+    def _is_sealed_match(self, s: A.MatchStmt) -> bool:
+        """True if every arm pattern names a sealed-type case."""
+        if not s.arms:
+            return False
+        case_names = {c.name for st in self._sealed_types for c in st.cases}
+        for a in s.arms:
+            p = a.pattern
+            if isinstance(p, A.VariantPattern) and p.name in case_names:
+                continue
+            if isinstance(p, A.WildcardPattern):
+                continue
+            return False
+        return True
+
+    def _emit_sealed_match(self, s: A.MatchStmt, scrut_code: str, indent: str) -> list[str]:
+        """Lower a `match shape { Circle(c) => ..., Rectangle(r) => ... }` to:
+
+            IF (shape) IS OF (t_circle) THEN
+              DECLARE c t_circle := TREAT((shape) AS t_circle);
+              BEGIN <body> END;
+            ELSIF (shape) IS OF (t_rectangle) THEN
+              ...
+            END IF;
+        """
+        out: list[str] = []
+        case_names = {c.name: (st, c) for st in self._sealed_types for c in st.cases}
+        for i, arm in enumerate(s.arms):
+            pat = arm.pattern
+            if isinstance(pat, A.WildcardPattern):
+                kw = "ELSE" if i > 0 else "IF TRUE THEN"
+                out.append(f"{indent}{kw}")
+                self._emit_arm_body(arm.body, out, indent + "  ")
+                continue
+            assert isinstance(pat, A.VariantPattern)
+            st_case = case_names[pat.name]
+            _, case = st_case
+            case_pl = _record_type_name(case.name)
+            kw = "IF" if i == 0 else "ELSIF"
+            out.append(f"{indent}{kw} ({scrut_code}) IS OF ({case_pl}) THEN")
+            # Bind value: VariantPattern.args (positional) gives bind name(s);
+            # VariantPattern.fields (struct-form) lets us project fields.
+            bind_name: Optional[str] = None
+            if pat.args and isinstance(pat.args[0], A.BindingPattern):
+                bind_name = pat.args[0].name
+            # Struct-form pattern (`Circle { radius }`) — bind each named field as a local.
+            field_binds: list[tuple[str, str]] = []  # (pell field name, local var name)
+            if pat.fields:
+                for fp in pat.fields:
+                    field_binds.append((fp.name, local_name(fp.name)))
+            inner_indent = indent + "  "
+            if bind_name is not None or field_binds:
+                out.append(f"{inner_indent}DECLARE")
+                if bind_name is not None:
+                    out.append(f"{inner_indent}  {local_name(bind_name)} {case_pl};")
+                for pell_name, pl_name in field_binds:
+                    # Field types come from the case (or its parent's fields).
+                    ftype = self._case_field_type(case, pell_name)
+                    if ftype is None:
+                        raise EmitError(
+                            f"case {case.name} has no field {pell_name!r}",
+                            arm.loc,
+                        )
+                    out.append(f"{inner_indent}  {pl_name} {ftype};")
+                out.append(f"{inner_indent}BEGIN")
+                if bind_name is not None:
+                    out.append(f"{inner_indent}  {local_name(bind_name)} := TREAT(({scrut_code}) AS {case_pl});")
+                for pell_name, pl_name in field_binds:
+                    out.append(
+                        f"{inner_indent}  {pl_name} := TREAT(({scrut_code}) AS {case_pl}).{pell_name.lower()};"
+                    )
+                # Inside the bound block, register the binding so identifier lookup works.
+                save_params = self._params
+                self._params = set(self._params) | ({bind_name} if bind_name else set()) | {n for n, _ in field_binds}
+                try:
+                    self._emit_arm_body(arm.body, out, inner_indent + "  ")
+                finally:
+                    self._params = save_params
+                out.append(f"{inner_indent}END;")
+            else:
+                self._emit_arm_body(arm.body, out, inner_indent)
+        out.append(f"{indent}END IF;")
+        return out
+
+    def _emit_arm_body(self, body, out: list[str], indent: str) -> None:
+        if isinstance(body, list):
+            for stmt in body:
+                out.extend(self._emit_stmt(stmt, indent))
+        else:
+            # Expression-form arm: emit as a NULL statement holding the value.
+            # Match-as-expression isn't lowered yet; for now we just evaluate.
+            out.append(f"{indent}NULL;  -- expr arm value: {self._emit_expr(body)}")
+
+    def _case_field_type(self, case: A.CaseDef, name: str) -> Optional[str]:
+        """Return the PL/SQL type name for the named field in a case, walking
+        the parent's fields too."""
+        for f in case.fields:
+            if f.name == name:
+                return self._lt(f.type_ref, sql_context=True)
+        # Walk parent fields too
+        for st in self._sealed_types:
+            if case in st.cases:
+                for f in st.fields:
+                    if f.name == name:
+                        return self._lt(f.type_ref, sql_context=True)
+        return None
 
     def _emit_match_with_errors(self, s: A.MatchStmt, scrut_code: str, indent: str) -> list[str]:
         """When the match has Err arms, wrap the scrutinee in a BEGIN block and use EXCEPTION."""
@@ -1497,6 +1845,9 @@ class Emitter:
             # In expression position, ? on Result just yields the value (errors raise).
             return self._emit_expr(e.inner)
         if isinstance(e, A.StructLit):
+            # A StructLit on a known `type` lowers to its OBJECT constructor.
+            if e.type_name in self._type_names:
+                return self._emit_obj_constructor(e)
             return "/* TODO: struct lit in expr position */"
         if isinstance(e, A.SqlBlock):
             return "/* TODO: bare sql block in expr position */"
@@ -1692,6 +2043,17 @@ class Emitter:
                     return f"{list_local}.LAST"
                 if method == "at" and len(e.args) == 1:
                     return f"{list_local}({self._emit_expr(e.args[0])})"
+            # List-typed OBJECT attribute: `self.vals.len()` → `SELF.vals.COUNT`
+            if self._is_list_member_access(recv):
+                list_ref = self._emit_expr(recv)
+                if method == "len" and not e.args:
+                    return f"{list_ref}.COUNT"
+                if method == "first" and not e.args:
+                    return f"{list_ref}.FIRST"
+                if method == "last" and not e.args:
+                    return f"{list_ref}.LAST"
+                if method == "at" and len(e.args) == 1:
+                    return f"{list_ref}({self._emit_expr(e.args[0])})"
             if method == "into" and e.type_args:
                 # value.into::<T>() — for the MVP we just copy fields, but here in
                 # expression position we can't easily decompose; rely on type compatibility.
@@ -1706,16 +2068,735 @@ class Emitter:
                 )
             if method == "rowcount":
                 return "SQL%ROWCOUNT"
+            # Object dispatch — when the receiver is an OBJECT instance, Oracle
+            # uses `recv.method(args)` (not free-function style).
+            if self._receiver_is_object_typed(recv):
+                args_code = [self._emit_expr(a) for a in e.args]
+                return f"{self._emit_expr(recv)}.{method.lower()}({', '.join(args_code)})"
+            # Method-style aliases: .contains, .starts_with, .year, .add_days, …
+            if method in _METHOD_ALIASES:
+                arity, template = _METHOD_ALIASES[method]
+                if len(e.args) != arity:
+                    raise EmitError(
+                        f"method .{method}() takes {arity} argument(s); got {len(e.args)}",
+                        e.loc,
+                    )
+                placeholders: dict[str, str] = {"recv": self._emit_expr(recv)}
+                for i, a in enumerate(e.args):
+                    placeholders[f"arg{i}"] = self._emit_expr(a)
+                return template.format(**placeholders)
+            # .split(delim) — emits a per-package helper that returns list<text>.
+            if method == "split" and len(e.args) == 1:
+                self._needs_split_helper = True
+                # Register `t_text_list` so the package body declares it.
+                if "t_text_list" not in self._list_types_emitted:
+                    self._list_type_decls.append(
+                        "  TYPE t_text_list IS TABLE OF VARCHAR2(4000) INDEX BY PLS_INTEGER;"
+                    )
+                    self._list_types_emitted.add("t_text_list")
+                recv_code = self._emit_expr(recv)
+                delim_code = self._emit_expr(e.args[0])
+                return f"pell_split_text({recv_code}, {delim_code})"
             # generic method call → free-function style with receiver as first arg
             args_code = [self._emit_expr(recv)] + [self._emit_expr(a) for a in e.args]
             return f"{method}({', '.join(args_code)})"
-        # plain function call
+        # plain function call — if the callee is a bare Ident that isn't a
+        # known pell binding, treat it as an Oracle/PL/SQL builtin name
+        # (length, substr, bitxor, ora_hash, …) and emit it verbatim rather
+        # than prefixing with `l_`.
+        if isinstance(e.callee, A.Ident) and "::" not in e.callee.name:
+            name = e.callee.name
+            if (
+                name not in self._fn_names
+                and name not in self._params
+                and not any(name in scope for scope in self._loop_vars)
+                and name not in self._list_locals
+                and name not in self._local_types
+            ):
+                args_code = [self._emit_expr(a) for a in e.args]
+                return f"{name.lower()}({', '.join(args_code)})"
         callee = self._emit_expr(e.callee)
         args_code = [self._emit_expr(a) for a in e.args]
         return f"{callee}({', '.join(args_code)})"
 
+    # ---- §5.2 / §5.3 — types, sealed hierarchies, aggregates -----------
+
+    def _emit_user_type(self, td: A.TypeDef) -> None:
+        """Lower `pub type T { ... }` to schema-level CREATE TYPE + CREATE TYPE BODY."""
+        type_name = _record_type_name(td.name)
+        # Spec: attributes + member function signatures
+        attr_lines = [
+            f"  {f.name.lower()} {self._lt(f.type_ref, sql_context=True)}"
+            for f in td.fields
+        ]
+        method_sigs = [self._method_signature(m, type_name) for m in td.methods]
+        spec_lines = attr_lines + method_sigs
+        spec = (
+            f"CREATE OR REPLACE TYPE {type_name} AS OBJECT (\n"
+            + ",\n".join(spec_lines)
+            + "\n);\n/"
+        )
+        self._schema_types.append(spec)
+        # Body: concrete method implementations
+        if any(not m.is_abstract for m in td.methods):
+            body_chunks = [
+                self._method_body(m, td.name, type_name)
+                for m in td.methods
+                if not m.is_abstract
+            ]
+            body = (
+                f"CREATE OR REPLACE TYPE BODY {type_name} AS\n"
+                + "\n\n".join(body_chunks)
+                + f"\nEND;\n/"
+            )
+            self._schema_types.append(body)
+
+    def _emit_sealed_type(self, st: A.SealedTypeDef) -> None:
+        """Lower `pub sealed type T { ... case C ... }` to NOT FINAL parent + UNDER children."""
+        parent_name = _record_type_name(st.name)
+        attr_lines = [
+            f"  {f.name.lower()} {self._lt(f.type_ref, sql_context=True)}"
+            for f in st.fields
+        ]
+        # Build parent method signatures; abstract methods get a NOT INSTANTIABLE prefix.
+        parent_method_sigs: list[str] = []
+        any_abstract = False
+        for m in st.methods:
+            sig = self._method_signature(m, parent_name)
+            if m.is_abstract:
+                # Oracle puts the NOT INSTANTIABLE modifier *before* MEMBER FUNCTION.
+                # We insert it into the spec line at that position.
+                sig = sig.replace("  MEMBER", "  NOT INSTANTIABLE MEMBER", 1)
+                any_abstract = True
+            parent_method_sigs.append(sig)
+        spec_lines = attr_lines + parent_method_sigs
+        if not attr_lines:
+            # Oracle (PLS-00589) requires at least one attribute in an OBJECT type.
+            # When the sealed parent has no fields, emit a hidden placeholder.
+            spec_lines = ["  sys_tag_ NUMBER"] + parent_method_sigs
+        suffix = "NOT FINAL"
+        if any_abstract:
+            suffix = "NOT INSTANTIABLE " + suffix
+        parent_spec = (
+            f"CREATE OR REPLACE TYPE {parent_name} AS OBJECT (\n"
+            + ",\n".join(spec_lines)
+            + f"\n) {suffix};\n/"
+        )
+        self._schema_types.append(parent_spec)
+        # Parent body — concrete (non-abstract) methods.
+        concrete_parent_methods = [m for m in st.methods if not m.is_abstract]
+        if concrete_parent_methods:
+            body_chunks = [
+                self._method_body(m, st.name, parent_name)
+                for m in concrete_parent_methods
+            ]
+            parent_body = (
+                f"CREATE OR REPLACE TYPE BODY {parent_name} AS\n"
+                + "\n\n".join(body_chunks)
+                + f"\nEND;\n/"
+            )
+            self._schema_types.append(parent_body)
+        # Each case: CREATE TYPE child UNDER parent (with case-specific fields and overrides)
+        for case in st.cases:
+            case_name = _record_type_name(case.name)
+            case_attr_lines = [
+                f"  {f.name.lower()} {self._lt(f.type_ref, sql_context=True)}"
+                for f in case.fields
+            ]
+            case_method_sigs: list[str] = []
+            for m in case.methods:
+                # If the parent had a method by this name, mark this as OVERRIDING.
+                is_override = any(pm.name == m.name for pm in st.methods)
+                sig = self._method_signature(m, case_name, overriding=is_override)
+                case_method_sigs.append(sig)
+            case_spec_lines = case_attr_lines + case_method_sigs
+            if not case_spec_lines:
+                # An empty case still needs at least one declaration — emit a dummy
+                # zero-byte attribute (Oracle requires at least one attribute in a
+                # subtype that adds nothing). We use a single PLS-compatible value.
+                case_spec_lines = ["  dummy_ NUMBER"]
+            case_spec = (
+                f"CREATE OR REPLACE TYPE {case_name} UNDER {parent_name} (\n"
+                + ",\n".join(case_spec_lines)
+                + "\n);\n/"
+            )
+            self._schema_types.append(case_spec)
+            # Case body
+            if case.methods:
+                case_body_chunks = [
+                    self._method_body(m, case.name, case_name,
+                                      is_override=any(pm.name == m.name for pm in st.methods))
+                    for m in case.methods
+                ]
+                case_body = (
+                    f"CREATE OR REPLACE TYPE BODY {case_name} AS\n"
+                    + "\n\n".join(case_body_chunks)
+                    + f"\nEND;\n/"
+                )
+                self._schema_types.append(case_body)
+
+    def _emit_aggregate(self, ag: A.AggregateDef) -> None:
+        """Lower an aggregate to ODCIAggregate object type + CREATE FUNCTION AGGREGATE USING."""
+        ann_names = {a.name for a in ag.annotations}
+        is_parallel = "parallel" in ann_names
+        if is_parallel and ag.merge_body is None:
+            raise EmitError(
+                f"aggregate {ag.name!r}: @parallel requires a `merge` block — "
+                "Oracle cannot split iteration without a merge function",
+                ag.loc,
+            )
+        type_name = f"{ag.name.lower()}_agg_t"
+        if ag.return_type is None:
+            raise EmitError(f"aggregate {ag.name!r}: missing `-> T` return type", ag.loc)
+        ret_sql = self._lt(ag.return_type)
+        ret_sql_param = self._lt(ag.return_type, param=True)
+        # Oracle's ODCIAggregate interface takes a single iterate input — even
+        # in 23ai, true multi-arg ODCI aggregates aren't supported (the wrapper
+        # function fails ORA-29925, and SQL_MACRO wrapping produces ORA-00600).
+        # For multi-arg aggregates we auto-generate an OBJECT tuple type, take
+        # that tuple as iterate's single input, and unpack it back to the
+        # user's step parameter names at the top of the iterate body.
+        if not ag.step_params:
+            raise EmitError(
+                f"aggregate {ag.name!r}: step must take at least one parameter",
+                ag.loc,
+            )
+        if len(ag.step_params) != len(ag.params):
+            raise EmitError(
+                f"aggregate {ag.name!r}: step has {len(ag.step_params)} parameter(s) "
+                f"but the aggregate signature has {len(ag.params)} — they must match",
+                ag.loc,
+            )
+        is_multi_arg = len(ag.step_params) > 1
+        if is_multi_arg:
+            tuple_type_name = f"{ag.name.lower()}_args_t"
+            # Emit the tuple OBJECT type — one attribute per step param, in order.
+            tuple_attrs = ",\n".join(
+                f"  {p.name.lower()} {self._lt(p.type_ref, sql_context=True)}"
+                for p in ag.step_params
+            )
+            self._schema_types.append(
+                f"CREATE OR REPLACE TYPE {tuple_type_name} AS OBJECT (\n{tuple_attrs}\n);\n/"
+            )
+            # The iterate signature takes the tuple as its single input.
+            tuple_param_name = "p_args"
+            step_params_pl = f"{tuple_param_name} IN {tuple_type_name}"
+        else:
+            step_params_pl = ", ".join(
+                f"{param_name(p.name)} IN {self._lt(p.type_ref, param=True)}"
+                for p in ag.step_params
+            )
+        # Pre-register any list types referenced by state fields so we can reference
+        # them as schema-level types. v1: only `list<primitive>` is supported, which
+        # we lower to a nested table at the schema level (one TYPE per element type).
+        state_attr_lines: list[str] = []
+        for f in ag.state_fields:
+            attr_type = self._aggregate_state_attr_type(f.type_ref, ag.loc)
+            state_attr_lines.append(f"  {f.name.lower()} {attr_type}")
+        # Oracle requires ALL four ODCI routines on the type even when
+        # the aggregate is single-threaded (ORA-29925 otherwise). When the
+        # user didn't supply `merge`, we still declare ODCIAggregateMerge and
+        # give it a body that raises — that way the aggregate works serially
+        # but a future @parallel-enable can't accidentally produce wrong
+        # results.
+        spec_lines = state_attr_lines + [
+            f"  STATIC FUNCTION ODCIAggregateInitialize(sctx IN OUT {type_name}) RETURN NUMBER",
+            f"  MEMBER FUNCTION ODCIAggregateIterate(self IN OUT {type_name}, {step_params_pl}) RETURN NUMBER",
+            f"  MEMBER FUNCTION ODCIAggregateMerge(self IN OUT {type_name}, ctx2 IN {type_name}) RETURN NUMBER",
+            f"  MEMBER FUNCTION ODCIAggregateTerminate(self IN OUT {type_name}, returnValue OUT {ret_sql_param}, flags IN NUMBER) RETURN NUMBER",
+        ]
+        spec = (
+            f"CREATE OR REPLACE TYPE {type_name} AS OBJECT (\n"
+            + ",\n".join(spec_lines)
+            + "\n);\n/"
+        )
+        self._schema_types.append(spec)
+        # Body
+        # Initialize: build sctx from state defaults (type-aware: list<T> default
+        # `= []` becomes the empty nested-table constructor t_<T>_nt()).
+        init_args = ", ".join(
+            self._emit_state_default_typed(f.type_ref, e)
+            for f, e in zip(ag.state_fields, ag.state_defaults)
+        )
+        init_body = [
+            f"  STATIC FUNCTION ODCIAggregateInitialize(sctx IN OUT {type_name}) RETURN NUMBER IS",
+            f"  BEGIN",
+            f"    sctx := {type_name}({init_args});",
+            f"    RETURN ODCIConst.Success;",
+            f"  END;",
+        ]
+        iterate_inner, iterate_decls = self._emit_aggregate_block(ag.step_body, ag.step_params, ag, indent="    ")
+        # Multi-arg: prepend "p_<name> := p_args.<name>;" assigns so the body
+        # references its declared step parameter names naturally.
+        unpack_lines: list[str] = []
+        unpack_decls: list[str] = []
+        if is_multi_arg:
+            for p in ag.step_params:
+                # Local declarations need sized types (param=False).
+                unpack_decls.append(f"{param_name(p.name)} {self._lt(p.type_ref)};")
+                unpack_lines.append(f"    {param_name(p.name)} := p_args.{p.name.lower()};")
+        iterate_body = [
+            f"  MEMBER FUNCTION ODCIAggregateIterate(self IN OUT {type_name}, {step_params_pl}) RETURN NUMBER IS",
+        ] + [f"    {d}" for d in unpack_decls + iterate_decls] + [
+            f"  BEGIN",
+        ] + unpack_lines + iterate_inner + [
+            f"    RETURN ODCIConst.Success;",
+            f"  END;",
+        ]
+        chunks = ["\n".join(init_body), "\n".join(iterate_body)]
+        if ag.merge_body is not None:
+            other_pl_name = param_name(ag.merge_other_name)
+            merge_inner, merge_decls = self._emit_aggregate_block_merge(
+                ag.merge_body, ag, ag.merge_other_name, other_pl_name, indent="    "
+            )
+            merge_body_lines = [
+                f"  MEMBER FUNCTION ODCIAggregateMerge(self IN OUT {type_name}, ctx2 IN {type_name}) RETURN NUMBER IS",
+                f"    {other_pl_name} {type_name} := ctx2;",
+            ] + [f"    {d}" for d in merge_decls] + [
+                f"  BEGIN",
+            ] + merge_inner + [
+                f"    RETURN ODCIConst.Success;",
+                f"  END;",
+            ]
+            chunks.append("\n".join(merge_body_lines))
+        else:
+            # No user-supplied merge — emit a stub that raises so an accidental
+            # parallel execution surfaces a clear error instead of producing
+            # silently-wrong results. (Single-threaded execution never invokes
+            # this routine; ORA-29925 forces it to exist in the spec.)
+            merge_stub = [
+                f"  MEMBER FUNCTION ODCIAggregateMerge(self IN OUT {type_name}, ctx2 IN {type_name}) RETURN NUMBER IS",
+                f"  BEGIN",
+                f"    RAISE_APPLICATION_ERROR(-20100,",
+                f"      'pell aggregate {ag.name} has no merge block; cannot run in parallel');",
+                f"    RETURN ODCIConst.Error;",
+                f"  END;",
+            ]
+            chunks.append("\n".join(merge_stub))
+        terminate_inner, terminate_decls = self._emit_aggregate_terminate(ag, indent="    ")
+        # Only emit a trailing RETURN ODCIConst.Success if the body doesn't
+        # already end with one (avoids a dead statement that Oracle's compiler
+        # would flag if PL/SCOPE is on).
+        trailing_return: list[str] = []
+        if not (terminate_inner and terminate_inner[-1].strip().startswith("RETURN ODCIConst")):
+            trailing_return = [f"    RETURN ODCIConst.Success;"]
+        terminate_body = [
+            f"  MEMBER FUNCTION ODCIAggregateTerminate(self IN OUT {type_name}, returnValue OUT {ret_sql_param}, flags IN NUMBER) RETURN NUMBER IS",
+        ] + [f"    {d}" for d in terminate_decls] + [
+            f"  BEGIN",
+        ] + terminate_inner + trailing_return + [
+            f"  END;",
+        ]
+        chunks.append("\n".join(terminate_body))
+        body = (
+            f"CREATE OR REPLACE TYPE BODY {type_name} AS\n"
+            + "\n\n".join(chunks)
+            + f"\nEND;\n/"
+        )
+        self._schema_types.append(body)
+        # The CREATE FUNCTION user-facing wrapper. For multi-arg aggregates,
+        # the signature takes the auto-generated tuple type (single param);
+        # callers must construct the tuple at call sites:
+        #   SELECT argmax(argmax_args_t(name, salary)) FROM employees;
+        if is_multi_arg:
+            outer_params = f"p_args IN {tuple_type_name}"
+        else:
+            outer_params = ", ".join(
+                f"{param_name(p.name)} IN {self._lt(p.type_ref, param=True)}"
+                for p in ag.params
+            )
+        parallel_clause = " PARALLEL_ENABLE" if is_parallel else ""
+        fn_decl = (
+            f"CREATE OR REPLACE FUNCTION {ag.name.lower()}({outer_params}) "
+            f"RETURN {ret_sql_param}{parallel_clause} AGGREGATE USING {type_name};\n/"
+        )
+        self._schema_types.append(fn_decl)
+
+    def _aggregate_state_attr_type(self, t: A.TypeRef, loc: A.Loc) -> str:
+        """For a `state { foo: T = default; }` field, return the SQL type expression
+        usable as an OBJECT attribute. `list<P>` becomes a schema-level nested table type."""
+        if isinstance(t, A.GenericType) and t.base == "list" and t.params:
+            elem_t = t.params[0]
+            elem_sql = self._lt(elem_t, sql_context=True)
+            nt_name = f"t_{_safe(_render_type(elem_t))}_nt"
+            key = f"NT:{nt_name}"
+            if key not in self._obj_emitted:
+                self._schema_types.insert(0,
+                    f"CREATE OR REPLACE TYPE {nt_name} AS TABLE OF {elem_sql};\n/"
+                )
+                self._obj_emitted.add(key)
+            return nt_name
+        if isinstance(t, A.PrimType):
+            return self._lt(t, sql_context=True)
+        if isinstance(t, A.NamedType):
+            return _record_type_name(t.name)
+        raise EmitError(
+            f"aggregate state field has unsupported type: {type(t).__name__}",
+            loc,
+        )
+
+    def _emit_state_default_typed(self, t: A.TypeRef, e: A.Expr) -> str:
+        """Render an aggregate-state initial value, knowing the declared type.
+
+        - `list<T> = []`           → `t_<T>_nt()` (empty nested-table ctor)
+        - `list<T> = [v1, v2]`     → `t_<T>_nt(v1, v2)` (populated nested-table)
+        - any non-list type        → emit the expression directly
+        """
+        if isinstance(t, A.GenericType) and t.base == "list" and t.params:
+            elem_t = t.params[0]
+            nt_name = f"t_{_safe(_render_type(elem_t))}_nt"
+            if isinstance(e, A.ListLit):
+                if not e.elements:
+                    return f"{nt_name}()"
+                args = ", ".join(self._emit_expr(el) for el in e.elements)
+                return f"{nt_name}({args})"
+        return self._emit_expr(e)
+
+    def _emit_aggregate_block(
+        self, body: list[A.Stmt], step_params: list[A.Param], ag: A.AggregateDef, indent: str
+    ) -> tuple[list[str], list[str]]:
+        """Emit the step body. Returns (body_lines, declares)."""
+        save_params = self._params
+        save_in_method = self._in_method_type
+        save_declares = self._declares
+        save_decl_seen = self._decl_seen
+        save_fn = self._current_fn
+        self._params = {p.name for p in step_params}
+        # Register a synthetic current_fn so type-aware features (parameter type
+        # lookups, etc.) work inside the iterate body.
+        synth = A.FnDef(loc=ag.loc, name=ag.name, params=step_params, return_type=None, body=body)
+        self._in_method_type = ag.name  # so `self` lowers to SELF
+        self._declares = []
+        self._decl_seen = set()
+        self._current_fn = synth
+        try:
+            lines: list[str] = []
+            for s in body:
+                lines.extend(self._emit_aggregate_stmt(s, indent))
+            return lines, list(self._declares)
+        finally:
+            self._params = save_params
+            self._in_method_type = save_in_method
+            self._declares = save_declares
+            self._decl_seen = save_decl_seen
+            self._current_fn = save_fn
+
+    def _emit_aggregate_block_merge(
+        self, body: list[A.Stmt], ag: A.AggregateDef, other_name: str, other_pl: str, indent: str
+    ) -> tuple[list[str], list[str]]:
+        save_params = self._params
+        save_in_method = self._in_method_type
+        save_declares = self._declares
+        save_decl_seen = self._decl_seen
+        self._params = {other_name}
+        self._in_method_type = ag.name
+        self._declares = []
+        self._decl_seen = set()
+        try:
+            lines: list[str] = []
+            for s in body:
+                lines.extend(self._emit_aggregate_stmt(s, indent))
+            return lines, list(self._declares)
+        finally:
+            self._params = save_params
+            self._in_method_type = save_in_method
+            self._declares = save_declares
+            self._decl_seen = save_decl_seen
+
+    def _emit_aggregate_terminate(self, ag: A.AggregateDef, indent: str) -> tuple[list[str], list[str]]:
+        """Emit the finish body — every `return X` (top-level or inside an IF)
+        becomes `returnValue := X; RETURN ODCIConst.Success;`."""
+        save_params = self._params
+        save_in_method = self._in_method_type
+        save_declares = self._declares
+        save_decl_seen = self._decl_seen
+        save_fn = self._current_fn
+        save_in_terminate = self._in_aggregate_terminate
+        self._params = set()
+        self._in_method_type = ag.name
+        self._declares = []
+        self._decl_seen = set()
+        self._current_fn = None
+        self._in_aggregate_terminate = True
+        try:
+            lines: list[str] = []
+            for s in ag.finish_body:
+                lines.extend(self._emit_aggregate_stmt(s, indent))
+            return lines, list(self._declares)
+        finally:
+            self._params = save_params
+            self._in_method_type = save_in_method
+            self._declares = save_declares
+            self._decl_seen = save_decl_seen
+            self._current_fn = save_fn
+            self._in_aggregate_terminate = save_in_terminate
+
+    def _emit_aggregate_stmt(self, s: A.Stmt, indent: str) -> list[str]:
+        """Statement emission inside an aggregate body — handles `.append()` / `.extend()`
+        on state lists specially since the surrounding emitter assumes packaged contexts."""
+        if isinstance(s, A.ExprStmt) and isinstance(s.expr, A.Call):
+            call = s.expr
+            # self.<field>.append(v)
+            if (
+                isinstance(call.callee, A.MemberAccess)
+                and call.callee.field == "append"
+                and isinstance(call.callee.obj, A.MemberAccess)
+                and len(call.args) == 1
+            ):
+                target_obj = self._emit_expr(call.callee.obj)
+                val = self._emit_expr(call.args[0])
+                return [
+                    f"{indent}{target_obj}.EXTEND;",
+                    f"{indent}{target_obj}({target_obj}.LAST) := {val};",
+                ]
+            # self.<field>.extend(other.<field>) — bulk concatenation
+            if (
+                isinstance(call.callee, A.MemberAccess)
+                and call.callee.field == "extend"
+                and isinstance(call.callee.obj, A.MemberAccess)
+                and len(call.args) == 1
+            ):
+                target = self._emit_expr(call.callee.obj)
+                source = self._emit_expr(call.args[0])
+                idx = self._sql_var_counter
+                self._sql_var_counter += 1
+                return [
+                    f"{indent}IF {source} IS NOT NULL AND {source}.COUNT > 0 THEN",
+                    f"{indent}  FOR i_{idx} IN {source}.FIRST .. {source}.LAST LOOP",
+                    f"{indent}    {target}.EXTEND;",
+                    f"{indent}    {target}({target}.LAST) := {source}(i_{idx});",
+                    f"{indent}  END LOOP;",
+                    f"{indent}END IF;",
+                ]
+        # Fall back to standard statement emission.
+        return self._emit_stmt(s, indent)
+
+    # ---- method signature & body helpers (for `type` and `sealed type`) -
+
+    def _method_signature(self, m: A.MethodDef, type_name: str, *, overriding: bool = False) -> str:
+        """Build the spec-level method signature for inclusion in a TYPE declaration."""
+        prefix_parts: list[str] = []
+        if overriding:
+            prefix_parts.append("OVERRIDING")
+        if m.is_constructor:
+            # `new` => CONSTRUCTOR FUNCTION T(p ...) RETURN SELF AS RESULT
+            prefix_parts.append("CONSTRUCTOR FUNCTION")
+            params = ", ".join(
+                f"{param_name(p.name)} {self._lt(p.type_ref, param=True)}"
+                for p in m.params
+            )
+            sig = f"  {' '.join(prefix_parts)} {type_name}"
+            if params:
+                sig += f"({params})"
+            sig += " RETURN SELF AS RESULT"
+            return sig
+        if m.is_map:
+            # MAP MEMBER FUNCTION foo RETURN NUMBER (no params allowed by Oracle)
+            prefix_parts.append("MAP MEMBER FUNCTION")
+            if m.params:
+                raise EmitError(
+                    f"map fn {m.name!r}: must take no parameters", m.loc,
+                )
+            ret = self._lt(m.return_type, param=True) if m.return_type else "NUMBER"
+            return f"  {' '.join(prefix_parts)} {m.name.lower()} RETURN {ret}"
+        prefix_parts.append("MEMBER")
+        # function vs procedure based on return type
+        if m.return_type is None or _is_unit_like(m.return_type):
+            prefix_parts.append("PROCEDURE")
+        else:
+            prefix_parts.append("FUNCTION")
+        params = ", ".join(
+            f"{param_name(p.name)} {self._lt(p.type_ref, param=True)}"
+            for p in m.params
+        )
+        sig = f"  {' '.join(prefix_parts)} {m.name.lower()}"
+        if params:
+            sig += f"({params})"
+        if m.return_type is not None and not _is_unit_like(m.return_type):
+            sig += f" RETURN {self._lt(m.return_type, param=True)}"
+        return sig
+
+    def _method_body(self, m: A.MethodDef, type_logical_name: str, type_pl_name: str, *, is_override: bool = False) -> str:
+        """Emit the TYPE BODY entry for a concrete method."""
+        sig = self._method_signature(m, type_pl_name, overriding=is_override).lstrip()
+        # method body emission shares the statement emitter with regular fns
+        save_params = self._params
+        save_in_method = self._in_method_type
+        save_declares = self._declares
+        save_decl_seen = self._decl_seen
+        save_fn = self._current_fn
+        self._params = {p.name for p in m.params}
+        self._in_method_type = type_logical_name
+        self._declares = []
+        self._decl_seen = set()
+        # Set _current_fn to a synthetic FnDef so _emit_return etc. work.
+        synth_fn = A.FnDef(
+            loc=m.loc, name=m.name, params=m.params,
+            return_type=m.return_type, body=m.body,
+        )
+        self._current_fn = synth_fn
+        try:
+            body_lines: list[str] = []
+            for s in m.body:
+                body_lines.extend(self._emit_stmt(s, indent="    "))
+            decls = self._declares[:]
+        finally:
+            self._params = save_params
+            self._in_method_type = save_in_method
+            self._declares = save_declares
+            self._decl_seen = save_decl_seen
+            self._current_fn = save_fn
+        out: list[str] = []
+        out.append(f"  {sig} IS")
+        for d in decls:
+            out.append(f"    {d}")
+        out.append(f"  BEGIN")
+        if body_lines:
+            out.extend(body_lines)
+        else:
+            out.append("    NULL;")
+        out.append(f"  END;")
+        return "\n".join(out)
+
+    def _is_list_member_access(self, recv: A.Expr) -> bool:
+        """True if `recv` is a `self.<field>` or `<param>.<field>` where field is list-typed."""
+        if not isinstance(recv, A.MemberAccess):
+            return False
+        ft = self._resolve_member_type(recv)
+        return isinstance(ft, A.GenericType) and ft.base == "list"
+
+    def _resolve_member_type(self, ma: A.MemberAccess) -> Optional[A.TypeRef]:
+        """Best-effort: figure out the pell TypeRef of `obj.field`."""
+        obj = ma.obj
+        owner_fields: Optional[list[A.FieldDef]] = None
+        # Case 1: obj is `self` inside a method body
+        if isinstance(obj, A.Ident) and obj.name == "self" and self._in_method_type is not None:
+            owner_fields = self._fields_of_logical_type(self._in_method_type)
+        # Case 2: obj is a parameter whose declared type is a known named type
+        elif isinstance(obj, A.Ident) and obj.name in self._params and self._current_fn is not None:
+            for p in self._current_fn.params:
+                if p.name == obj.name and isinstance(p.type_ref, A.NamedType):
+                    owner_fields = self._fields_of_logical_type(p.type_ref.name)
+        if owner_fields is None:
+            return None
+        for f in owner_fields:
+            if f.name == ma.field:
+                return f.type_ref
+        return None
+
+    def _fields_of_logical_type(self, name: str) -> Optional[list[A.FieldDef]]:
+        """Look up the field list for a TypeDef, sealed parent, sealed case, or aggregate."""
+        td = self._lookup_type(name)
+        if td is not None:
+            return td.fields
+        for st in self._sealed_types:
+            if st.name == name:
+                return st.fields
+            for c in st.cases:
+                if c.name == name:
+                    return list(st.fields) + list(c.fields)
+        for ag in self._aggregates:
+            if ag.name == name:
+                return ag.state_fields
+        return None
+
+    def _receiver_is_object_typed(self, recv: A.Expr) -> bool:
+        """Heuristic: does `recv` evaluate to an instance of a user-defined OBJECT type?
+
+        - `self` inside a method body → yes (the enclosing type).
+        - A parameter whose declared type is a known type → yes.
+        - A MemberAccess whose final field is declared as a known type → yes.
+        Otherwise no (caller falls back to free-function style).
+        """
+        if isinstance(recv, A.Ident):
+            if recv.name == "self" and self._in_method_type is not None:
+                return True
+            if recv.name in self._params and self._current_fn is not None:
+                for p in self._current_fn.params:
+                    if p.name == recv.name and isinstance(p.type_ref, A.NamedType):
+                        return p.type_ref.name in self._type_names
+        # MemberAccess chain (e.g., self.next.method()) — peek at the field's declared type.
+        if isinstance(recv, A.MemberAccess) and self._in_method_type is not None:
+            field_type = self._field_type_for_member(recv)
+            if field_type is not None and field_type in self._type_names:
+                return True
+        return False
+
+    def _field_type_for_member(self, ma: A.MemberAccess) -> Optional[str]:
+        """If `ma.obj` is `self` inside a known type and `ma.field` is a typed field,
+        return the field's named-type name (else None)."""
+        if not (isinstance(ma.obj, A.Ident) and ma.obj.name == "self"):
+            return None
+        if self._in_method_type is None:
+            return None
+        td = self._lookup_type(self._in_method_type)
+        if td is None:
+            ck = self._lookup_case(self._in_method_type)
+            if ck is None:
+                return None
+            _, case = ck
+            fields = case.fields
+        else:
+            fields = td.fields
+        for f in fields:
+            if f.name == ma.field and isinstance(f.type_ref, A.NamedType):
+                return f.type_ref.name
+        return None
+
+    def _emit_obj_constructor(self, sl: A.StructLit) -> str:
+        """`Money { amount: x, currency: y }` → `t_money(x, y)` (positional).
+
+        For sealed-case constructors, the synthetic parent placeholder (when
+        the parent had no real fields) gets a NULL prefix.
+        """
+        type_pl = _record_type_name(sl.type_name)
+        ordered_field_names: list[str] = []
+        prefix_nulls = 0
+        td = self._lookup_type(sl.type_name)
+        if td is not None:
+            ordered_field_names = [f.name for f in td.fields]
+        else:
+            ck = self._lookup_case(sl.type_name)
+            if ck is not None:
+                st, case = ck
+                ordered_field_names = [f.name for f in st.fields] + [f.name for f in case.fields]
+                if not st.fields:
+                    # Parent has a synthetic placeholder attribute; pass NULL.
+                    prefix_nulls = 1
+        provided = {f.name: f.value for f in sl.fields}
+        missing = [n for n in ordered_field_names if n not in provided]
+        if missing:
+            raise EmitError(
+                f"{sl.type_name} {{ ... }}: missing fields {missing}",
+                sl.loc,
+            )
+        args_list = (["NULL"] * prefix_nulls) + [self._emit_expr(provided[n]) for n in ordered_field_names]
+        return f"{type_pl}({', '.join(args_list)})"
+
+    def _lookup_type(self, name: str) -> Optional[A.TypeDef]:
+        for t in self._types:
+            if t.name == name:
+                return t
+        return None
+
+    def _lookup_case(self, name: str) -> Optional[tuple[A.SealedTypeDef, A.CaseDef]]:
+        for st in self._sealed_types:
+            for c in st.cases:
+                if c.name == name:
+                    return (st, c)
+        return None
+
     def _lower_ident(self, name: str) -> str:
         """Map a pell identifier (possibly qualified with ::) to PL/SQL."""
+        if name == "self" and self._in_method_type is not None:
+            # Inside a member-fn body, `self` is Oracle's implicit SELF parameter.
+            return "SELF"
+        # Declared sequence references — emit verbatim (with `::` → `.` for schemas).
+        if name in self._seq_names:
+            if "::" in name:
+                parts = name.split("::")
+                return ".".join(p.lower() for p in parts)
+            return name.lower()
         if "::" in name:
             parts = name.split("::")
             return ".".join(parts[:-1]).lower() + "." + parts[-1].lower()

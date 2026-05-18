@@ -11,3 +11,4 @@ heapdump.*.phd
 Snap.*.trc
 *.dmp
 afiedt.buf
+.idea

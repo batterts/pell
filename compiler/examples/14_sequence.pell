@@ -1,0 +1,16 @@
+module emp_demo;
+
+// External Oracle sequence reference. pell doesn't emit DDL — you create
+// the sequence yourself via `CREATE SEQUENCE …`. The declaration just lets
+// pell render `employee_id_seq.nextval` as a bare PL/SQL reference instead
+// of mangling it with the local-variable `l_` prefix.
+pub seq employee_id_seq;
+
+pub fn next_employee_id() -> number {
+    let id = employee_id_seq.nextval;
+    return id;
+}
+
+pub fn current_id() -> number {
+    return employee_id_seq.currval;
+}

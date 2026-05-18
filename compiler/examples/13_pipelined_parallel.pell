@@ -1,0 +1,87 @@
+module rolling;
+
+// Per-country running balance via a pipelined table function with parallel
+// execution.
+//
+// `@parallel` on a `@pipelined` fn surfaces Oracle's PARALLEL_ENABLE clause
+// plus PARTITION/ORDER (or CLUSTER) on the cursor input:
+//
+//   partition = hash(col1, col2, …)  → PARTITION p_rows BY HASH(...)
+//   partition = range(col)           → PARTITION p_rows BY RANGE(col)
+//   partition = any                  → PARTITION p_rows BY ANY (no co-location)
+//   order = (col1, col2, …)          → ORDER p_rows BY (...)        (full sort)
+//   cluster = (col1, col2, …)        → CLUSTER p_rows BY (...)      (group, no sort)
+//
+// Hash partitioning on country_code guarantees that all rows for one country
+// land on the same parallel slave — necessary for state machines that reset
+// on key change. The ORDER clause guarantees chronological processing
+// within each country.
+
+pub record Txn {
+    country_code: text,
+    ts: timestamp,
+    amount: number,
+}
+
+pub record RunningRow {
+    country: text,
+    ts: timestamp,
+    balance: number,
+}
+
+@pipelined
+@parallel(
+    partition = hash(country_code),
+    order = (country_code, ts),
+)
+pub fn rolling_balance(rows: cursor<Txn>) -> stream<RunningRow> {
+    // `seen` flag — needed because pell `text = ""` lowers to Oracle's empty
+    // VARCHAR2 which Oracle treats as NULL, and `x <> NULL` is NULL (not
+    // TRUE) so a naive `r.country_code != cur_country` check never fires.
+    var seen: number = 0;
+    var cur_country: text = "";
+    var total: number = 0;
+    for r in rows {
+        if seen == 0 {
+            cur_country = r.country_code;
+            seen = 1;
+        } else if r.country_code != cur_country {
+            cur_country = r.country_code;
+            total = 0;
+        }
+        total = total + r.amount;
+        yield RunningRow {
+            country: r.country_code,
+            ts: r.ts,
+            balance: total,
+        };
+    }
+}
+
+// CLUSTER variant — cheaper if you don't need strict chronological ordering
+// within a country (just need contiguous per-country runs).
+@pipelined
+@parallel(
+    partition = hash(country_code),
+    cluster = (country_code),
+)
+pub fn distinct_per_country(rows: cursor<Txn>) -> stream<RunningRow> {
+    var seen: number = 0;
+    var cur_country: text = "";
+    var n: number = 0;
+    for r in rows {
+        if seen == 0 {
+            cur_country = r.country_code;
+            seen = 1;
+        } else if r.country_code != cur_country {
+            cur_country = r.country_code;
+            n = 0;
+        }
+        n = n + 1;
+        yield RunningRow {
+            country: r.country_code,
+            ts: r.ts,
+            balance: n,
+        };
+    }
+}

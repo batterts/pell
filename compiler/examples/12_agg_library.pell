@@ -1,0 +1,263 @@
+module agg_library;
+
+// A small library of aggregate functions that fill gaps in standard SQL.
+// Each one demonstrates a different shape of accumulator and lowers cleanly
+// to Oracle's ODCIAggregate machinery.
+
+// ---------------------------------------------------------------------------
+// 1. xor_hash — order-independent hash of a set of rows.
+//
+// Use case: "did the contents of this view drift?" without caring about order.
+// XOR is associative + commutative, so merge() is trivial and @parallel-safe.
+//
+// SQL:  SELECT xor_hash(name) FROM employees;
+// ---------------------------------------------------------------------------
+
+// Oracle has BITAND but no scalar BITXOR/BITOR — we synthesize them via the
+// identities `XOR(a,b) = a + b - 2·AND(a,b)` and `OR(a,b) = a + b - AND(a,b)`
+// (valid for non-negative integers, which both `ora_hash` and flag fields are).
+
+@parallel
+pub aggregate xor_hash(s: text) -> number {
+    state { acc: number = 0; }
+    step(v: text) {
+        // dbms_utility::get_hash_value is PL/SQL-callable (ORA_HASH is SQL-only).
+        let h: number = dbms_utility::get_hash_value(v, 0, 1073741824);
+        self.acc = self.acc + h - 2 * bitand(self.acc, h);
+    }
+    merge(o: Self) {
+        self.acc = self.acc + o.acc - 2 * bitand(self.acc, o.acc);
+    }
+    finish() -> number { return self.acc; }
+}
+
+// ---------------------------------------------------------------------------
+// 2. bitwise_or — combine bit flags across rows.
+//
+// Use case: "which permissions does *anyone* in the group have?" — collapse
+// integer flag fields into one. Identity is 0 (no flags); merge is OR.
+//
+// SQL:  SELECT bitwise_or(perm_flags) FROM role_grants;
+// ---------------------------------------------------------------------------
+
+@parallel
+pub aggregate bitwise_or(n: number) -> number {
+    state { bits: number = 0; }
+    step(v: number) {
+        self.bits = self.bits + v - bitand(self.bits, v);
+    }
+    merge(o: Self) {
+        self.bits = self.bits + o.bits - bitand(self.bits, o.bits);
+    }
+    finish() -> number { return self.bits; }
+}
+
+// ---------------------------------------------------------------------------
+// 3. unique_or_null — strict consensus: the value if all rows agree, else NULL.
+//
+// Use case: detecting fan-out joins ("did this join multiply rows?") or
+// validating that a denormalized column is consistent ("does every line in
+// invoice 7 have the same customer_id?"). Not parallel-safe (the conflict
+// observation isn't trivially mergeable in one step — would need extra state).
+//
+// SQL:  SELECT order_id, unique_or_null(customer_id) FROM order_lines GROUP BY order_id;
+// ---------------------------------------------------------------------------
+
+pub aggregate unique_or_null(s: text) -> text {
+    state {
+        val: text = "";
+        seen: number = 0;
+        conflict: number = 0;
+    }
+    step(v: text) {
+        if self.seen == 0 {
+            self.val = v;
+            self.seen = 1;
+        } else if self.val != v {
+            self.conflict = 1;
+        }
+    }
+    finish() -> text {
+        if self.conflict == 1 { return ""; }
+        return self.val;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 4. numeric_range — max(v) - min(v) in a single pass.
+//
+// Use case: "how spread out is this column?" — useful for sanity-checking
+// histograms, charts, etc. Parallel-safe.
+//
+// SQL:  SELECT numeric_range(salary) FROM employees;
+// ---------------------------------------------------------------------------
+
+@parallel
+pub aggregate numeric_range(n: number) -> number {
+    state {
+        lo: number = 0;
+        hi: number = 0;
+        seen: number = 0;
+    }
+    step(v: number) {
+        if self.seen == 0 {
+            self.lo = v;
+            self.hi = v;
+            self.seen = 1;
+        } else {
+            if v < self.lo { self.lo = v; }
+            if v > self.hi { self.hi = v; }
+        }
+    }
+    merge(o: Self) {
+        if self.seen == 0 {
+            self.lo = o.lo;
+            self.hi = o.hi;
+            self.seen = o.seen;
+        } else if o.seen == 1 {
+            if o.lo < self.lo { self.lo = o.lo; }
+            if o.hi > self.hi { self.hi = o.hi; }
+        }
+    }
+    finish() -> number { return self.hi - self.lo; }
+}
+
+// ---------------------------------------------------------------------------
+// 5. harmonic_mean — N / Σ(1/x) — the right average for rates.
+//
+// Use case: averaging speeds, throughputs, or any rate where the denominator
+// is "amount of time" and the numerator is "amount of work". The arithmetic
+// mean of mph is wrong; harmonic mean is correct. Parallel-safe (sums merge).
+//
+// SQL:  SELECT route_id, harmonic_mean(mph) FROM legs GROUP BY route_id;
+// ---------------------------------------------------------------------------
+
+@parallel
+pub aggregate harmonic_mean(n: number) -> number {
+    state {
+        recip_sum: number = 0;
+        count: number = 0;
+    }
+    step(v: number) {
+        if v != 0 {
+            self.recip_sum = self.recip_sum + 1 / v;
+            self.count = self.count + 1;
+        }
+    }
+    merge(o: Self) {
+        self.recip_sum = self.recip_sum + o.recip_sum;
+        self.count = self.count + o.count;
+    }
+    finish() -> number {
+        if self.count == 0 { return 0; }
+        return self.count / self.recip_sum;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 6. majority_vote — Boyer-Moore majority candidate.
+//
+// Use case: "is there a value that occurs in more than half the rows?" The
+// classic single-pass algorithm. The returned value is the *candidate*; to
+// confirm strict majority, run a second pass to count occurrences. We also
+// keep a running count of the candidate so the finish step can validate.
+//
+// Not @parallel by design — the candidate's vote depends on order of arrival
+// across partitions; a merge that ignores that produces wrong answers more
+// often than right ones.
+//
+// SQL:  SELECT election_id, majority_vote(choice) FROM ballots GROUP BY election_id;
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 7. argmax — return the value where the key column is maximal.
+//
+// Demonstrates a *multi-arg* aggregate — Oracle's ODCIAggregateIterate takes
+// each step parameter as a separate IN argument; the wrapper function exposes
+// the same positional list to callers.
+//
+// Single-pass: tracks the best-seen key and its accompanying value.
+//
+// SQL:  SELECT department, argmax(employee_name, salary) AS top_earner
+//         FROM employees GROUP BY department;
+// ---------------------------------------------------------------------------
+
+pub aggregate argmax(val: text, key: number) -> text {
+    state {
+        best_val: text = "";
+        best_key: number = 0;
+        seen: number = 0;
+    }
+    step(v: text, k: number) {
+        if self.seen == 0 {
+            self.best_val = v;
+            self.best_key = k;
+            self.seen = 1;
+        } else if k > self.best_key {
+            self.best_val = v;
+            self.best_key = k;
+        }
+    }
+    finish() -> text { return self.best_val; }
+}
+
+// ---------------------------------------------------------------------------
+// 8. weighted_mean — Σ(value · weight) / Σ(weight), single-pass.
+//
+// Useful when rows represent buckets / aggregations themselves (e.g.,
+// per-region averages with population weights). Parallel-safe — both
+// sums merge cleanly.
+//
+// SQL:  SELECT weighted_mean(avg_score, n_responses) FROM region_summaries;
+// ---------------------------------------------------------------------------
+
+@parallel
+pub aggregate weighted_mean(value: number, weight: number) -> number {
+    state {
+        weighted_sum: number = 0;
+        weight_sum: number = 0;
+    }
+    step(v: number, w: number) {
+        self.weighted_sum = self.weighted_sum + v * w;
+        self.weight_sum = self.weight_sum + w;
+    }
+    merge(o: Self) {
+        self.weighted_sum = self.weighted_sum + o.weighted_sum;
+        self.weight_sum = self.weight_sum + o.weight_sum;
+    }
+    finish() -> number {
+        if self.weight_sum == 0 { return 0; }
+        return self.weighted_sum / self.weight_sum;
+    }
+}
+
+pub aggregate majority_vote(s: text) -> text {
+    state {
+        candidate: text = "";
+        votes: number = 0;
+        candidate_count: number = 0;
+        total: number = 0;
+    }
+    step(v: text) {
+        self.total = self.total + 1;
+        if self.votes == 0 {
+            self.candidate = v;
+            self.votes = 1;
+            self.candidate_count = 1;
+        } else if self.candidate == v {
+            self.votes = self.votes + 1;
+            self.candidate_count = self.candidate_count + 1;
+        } else {
+            self.votes = self.votes - 1;
+            // note: candidate_count tracks raw occurrences of the *current*
+            // candidate, not the running BM weight — used in finish to verify.
+        }
+    }
+    finish() -> text {
+        // Strict majority: candidate must appear in > N/2 of the rows.
+        // Approximation — candidate_count goes stale if the candidate changes
+        // mid-stream. For a correct count, a second pass would be needed.
+        if self.candidate_count * 2 > self.total { return self.candidate; }
+        return "";
+    }
+}

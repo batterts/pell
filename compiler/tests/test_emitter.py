@@ -610,3 +610,404 @@ def test_procedure_return_without_value():
     # In a Unit-returning fn, return Ok(()) becomes RETURN;
     assert "RETURN;" in sql
     assert "RETURN NULL" not in sql
+
+
+# ---------------------------------------------------------------------------
+# §5.2 / §5.3 — type, sealed type, aggregate emission
+# ---------------------------------------------------------------------------
+
+
+def test_type_basic_emission():
+    sql = compile_to_sql("""
+        module m;
+        pub type Money {
+            amount: number;
+            currency: text;
+            fn add(other: Money) -> Money {
+                return Money { amount: self.amount + other.amount, currency: self.currency };
+            }
+            map fn rank() -> number { return self.amount; }
+        }
+    """)
+    assert "CREATE OR REPLACE TYPE t_money AS OBJECT (" in sql
+    assert "amount NUMBER" in sql
+    assert "MEMBER FUNCTION add(p_other t_money) RETURN t_money" in sql
+    assert "MAP MEMBER FUNCTION rank RETURN NUMBER" in sql
+    assert "CREATE OR REPLACE TYPE BODY t_money AS" in sql
+    assert "t_money((SELF.amount + p_other.amount), SELF.currency)" in sql
+    assert "RETURN SELF.amount;" in sql
+
+
+def test_sealed_type_emission_has_under_and_overriding():
+    sql = compile_to_sql("""
+        module m;
+        pub sealed type Shape {
+            fn area() -> number;
+            case Circle { radius: number } {
+                fn area() -> number { return 3.14 * self.radius * self.radius; }
+            }
+            case Rectangle { width: number; height: number } {
+                fn area() -> number { return self.width * self.height; }
+            }
+        }
+    """)
+    assert "NOT INSTANTIABLE NOT FINAL" in sql
+    assert "NOT INSTANTIABLE MEMBER FUNCTION area RETURN NUMBER" in sql
+    assert "CREATE OR REPLACE TYPE t_circle UNDER t_shape (" in sql
+    assert "CREATE OR REPLACE TYPE t_rectangle UNDER t_shape (" in sql
+    assert "OVERRIDING MEMBER FUNCTION area RETURN NUMBER" in sql
+
+
+def test_match_on_sealed_lowers_to_is_of_treat():
+    sql = compile_to_sql("""
+        module m;
+        pub sealed type Shape {
+            fn area() -> number;
+            case Circle { radius: number } { fn area() -> number { return 1; } }
+            case Square { side: number } { fn area() -> number { return 2; } }
+        }
+        pub fn kind(s: Shape) -> text {
+            var k: text = "";
+            match s {
+                Circle(c) -> { k = "round"; }
+                Square(_) -> { k = "boxy"; }
+            }
+            return k;
+        }
+    """)
+    assert "IS OF (t_circle)" in sql
+    assert "IS OF (t_square)" in sql
+    assert "TREAT((p_s) AS t_circle)" in sql
+
+
+def test_aggregate_emits_odci_machinery():
+    sql = compile_to_sql("""
+        module m;
+        pub aggregate counter(x: number) -> number {
+            state { n: number = 0; }
+            step(v: number) { self.n = self.n + 1; }
+            finish() -> number { return self.n; }
+        }
+    """)
+    assert "STATIC FUNCTION ODCIAggregateInitialize(sctx IN OUT counter_agg_t)" in sql
+    assert "MEMBER FUNCTION ODCIAggregateIterate(self IN OUT counter_agg_t" in sql
+    assert "MEMBER FUNCTION ODCIAggregateTerminate(self IN OUT counter_agg_t" in sql
+    # ODCIAggregateMerge is always declared (ORA-29925 requires it); body
+    # is a stub when user didn't supply `merge`.
+    assert "ODCIAggregateMerge" in sql
+    assert "cannot run in parallel" in sql
+    assert "CREATE OR REPLACE FUNCTION counter(p_x IN NUMBER) RETURN NUMBER AGGREGATE USING counter_agg_t" in sql
+
+
+def test_aggregate_parallel_requires_merge():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql("""
+            module m;
+            @parallel
+            pub aggregate bad(x: number) -> number {
+                state { n: number = 0; }
+                step(v: number) { self.n = self.n + 1; }
+                finish() -> number { return self.n; }
+            }
+        """)
+
+
+def test_aggregate_with_merge_and_parallel_emits_clause():
+    sql = compile_to_sql("""
+        module m;
+        @parallel
+        pub aggregate sum2(x: number) -> number {
+            state { acc: number = 0; }
+            step(v: number) { self.acc = self.acc + v; }
+            merge(o: Self) { self.acc = self.acc + o.acc; }
+            finish() -> number { return self.acc; }
+        }
+    """)
+    assert "ODCIAggregateMerge" in sql
+    assert "PARALLEL_ENABLE AGGREGATE USING sum2_agg_t" in sql
+
+
+def test_aggregate_list_state_lowers_to_nested_table():
+    sql = compile_to_sql("""
+        module m;
+        pub aggregate sample(x: number) -> number {
+            state { vals: list<number> = []; }
+            step(v: number) { self.vals.append(v); }
+            finish() -> number { return self.vals.len(); }
+        }
+    """)
+    assert "CREATE OR REPLACE TYPE t_number_nt AS TABLE OF NUMBER" in sql
+    assert "vals t_number_nt" in sql
+    assert "SELF.vals.EXTEND" in sql
+    assert "SELF.vals.COUNT" in sql
+
+
+def test_aggregate_step_lets_emit_declarations():
+    """Step/merge/finish bodies that declare locals must emit DECLARE-style
+    decls between IS and BEGIN."""
+    sql = compile_to_sql("""
+        module m;
+        pub aggregate h(s: text) -> number {
+            state { acc: number = 0; }
+            step(v: text) {
+                let local: number = 42;
+                self.acc = self.acc + local;
+            }
+            finish() -> number { return self.acc; }
+        }
+    """)
+    assert "l_local NUMBER;" in sql
+
+
+def test_aggregate_finish_return_inside_if_assigns_returnvalue():
+    """Returns nested inside `if` blocks in finish() must still rewrite to
+    `returnValue := ...; RETURN ODCIConst.Success;`."""
+    sql = compile_to_sql("""
+        module m;
+        pub aggregate pick(s: text) -> text {
+            state { val: text = ""; conflict: number = 0; }
+            step(v: text) { self.val = v; }
+            finish() -> text {
+                if self.conflict == 1 { return ""; }
+                return self.val;
+            }
+        }
+    """)
+    # The nested-in-IF return is the one most likely to regress.
+    # We expect both arms to assign returnValue, not bare RETURN <value>.
+    assert "RETURN SELF.val;" not in sql
+    assert "returnValue := SELF.val;" in sql
+    assert "returnValue := '';" in sql
+
+
+def test_multi_arg_aggregate_emits_tuple_type():
+    """Aggregates with >1 step parameter auto-emit a tuple OBJECT type;
+    iterate takes that tuple as its single arg and the body unpacks back
+    to the user's named parameters."""
+    sql = compile_to_sql("""
+        module m;
+        pub aggregate argmax(val: text, key: number) -> text {
+            state {
+                best_val: text = "";
+                best_key: number = 0;
+                seen: number = 0;
+            }
+            step(v: text, k: number) {
+                if self.seen == 0 { self.best_val = v; self.best_key = k; self.seen = 1; }
+                else if k > self.best_key { self.best_val = v; self.best_key = k; }
+            }
+            finish() -> text { return self.best_val; }
+        }
+    """)
+    # Tuple type emitted with one attribute per step param, in source order.
+    assert "CREATE OR REPLACE TYPE argmax_args_t AS OBJECT" in sql
+    assert "v VARCHAR2(4000)" in sql
+    assert "k NUMBER" in sql
+    # Iterate takes the tuple, not separate args.
+    assert "ODCIAggregateIterate(self IN OUT argmax_agg_t, p_args IN argmax_args_t)" in sql
+    # Body unpacks tuple back to user's named params.
+    assert "p_v := p_args.v;" in sql
+    assert "p_k := p_args.k;" in sql
+    # The wrapper function has signature (p_args IN argmax_args_t).
+    assert "FUNCTION argmax(p_args IN argmax_args_t) RETURN VARCHAR2" in sql
+
+
+def test_pipelined_parallel_emits_partition_and_order_clauses():
+    """@parallel(partition=hash(col), order=(cols)) on a @pipelined fn
+    surfaces PARALLEL_ENABLE / PARTITION BY / ORDER BY in the signature,
+    and uses a strongly-typed REF CURSOR (Oracle PLS-00627)."""
+    sql = compile_to_sql("""
+        module m;
+        pub record Txn { country: text, ts: timestamp, amount: number }
+        pub record Out { country: text, ts: timestamp, balance: number }
+        @pipelined
+        @parallel(partition = hash(country), order = (country, ts))
+        pub fn rolling(rows: cursor<Txn>) -> stream<Out> {
+            var first: number = 1;
+            for r in rows {
+                yield Out { country: r.country, ts: r.ts, balance: r.amount };
+            }
+        }
+    """)
+    # Strong cursor declaration in the spec.
+    assert "TYPE t_txn_cur IS REF CURSOR RETURN t_txn;" in sql
+    # Signature uses the strong cursor.
+    assert "p_rows IN t_txn_cur" in sql
+    assert "SYS_REFCURSOR" not in sql  # must NOT be used for parallel pipelined
+    # Parallel + partition + order clauses present.
+    assert "PARALLEL_ENABLE(PARTITION p_rows BY HASH(country))" in sql
+    assert "ORDER p_rows BY (country, ts)" in sql
+
+
+def test_pipelined_parallel_cluster_clause():
+    """cluster= renders CLUSTER BY (...) instead of ORDER BY."""
+    sql = compile_to_sql("""
+        module m;
+        pub record Txn { k: text, v: number }
+        pub record Out { k: text, n: number }
+        @pipelined
+        @parallel(partition = hash(k), cluster = (k))
+        pub fn pf(rows: cursor<Txn>) -> stream<Out> {
+            for r in rows { yield Out { k: r.k, n: r.v }; }
+        }
+    """)
+    assert "CLUSTER p_rows BY (k)" in sql
+    assert "ORDER p_rows BY" not in sql
+
+
+def test_pipelined_parallel_order_and_cluster_conflict_errors():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql("""
+            module m;
+            pub record T { c: text }
+            pub record O { c: text }
+            @pipelined
+            @parallel(partition = hash(c), order = (c), cluster = (c))
+            pub fn pf(rows: cursor<T>) -> stream<O> {
+                for r in rows { yield O { c: r.c }; }
+            }
+        """)
+
+
+def test_sequence_nextval_emits_bare_reference():
+    """`pub seq name;` + `name.nextval` lowers to a bare PL/SQL reference,
+    not the l_-prefixed local."""
+    sql = compile_to_sql("""
+        module m;
+        pub seq emp_id_seq;
+        pub fn next_id() -> number {
+            let id = emp_id_seq.nextval;
+            return id;
+        }
+    """)
+    assert "l_id NUMBER;" in sql
+    assert "l_id := emp_id_seq.nextval;" in sql
+    # The seq name itself must NOT be `l_`-prefixed.
+    assert "l_emp_id_seq" not in sql
+
+
+def test_sequence_qualified_name():
+    """Schema-qualified seq name lowers `::` to `.`"""
+    sql = compile_to_sql("""
+        module m;
+        pub seq hr::emp_seq;
+        pub fn n() -> number { return hr::emp_seq.nextval; }
+    """)
+    assert "hr.emp_seq.nextval" in sql
+
+
+def test_string_method_aliases():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(s: text) -> bool {
+            if s.is_empty() { return false; }
+            if s.starts_with("DEBUG") { return true; }
+            if s.contains("ERROR") { return true; }
+            return s.ends_with("!");
+        }
+    """)
+    assert "(p_s IS NULL OR LENGTH(p_s) = 0)" in sql
+    assert "(p_s LIKE 'DEBUG' || '%')" in sql
+    assert "(INSTR(p_s, 'ERROR') > 0)" in sql
+    assert "(p_s LIKE '%' || '!')" in sql
+
+
+def test_date_extract_aliases():
+    sql = compile_to_sql("""
+        module m;
+        pub fn parts(d: date) -> number {
+            return d.year() * 10000 + d.month() * 100 + d.day();
+        }
+    """)
+    assert "EXTRACT(YEAR FROM p_d)" in sql
+    assert "EXTRACT(MONTH FROM p_d)" in sql
+    assert "EXTRACT(DAY FROM p_d)" in sql
+
+
+def test_split_emits_helper_and_list_type():
+    sql = compile_to_sql("""
+        module m;
+        pub fn parse(s: text) -> number {
+            let parts: list<text> = s.split(",");
+            return parts.len();
+        }
+    """)
+    assert "TYPE t_text_list IS TABLE OF VARCHAR2(4000)" in sql
+    assert "FUNCTION pell_split_text(p_s VARCHAR2, p_delim VARCHAR2) RETURN t_text_list" in sql
+    assert "pell_split_text(p_s, ',')" in sql
+
+
+def test_split_helper_only_when_used():
+    """The helper should NOT be emitted in modules that don't call .split()."""
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(s: text) -> number { return s.length(); }
+    """)
+    assert "pell_split_text" not in sql
+
+
+def test_method_alias_wrong_arity_errors():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql("""
+            module m;
+            pub fn f(s: text) -> bool { return s.contains(); }
+        """)
+
+
+def test_sequence_currval_inferred_as_number():
+    sql = compile_to_sql("""
+        module m;
+        pub seq s;
+        pub fn cur() -> number {
+            let n = s.currval;
+            return n;
+        }
+    """)
+    assert "l_n NUMBER;" in sql
+    assert "l_n := s.currval;" in sql
+
+
+def test_pipelined_parallel_any_partition():
+    sql = compile_to_sql("""
+        module m;
+        pub record T { x: number }
+        pub record O { y: number }
+        @pipelined
+        @parallel(partition = any)
+        pub fn pf(rows: cursor<T>) -> stream<O> {
+            for r in rows { yield O { y: r.x }; }
+        }
+    """)
+    assert "PARALLEL_ENABLE(PARTITION p_rows BY ANY)" in sql
+
+
+def test_multi_arg_aggregate_step_count_mismatch_errors():
+    """Step's parameter count must match the aggregate's outer signature."""
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql("""
+            module m;
+            pub aggregate bad(a: number, b: number) -> number {
+                state { n: number = 0; }
+                step(only_one: number) { self.n = self.n + only_one; }
+                finish() -> number { return self.n; }
+            }
+        """)
+
+
+def test_unknown_callee_passes_through_as_builtin():
+    """Bare-identifier function calls (Oracle/PL/SQL builtins) should not
+    be l_-prefixed."""
+    sql = compile_to_sql("""
+        module m;
+        pub aggregate h(n: number) -> number {
+            state { acc: number = 0; }
+            step(v: number) { self.acc = bitand(self.acc, v); }
+            finish() -> number { return self.acc; }
+        }
+    """)
+    assert "bitand(SELF.acc, p_v)" in sql
+    assert "l_bitand" not in sql

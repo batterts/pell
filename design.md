@@ -588,6 +588,78 @@ for multi-stage chains: `source |> filter_fn |> enrich_fn |> collect()`
 lowers to a nested `TABLE(enrich_fn(CURSOR(SELECT … FROM TABLE(filter_fn(…)))))`
 expression — fully streaming, no intermediate staging.
 
+### 4.5.7 `@parallel` on pipelined fns — partitioning and ordering
+
+Oracle PTFs can run in parallel; the optimizer needs hints about how to
+distribute input rows across slaves. Pell surfaces those hints via the
+`@parallel(...)` annotation on `@pipelined`:
+
+```pell
+@pipelined
+@parallel(
+    partition = hash(country_code),
+    order = (country_code, ts),
+)
+pub fn rolling_balance(rows: cursor<Txn>) -> stream<RunningRow> {
+    var seen: number = 0;
+    var cur_country: text = "";
+    var total: number = 0;
+    for r in rows {
+        if seen == 0 {
+            cur_country = r.country_code;
+            seen = 1;
+        } else if r.country_code != cur_country {
+            cur_country = r.country_code;
+            total = 0;
+        }
+        total = total + r.amount;
+        yield RunningRow { country: r.country_code, ts: r.ts, balance: total };
+    }
+}
+```
+
+**Partition forms**:
+- `partition = hash(col1, col2, …)` — co-locate rows by hashed key. The
+  state machine for each key value stays on one slave. Use this when
+  your PTF resets state on key change.
+- `partition = range(col)` — co-locate by value range. Oracle picks the
+  cut points. Rarely useful.
+- `partition = any` — Oracle distributes freely. Use when your PTF is
+  stateless across rows.
+
+**Ordering**:
+- `order = (col1, col2, …)` — full sort within each partition slice
+  (`ORDER p_rows BY (…)`). Required for time-series state machines.
+- `cluster = (col1, …)` — weaker, cheaper. Rows sharing the cluster
+  key arrive consecutively, but the groups themselves can appear in any
+  order. Implementable via hash-grouping (no sort). Pick this when you
+  just need "all rows for one key together" and don't care about order
+  across keys.
+
+`order=` and `cluster=` are mutually exclusive; specifying both is a
+compile-time error. `order=` / `cluster=` without `partition=` is also
+an error (Oracle requires the partition clause to attach ordering to).
+
+**Strongly-typed REF CURSOR**: Oracle requires a strongly-typed cursor
+input when `PARTITION BY` is present (PLS-00627 otherwise). Pell handles
+this automatically — for `@parallel(partition=…)` pipelined fns, it
+generates `TYPE t_<Elem>_cur IS REF CURSOR RETURN t_<Elem>;` in the
+package spec and uses that type on the parameter. Without `partition=`,
+the cursor remains `SYS_REFCURSOR`.
+
+**Serial vs parallel caveat**: PARTITION/ORDER clauses are honored
+*only* when Oracle actually runs the PTF in parallel. In serial
+execution (single slave), the cursor's natural row order is used. So if
+your PTF needs ordering for correctness in *both* modes, sort the cursor
+explicitly:
+
+```pell
+sql!{ select * from txns order by country_code, ts } |> rolling_balance |> collect()
+```
+
+A future enhancement could lift the serial-mode caveat by auto-injecting
+the `ORDER BY` into the cursor's source SELECT during pipeline lowering.
+
 ### 4.6 Pipelines
 
 ```pell
@@ -1014,6 +1086,452 @@ not a silent truncation — silent truncation would cause aliasing of
 distinct keys, which is exactly the bug `derive Key` exists to prevent.
 See §5.1.3 for the parallel rule on `map<text(N), V>`.
 
+## 5.2 `type` — typed objects with methods
+
+Pell separates plain data (`record`) from objects that carry behavior
+(`type`). A `type` declaration produces an Oracle object type with its
+methods. It is the foundation for sealed hierarchies (§5.2.3),
+user-defined aggregates (§5.3), and any future MAP/ORDER-orderable
+domain values (Money, Email, …).
+
+### 5.2.1 The basic form
+
+```pell
+pub type Money {
+    amount: number;
+    currency: text;
+
+    fn add(other: Money) -> Money {
+        assert(self.currency == other.currency,
+               "currency mismatch: {self.currency} vs {other.currency}");
+        return Money {
+            amount: self.amount + other.amount,
+            currency: self.currency,
+        };
+    }
+
+    // MAP method — makes Money orderable in SQL: `order by paycheck.salary`
+    map fn rank() -> number { return self.amount; }
+}
+
+let a = Money { amount: 100, currency: "USD" };
+let b = Money { amount:  50, currency: "USD" };
+let c = a.add(b);   // Money { amount: 150, currency: "USD" }
+```
+
+Differences from `record`:
+
+| | `record` | `type` |
+|---|---|---|
+| Has methods | no | yes |
+| `self` available | n/a | inside member fns |
+| Lowers to | local PL/SQL record | `CREATE TYPE` (schema object) |
+| Usable in SQL `SELECT ...` rows | yes (via `%ROWTYPE`) | yes (via object columns) |
+| Inherits / extended | no | only inside a `sealed type` (§5.2.3) |
+| Member function call cost | n/a (procedural) | small object dispatch overhead |
+
+**Rule of thumb:** prefer `record` for data passing between functions; reach
+for `type` when (a) the value must travel through SQL as a column,
+(b) behavior is part of the contract, or (c) you want ordering / map
+semantics.
+
+### 5.2.2 Constructors
+
+Default constructor is auto-generated and accepts every field in declaration
+order. If any field has a default value in the source, that field becomes
+optional and the constructor admits both forms:
+
+```pell
+pub type Money {
+    amount: number;
+    currency: text = "USD";
+}
+
+let m1 = Money { amount: 100 };                     // currency defaults
+let m2 = Money { amount: 100, currency: "EUR" };
+```
+
+To add validation, declare a `new` constructor explicitly. Pell uses
+`new` as the constructor name (not the type name) so the body reads
+sensibly:
+
+```pell
+pub type Email {
+    addr: text;
+
+    fn new(s: text) -> Result<Email, InvalidEmail> {
+        if !s.contains("@") { return Err(InvalidEmail { input: s }); }
+        return Ok(Email { addr: s.to_lower() });
+    }
+}
+```
+
+Lowering: a `STATIC FUNCTION new(...) RETURN email_t` plus the default
+constructor is suppressed (the type becomes `(NOT FINAL) NOT INSTANTIABLE`
+*from SQL* — within pell, `Email { addr: ... }` desugars to `Email::new(...)`
+when a custom `new` is defined, so users still see a clean syntax).
+
+### 5.2.3 Sealed type hierarchies
+
+`sealed type` declares a closed hierarchy: the parent declaration lists
+every case, and the compiler can therefore verify exhaustive `match`.
+
+```pell
+pub sealed type Shape {
+    fn area() -> number;          // abstract — every case must implement
+
+    map fn rank() -> number { return self.area(); }   // shared method
+
+    case Circle { radius: number } {
+        fn area() -> number { return 3.14159 * self.radius * self.radius; }
+    }
+    case Rectangle { width: number; height: number } {
+        fn area() -> number { return self.width * self.height; }
+    }
+    case Triangle { base: number; height: number } {
+        fn area() -> number { return self.base * self.height / 2; }
+    }
+}
+```
+
+**Inline cases only.** Cases must be declared inside the parent's `{ }`
+block. There is no `impl Shape::Circle` syntax. Rationale: closed hierarchies
+should be reviewable at one glance; spreading cases across files makes the
+"are we sure this is exhaustive?" question harder to answer and is the
+exact ergonomic problem sealed types exist to solve.
+
+**Abstract methods.** A method declared with no body (just a signature
+ending in `;`) is abstract. Each case must provide an `fn` with the same
+name and signature, or compilation fails with a missing-implementation
+error citing the unimplemented method and the offending case.
+
+**Shared methods.** Methods with bodies declared on the parent are inherited
+by every case. A case may override by re-declaring the same signature; the
+override is marked `OVERRIDING MEMBER` in the lowered type body.
+
+**Match dispatch — `IS OF` + `TREAT`.** The lowering deliberately avoids
+relying on Oracle's virtual dispatch so `match` works in SQL contexts
+(not just PL/SQL):
+
+```pell
+let kind: text = match s {
+    Circle(_)    => "round",
+    Rectangle(_) => "boxy",
+    Triangle(_)  => "pointy",
+};
+```
+
+lowers to:
+
+```sql
+CASE
+  WHEN s IS OF (circle_t)    THEN 'round'
+  WHEN s IS OF (rectangle_t) THEN 'boxy'
+  WHEN s IS OF (triangle_t)  THEN 'pointy'
+END
+```
+
+When the arm binds a field (`Circle(c) => c.radius * 2`), the lowering
+inserts `TREAT(s AS circle_t)` for the bound name. Virtual dispatch via
+`s.area()` is also available and goes through Oracle's normal override
+resolution — both styles compose.
+
+**Exhaustiveness checking** is the headline feature: leaving a case off
+the match is a compile-time error. This is the same property pell's `try`
+gives for error variants (§4.4).
+
+### 5.2.4 What we deliberately don't have
+
+- **Open inheritance** (`type Foo extends Bar` outside a sealed parent).
+  The Oracle feature exists; the language doesn't surface it. If you
+  need polymorphism in production code, a sealed hierarchy is almost
+  always what you want; if you genuinely need open extension, drop
+  to `unsafe { sql!{...} }` and define the types manually.
+- **Multiple inheritance.** Oracle doesn't allow it; neither does pell.
+- **`STATIC` methods outside `new`.** Static methods other than the
+  constructor are not in v1. Free functions in the enclosing module
+  do the job and read better.
+
+## 5.3 `aggregate` — typed user-defined aggregates
+
+Oracle's ODCIAggregate interface is powerful but brutal to write: four
+mandatory `STATIC` member functions, an `OUT` parameter on every signature,
+and `RETURN ODCIConst.Success` boilerplate everywhere. Pell collapses it
+to one reducer-style declaration.
+
+### 5.3.1 The form
+
+```pell
+pub aggregate median(x: number) -> number {
+    state { vals: list<number> = []; }
+
+    step(v: number)   { self.vals.append(v); }
+    merge(o: Self)    { self.vals.extend(o.vals); }
+    finish() -> number {
+        self.vals.sort();
+        return self.vals[self.vals.len() / 2];
+    }
+}
+```
+
+Call sites look like any aggregate:
+
+```pell
+let m = sql! { select median(rating) from ml_ratings }.one()?;
+```
+
+**Init is implicit from `state` defaults.** Every field in the `state`
+block must have a default expression; that expression becomes the
+initialization body. There is no separate `init` clause in v1. If your
+init needs to read configuration or fail, declare a `new` constructor
+on a helper `type` and embed it in state.
+
+**`self`** refers to the accumulator across `step`, `merge`, and `finish`.
+**`Self`** in `merge(o: Self)` is the aggregate's accumulator type
+(distinct from `self`, which is the receiver).
+
+### 5.3.2 Lowering
+
+```sql
+-- 1. Accumulator type:
+CREATE TYPE median_t AS OBJECT (
+    vals number_list_t,
+    STATIC FUNCTION ODCIAggregateInitialize(sctx IN OUT median_t) RETURN NUMBER,
+    MEMBER FUNCTION ODCIAggregateIterate(self IN OUT median_t, v IN NUMBER) RETURN NUMBER,
+    MEMBER FUNCTION ODCIAggregateMerge(self IN OUT median_t, ctx2 IN median_t) RETURN NUMBER,
+    MEMBER FUNCTION ODCIAggregateTerminate(self IN OUT median_t, returnValue OUT NUMBER, flags IN NUMBER) RETURN NUMBER
+);
+
+-- 2. Type body translates each pell block, wrapping with `RETURN ODCIConst.Success`:
+CREATE TYPE BODY median_t AS
+    STATIC FUNCTION ODCIAggregateInitialize(sctx IN OUT median_t) RETURN NUMBER IS
+    BEGIN
+        sctx := median_t( number_list_t() );           -- from `vals = []`
+        RETURN ODCIConst.Success;
+    END;
+    MEMBER FUNCTION ODCIAggregateIterate(self IN OUT median_t, v IN NUMBER) RETURN NUMBER IS
+    BEGIN
+        self.vals.EXTEND;                              -- from .append(v)
+        self.vals(self.vals.LAST) := v;
+        RETURN ODCIConst.Success;
+    END;
+    ...
+END;
+
+-- 3. The user-facing function:
+CREATE FUNCTION median(x NUMBER) RETURN NUMBER
+    AGGREGATE USING median_t;
+```
+
+If `@parallel` is present (§5.3.3), the final `CREATE FUNCTION` gains
+`PARALLEL_ENABLE`.
+
+### 5.3.3 `@parallel` — opt-in parallel execution
+
+```pell
+@parallel
+pub aggregate median(x: number) -> number {
+    state { vals: list<number> = []; }
+    step(v: number)   { self.vals.append(v); }
+    merge(o: Self)    { self.vals.extend(o.vals); }
+    finish() -> number { ... }
+}
+```
+
+Defining `merge` is *necessary* for parallel execution but does not by
+itself enable it — Oracle requires the `PARALLEL_ENABLE` clause on the
+function. We make this opt-in because:
+
+1. Even with a correct `merge`, the optimizer's chosen split may surface
+   ordering bugs latent in `step` (e.g., relying on observed order of
+   input rows). The annotation forces a conscious "I've checked merge
+   is associative + commutative" review.
+2. Some aggregates (running totals, first/last) have a `merge` that is
+   well-defined only in the serial case. Declining `@parallel` lets you
+   write a correct sequential merge without Oracle splitting it.
+
+If `merge` is omitted entirely, the aggregate is implicitly serial and
+`@parallel` is a compile error.
+
+### 5.3.4 Multi-argument aggregates
+
+Pell aggregates can take any number of positional step parameters:
+
+```pell
+pub aggregate argmax(val: text, key: number) -> text {
+    state { best_val: text = ""; best_key: number = 0; seen: number = 0; }
+    step(v: text, k: number) {
+        if self.seen == 0 || k > self.best_key {
+            self.best_val = v;
+            self.best_key = k;
+            self.seen = 1;
+        }
+    }
+    finish() -> text { return self.best_val; }
+}
+```
+
+**Why this exists at all** — Oracle's ODCIAggregate interface is
+*single-argument*. `ODCIAggregateIterate(self, value)` only takes one
+value, even in 23ai. There is no native multi-arg ODCI form; attempts to
+wrap one with `SQL_MACRO(SCALAR)` produce `ORA-29925` or `ORA-00600`
+because Oracle's GROUP BY validator doesn't see through the macro.
+
+**How pell lowers it** — for any aggregate with >1 step parameter we
+auto-generate an OBJECT tuple type and wrap:
+
+```sql
+-- 1. Tuple type — one attribute per step param, in declaration order:
+CREATE TYPE argmax_args_t AS OBJECT (
+    v VARCHAR2(4000),
+    k NUMBER
+);
+
+-- 2. The ODCI aggregate type takes the tuple as iterate's single input:
+CREATE TYPE argmax_agg_t AS OBJECT (
+    best_val VARCHAR2(4000), best_key NUMBER, seen NUMBER,
+    STATIC FUNCTION ODCIAggregateInitialize(...),
+    MEMBER FUNCTION ODCIAggregateIterate(self IN OUT argmax_agg_t,
+                                         p_args IN argmax_args_t) RETURN NUMBER,
+    ...
+);
+
+-- Iterate body unpacks the tuple back to the user's step param names:
+--   p_v := p_args.v;
+--   p_k := p_args.k;
+--   <user step body using p_v, p_k>
+
+-- 3. The wrapper function — also single-arg:
+CREATE FUNCTION argmax(p_args IN argmax_args_t)
+    RETURN VARCHAR2 AGGREGATE USING argmax_agg_t;
+```
+
+**Call site** — users construct the tuple at the call site:
+
+```sql
+SELECT department, argmax(argmax_args_t(name, salary))
+  FROM employees GROUP BY department;
+```
+
+It's two extra tokens compared to `argmax(name, salary)` but the
+overhead is contained and the resulting plan is exactly what a
+hand-written single-arg ODCI would produce. The tradeoff is acceptable
+for the v1 ergonomics; a future enhancement could rewrite call sites
+inside `sql!{}` blocks if pell's emitter knows the aggregate is
+multi-arg (within the same module — straightforward; cross-module needs
+schema metadata).
+
+### 5.3.5 What we deliberately don't have (yet)
+
+- **`@analytic`** (windowed). Oracle supports analytic versions of
+  user-defined aggregates; pell doesn't expose this in v1. Add it once
+  there's a concrete use case worth the spec surface.
+- **`ODCIAggregateDelete`** (incremental delete for sliding windows).
+  Same reason.
+- **Variadic / `step(*)` rowtype destructuring** — explicit positional
+  parameters only in v1.
+- **Automatic `sql!{}` rewriting of multi-arg call sites** — see §5.3.4.
+
+## 5.4 Standard library / built-in mappings
+
+Two kinds of identifiers reach Oracle's built-in functions from pell code:
+
+1. **Pass-through**: any bare identifier the compiler doesn't recognize
+   becomes a literal PL/SQL function call. So `length(s)`, `instr(s, t)`,
+   `regexp_replace(s, p, r)`, `nvl(x, y)`, `add_months(d, n)`, etc. all
+   work as-is.
+
+   Oracle allows most SQL functions inside PL/SQL expressions, but a
+   handful are SQL-only and will fail with `PLS-00201` or
+   `PLS-00306` at compile time. The authoritative list of disallowed
+   categories is at [Oracle's `expressions.html`](https://docs.oracle.com/en/database/oracle/oracle-database/19/lnpls/expressions.html);
+   the gotchas most likely to bite a pell user are:
+
+   - **`DECODE`** — use `match` (or PL/SQL `CASE`) instead.
+   - **`LNNVL`** — use plain `case`/`if` or rewrite as conditional.
+   - **`SYS_CONNECT_BY_PATH`** — only valid inside a `sql!{}` block.
+   - **`JSON_TABLE`, `JSON_ARRAYAGG`, `JSON_OBJECTAGG`,
+     `JSON_TEXTCONTAINS`** — JSON aggregate / table operators require
+     a SQL context.
+   - **`WIDTH_BUCKET`, `BIN_TO_NUM`** — SQL-only.
+   - **`VSIZE`, `DUMP`, `STANDARD_HASH`, `ORA_HASH`** — SQL-only;
+     `dbms_utility::get_hash_value` is the PL/SQL-callable alternative
+     for hashing.
+   - **All aggregate and analytic functions** (`COUNT`, `AVG`, `LAG`,
+     `ROW_NUMBER`, …) — invoke inside `sql!{ … }`.
+
+   The fix is always the same: wrap the call in
+   `sql!{ SELECT <expr> FROM dual }.one()?;`.
+
+   **`NVL2` note**: the 19c reference flags `NVL2` as SQL-only, but on
+   23ai it works in PL/SQL expressions. Don't rely on it for 19c
+   targets.
+
+   The pass-through audit is certified by
+   [`compiler/scripts/audit_functions.py`](compiler/scripts/audit_functions.py)
+   — 106 of 112 surveyed functions verified on 23ai. Report at
+   `compiler/scripts/STDLIB_COVERAGE.md`.
+2. **Method-style aliases**: a small set of method names lower to
+   non-trivial SQL fragments. Dispatched after object-method and
+   list-method handling, so they don't collide with user-type methods of
+   the same name.
+
+### 5.4.1 String methods
+
+| pell expression | Lowers to |
+|---|---|
+| `s.length()` | `LENGTH(s)` (pass-through) |
+| `s.upper()` / `s.lower()` | `UPPER(s)` / `LOWER(s)` (pass-through) |
+| `s.trim()` | `TRIM(s)` (pass-through) |
+| `s.substr(start, len?)` | `SUBSTR(s, start, len)` (pass-through) |
+| `s.contains(t)` | `(INSTR(s, t) > 0)` |
+| `s.starts_with(t)` | `(s LIKE t \|\| '%')` |
+| `s.ends_with(t)` | `(s LIKE '%' \|\| t)` |
+| `s.is_empty()` | `(s IS NULL OR LENGTH(s) = 0)` |
+| `s.split(delim)` | `pell_split_text(s, delim)` returning `list<text>` |
+
+For regex operations use the bare-function names directly:
+`regexp_like(s, pat)`, `regexp_replace(s, pat, repl)`,
+`regexp_substr(s, pat)`, `regexp_count(s, pat)`. We deliberately don't
+alias `.replace()` because literal-vs-regex ambiguity should stay
+explicit.
+
+`split` emits a package-private helper `pell_split_text` once per module
+that uses it. It's regexp-based; consecutive delimiters yield no empty
+element. If you need empty-preserving split, write the SQL explicitly.
+
+### 5.4.2 Date / timestamp methods
+
+| pell expression | Lowers to |
+|---|---|
+| `d.year()` | `EXTRACT(YEAR FROM d)` |
+| `d.month()` | `EXTRACT(MONTH FROM d)` |
+| `d.day()` | `EXTRACT(DAY FROM d)` |
+| `d.hour()` | `EXTRACT(HOUR FROM d)` (timestamp) |
+| `d.minute()` | `EXTRACT(MINUTE FROM d)` (timestamp) |
+| `d.second()` | `EXTRACT(SECOND FROM d)` (timestamp) |
+| `d + n` | `(d + n)` — Oracle date arithmetic (adds days for DATE) |
+| `d.add_months(n)` | `ADD_MONTHS(d, n)` (pass-through) |
+| `months_between(a, b)` | `MONTHS_BETWEEN(a, b)` (pass-through) |
+| `trunc(d)` / `trunc(d, "MM")` | `TRUNC(...)` (pass-through) |
+
+### 5.4.3 Numeric / null / misc
+
+Pass-through covers the common ones: `round`, `trunc`, `mod`, `abs`,
+`ceil`, `floor`, `power`, `sqrt`, `ln`, `exp`, `nvl`, `coalesce`,
+`greatest`, `least`, `to_char`, `to_number`, `to_date`, `bitand`,
+`dbms_utility::get_hash_value`, etc.
+
+### 5.4.4 What we deliberately don't alias
+
+- **`.replace(a, b)`** — literal vs regex ambiguity. Use
+  `replace(s, a, b)` or `regexp_replace(s, a, b)` explicitly.
+- **`.indexOf(t)`** — Oracle's `INSTR` is 1-based and 0-means-not-found;
+  exposing it as `.indexOf` would suggest 0-based JS/Java semantics.
+  Use `instr(s, t)` directly.
+- **`.format(fmt)`** on numbers/dates — Oracle's `TO_CHAR(x, fmt)` is
+  the clearest spelling; aliasing only obscures.
+
 ## 6. Error model — deeper dive
 
 This is the most opinionated part, so it gets its own section.
@@ -1396,6 +1914,46 @@ shape.
   manifest can opt into emitting synonyms.
 - Single optional runtime package: `pell_runtime` (only if lowering strategy
   (B) wins; see §6.6). Contains payload-passing helpers and nothing else.
+
+### 7.1 External sequences — `pub seq name;`
+
+Oracle sequences are use-site references in pell; the language doesn't own
+their lifecycle (DDL is out of scope, see §2). A `seq` declaration is a
+*reference* — it tells the compiler "this Oracle sequence exists, render
+its name verbatim in PL/SQL."
+
+```pell
+pub seq employee_id_seq;           // unqualified — current schema
+pub seq hr::employee_id_seq;       // qualified — `hr.employee_id_seq` in PL/SQL
+
+pub fn create_employee(name: text) -> Result<number, _> {
+    let id = employee_id_seq.nextval;
+    sql! { insert into emp (id, name) values (:id, :name) };
+    return Ok(id);
+}
+```
+
+`<name>.nextval` / `<name>.currval` are the only field accesses recognized
+on a sequence reference (Oracle has no other pseudo-columns on sequences).
+Both type-infer as `NUMBER`.
+
+Lowering: `let id = employee_id_seq.nextval` → `l_id := employee_id_seq.nextval;`
+— Oracle 11g+ accepts the assignment form natively (no `SELECT FROM dual`
+required). `pell_id := pell_seq.nextval` reads identically in the emitted
+package body.
+
+**Sequences vs IDENTITY columns**: Oracle 12c+ supports `GENERATED ALWAYS
+AS IDENTITY` columns which auto-allocate IDs at INSERT time and are
+recovered via `.returning::<number>().one()` (§4.5.3). Pell supports
+that flow when the table uses IDENTITY, but does not push it as the
+default. Explicit sequences are the recommended path because:
+
+- The ID is known *before* the INSERT — populating child rows in the
+  same transaction needs no RETURNING round-trip.
+- One sequence can serve multiple tables; IDENTITY is per-column.
+- The generation step is visible in the code: `let id = emp_seq.nextval`
+  reads as exactly what it does.
+- 11g compatibility is retained (IDENTITY is 12c+).
 
 ## 8. Compilation model
 

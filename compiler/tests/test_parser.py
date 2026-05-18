@@ -213,3 +213,129 @@ def test_annotation_on_fn():
     ''')
     fn = m.items[0]
     assert [a.name for a in fn.annotations] == ["deterministic", "result_cache"]
+
+
+# ---------------------------------------------------------------------------
+# §5.2 / §5.3 — type, sealed type, aggregate
+# ---------------------------------------------------------------------------
+
+
+def test_type_with_methods():
+    m = parse('''
+        module m;
+        pub type Money {
+            amount: number;
+            currency: text;
+            fn add(other: Money) -> Money {
+                return Money { amount: self.amount + other.amount, currency: self.currency };
+            }
+            map fn rank() -> number { return self.amount; }
+        }
+    ''')
+    td = m.items[0]
+    assert isinstance(td, A.TypeDef)
+    assert td.name == "Money"
+    assert td.is_pub
+    assert [f.name for f in td.fields] == ["amount", "currency"]
+    assert [me.name for me in td.methods] == ["add", "rank"]
+    assert td.methods[1].is_map is True
+
+
+def test_type_with_constructor():
+    m = parse('''
+        module m;
+        pub type Email {
+            addr: text;
+            fn new(s: text) -> Email { return Email { addr: s }; }
+        }
+    ''')
+    td = m.items[0]
+    new_method = td.methods[0]
+    assert new_method.name == "new"
+    assert new_method.is_constructor is True
+
+
+def test_sealed_type_with_cases():
+    m = parse('''
+        module m;
+        pub sealed type Shape {
+            fn area() -> number;
+            case Circle { radius: number } {
+                fn area() -> number { return 3.14; }
+            }
+            case Rectangle { width: number; height: number } {
+                fn area() -> number { return 4; }
+            }
+        }
+    ''')
+    st = m.items[0]
+    assert isinstance(st, A.SealedTypeDef)
+    assert st.name == "Shape"
+    assert [me.name for me in st.methods] == ["area"]
+    assert st.methods[0].is_abstract is True
+    assert [c.name for c in st.cases] == ["Circle", "Rectangle"]
+    assert [f.name for f in st.cases[1].fields] == ["width", "height"]
+
+
+def test_aggregate_minimal():
+    m = parse('''
+        module m;
+        pub aggregate counter(x: number) -> number {
+            state { n: number = 0; }
+            step(v: number) { self.n = self.n + 1; }
+            finish() -> number { return self.n; }
+        }
+    ''')
+    ag = m.items[0]
+    assert isinstance(ag, A.AggregateDef)
+    assert ag.name == "counter"
+    assert ag.merge_body is None
+    assert [f.name for f in ag.state_fields] == ["n"]
+
+
+def test_aggregate_with_merge_and_parallel():
+    m = parse('''
+        module m;
+        @parallel
+        pub aggregate avg2(x: number) -> number {
+            state { sum: number = 0; n: number = 0; }
+            step(v: number) {
+                self.sum = self.sum + v;
+                self.n = self.n + 1;
+            }
+            merge(o: Self) {
+                self.sum = self.sum + o.sum;
+                self.n = self.n + o.n;
+            }
+            finish() -> number { return self.sum / self.n; }
+        }
+    ''')
+    ag = m.items[0]
+    assert ag.merge_body is not None
+    assert [a.name for a in ag.annotations] == ["parallel"]
+
+
+def test_sequence_def_simple():
+    m = parse("module m; pub seq emp_id_seq;")
+    sd = m.items[0]
+    assert isinstance(sd, A.SequenceDef)
+    assert sd.name == "emp_id_seq"
+    assert sd.is_pub
+
+
+def test_sequence_def_qualified():
+    m = parse("module m; pub seq hr::emp_seq;")
+    sd = m.items[0]
+    assert isinstance(sd, A.SequenceDef)
+    assert sd.name == "hr::emp_seq"
+
+
+def test_aggregate_missing_state_errors():
+    with pytest.raises(ParseError):
+        parse('''
+            module m;
+            pub aggregate bad(x: number) -> number {
+                step(v: number) { }
+                finish() -> number { return 0; }
+            }
+        ''')

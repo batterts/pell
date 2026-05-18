@@ -1,0 +1,60 @@
+module shapes_demo;
+
+// §5.2 — `type` with methods and a MAP for ordering.
+// (Method named `plus` rather than `add` — ADD is an Oracle SQL keyword and
+// would need to be backquoted at the type-spec level. v0 doesn't auto-quote.)
+pub type Money {
+    amount: number;
+    currency: text;
+
+    fn plus(other: Money) -> Money {
+        return Money {
+            amount: self.amount + other.amount,
+            currency: self.currency,
+        };
+    }
+
+    map fn rank() -> number { return self.amount; }
+}
+
+// §5.2.3 — sealed type with cases. `match` exhausts all cases.
+pub sealed type Shape {
+    fn area() -> number;
+
+    case Circle { radius: number } {
+        fn area() -> number { return 3.14159 * self.radius * self.radius; }
+    }
+    case Rectangle { width: number; height: number } {
+        fn area() -> number { return self.width * self.height; }
+    }
+    case Triangle { base: number; height: number } {
+        fn area() -> number { return self.base * self.height / 2; }
+    }
+}
+
+pub fn describe(s: Shape) -> text {
+    var label: text = "";
+    match s {
+        Circle(_)    -> { label = "round"; }
+        Rectangle(_) -> { label = "boxy"; }
+        Triangle(_)  -> { label = "pointy"; }
+    }
+    return label;
+}
+
+// §5.3 — reducer-style aggregate. `merge` enables parallel; @parallel makes it
+// explicit. `state` defaults provide implicit init.
+@parallel
+pub aggregate total_amount(x: number) -> number {
+    state { acc: number = 0; }
+    step(v: number)   { self.acc = self.acc + v; }
+    merge(o: Self)    { self.acc = self.acc + o.acc; }
+    finish() -> number { return self.acc; }
+}
+
+// A list-state aggregate — exercises nested-table state attribute.
+pub aggregate sample_count(x: number) -> number {
+    state { vals: list<number> = []; }
+    step(v: number) { self.vals.append(v); }
+    finish() -> number { return self.vals.len(); }
+}

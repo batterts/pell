@@ -151,7 +151,18 @@ class Parser:
             return self._parse_record_def(annotations, is_pub)
         if self._at_keyword("error"):
             return self._parse_error_def(annotations, is_pub)
-        raise ParseError(f"expected item (fn / record / error / import), got {cur.value!r}", cur.loc)
+        if self._at_keyword("sealed"):
+            return self._parse_sealed_type_def(annotations, is_pub)
+        if self._at_keyword("type"):
+            return self._parse_type_def(annotations, is_pub)
+        if self._at_keyword("aggregate"):
+            return self._parse_aggregate_def(annotations, is_pub)
+        if self._at_keyword("seq"):
+            return self._parse_seq_def(annotations, is_pub)
+        raise ParseError(
+            f"expected item (fn / record / error / import / type / sealed type / aggregate), got {cur.value!r}",
+            cur.loc,
+        )
 
     def _parse_annotations(self) -> list[A.Annotation]:
         out: list[A.Annotation] = []
@@ -175,6 +186,12 @@ class Parser:
                 self._expect("RPAREN")
             out.append(A.Annotation(loc=at.loc, name=name_tok.value, args=args, kwargs=kwargs))
         return out
+
+    def _parse_seq_def(self, annotations: list[A.Annotation], is_pub: bool) -> A.SequenceDef:
+        kw = self._expect("KW_SEQ")
+        name = self._parse_qualified_ident()
+        self._expect("SEMI")
+        return A.SequenceDef(loc=kw.loc, annotations=annotations, is_pub=is_pub, name=name)
 
     def _parse_import(self, annotations: list[A.Annotation], is_pub: bool) -> A.ImportStmt:
         kw = self._expect("KW_IMPORT")
@@ -233,6 +250,290 @@ class Parser:
             # zero-payload error: `error Foo;`
             self._expect("SEMI")
         return A.ErrorDef(loc=kw.loc, annotations=annotations, is_pub=is_pub, name=name, fields=fields)
+
+    # ---- type / sealed type / aggregate ---------------------------------
+
+    def _parse_type_def(self, annotations: list[A.Annotation], is_pub: bool) -> A.TypeDef:
+        kw = self._expect("KW_TYPE")
+        name = self._expect("IDENT").value
+        fields, methods = self._parse_type_body(allow_cases=False)
+        return A.TypeDef(
+            loc=kw.loc,
+            annotations=annotations,
+            is_pub=is_pub,
+            name=name,
+            fields=fields,
+            methods=methods,
+        )
+
+    def _parse_sealed_type_def(self, annotations: list[A.Annotation], is_pub: bool) -> A.SealedTypeDef:
+        kw = self._expect("KW_SEALED")
+        self._expect("KW_TYPE", "expected `type` after `sealed`")
+        name = self._expect("IDENT").value
+        fields, methods, cases = self._parse_sealed_body()
+        return A.SealedTypeDef(
+            loc=kw.loc,
+            annotations=annotations,
+            is_pub=is_pub,
+            name=name,
+            fields=fields,
+            methods=methods,
+            cases=cases,
+        )
+
+    def _parse_type_body(self, *, allow_cases: bool) -> tuple[list[A.FieldDef], list[A.MethodDef]]:
+        """Parse a `{ field; ... method ... }` body for `type`. Returns (fields, methods)."""
+        self._expect("LBRACE")
+        fields: list[A.FieldDef] = []
+        methods: list[A.MethodDef] = []
+        while not self._at("RBRACE", "EOF"):
+            if self._at("AT") or self._at_keyword("fn") or self._is_at_map_fn():
+                methods.append(self._parse_method_def())
+                continue
+            if allow_cases and self._at_keyword("case"):
+                # Caller should have routed to _parse_sealed_body; reject here.
+                raise ParseError("`case` only allowed inside `sealed type`", self._peek().loc)
+            # otherwise: field declaration `IDENT : TYPE ;`
+            floc = self._peek().loc
+            fname = self._expect("IDENT").value
+            self._expect("COLON", "expected `:` after field name")
+            ftype = self._parse_type()
+            self._expect("SEMI", "expected `;` after type-body field declaration")
+            fields.append(A.FieldDef(loc=floc, name=fname, type_ref=ftype))
+        self._expect("RBRACE")
+        return fields, methods
+
+    def _parse_sealed_body(self) -> tuple[list[A.FieldDef], list[A.MethodDef], list[A.CaseDef]]:
+        self._expect("LBRACE")
+        fields: list[A.FieldDef] = []
+        methods: list[A.MethodDef] = []
+        cases: list[A.CaseDef] = []
+        while not self._at("RBRACE", "EOF"):
+            if self._at_keyword("case"):
+                cases.append(self._parse_case_def())
+                continue
+            if self._at("AT") or self._at_keyword("fn") or self._is_at_map_fn():
+                methods.append(self._parse_method_def())
+                continue
+            floc = self._peek().loc
+            fname = self._expect("IDENT").value
+            self._expect("COLON", "expected `:` after field name")
+            ftype = self._parse_type()
+            self._expect("SEMI", "expected `;` after type-body field declaration")
+            fields.append(A.FieldDef(loc=floc, name=fname, type_ref=ftype))
+        self._expect("RBRACE")
+        return fields, methods, cases
+
+    def _parse_case_def(self) -> A.CaseDef:
+        kw = self._expect("KW_CASE")
+        name = self._expect("IDENT", "expected case name after `case`").value
+        # Optional fields block `{ field; ... }` followed by either `;` or `{ methods }`.
+        fields: list[A.FieldDef] = []
+        methods: list[A.MethodDef] = []
+        # Two forms:
+        #   case Circle { radius: number };
+        #   case Circle { radius: number } { fn area() -> number { ... } }
+        # Detect by seeing if the first `{` body contains methods or is followed by another `{`.
+        if self._eat("LBRACE"):
+            while not self._at("RBRACE", "EOF"):
+                # could be a field or — in a "method-only" case body — directly methods
+                if self._at("AT") or self._at_keyword("fn") or self._is_at_map_fn():
+                    methods.append(self._parse_method_def())
+                    continue
+                floc = self._peek().loc
+                fname = self._expect("IDENT").value
+                self._expect("COLON")
+                ftype = self._parse_type()
+                fields.append(A.FieldDef(loc=floc, name=fname, type_ref=ftype))
+                # accept `;` or `,` between fields; trailing separator optional.
+                if not (self._eat("SEMI") or self._eat("COMMA")):
+                    break
+            self._expect("RBRACE")
+            # If methods are in a SEPARATE following block, parse them too.
+            if self._eat("LBRACE"):
+                while not self._at("RBRACE", "EOF"):
+                    if self._at("AT") or self._at_keyword("fn") or self._is_at_map_fn():
+                        methods.append(self._parse_method_def())
+                    else:
+                        cur = self._peek()
+                        raise ParseError(
+                            f"expected method in case `{name}` body, got {cur.value!r}",
+                            cur.loc,
+                        )
+                self._expect("RBRACE")
+        # Trailing `;` is optional; many cases will end at `}`.
+        self._eat("SEMI")
+        return A.CaseDef(loc=kw.loc, name=name, fields=fields, methods=methods)
+
+    def _is_at_map_fn(self) -> bool:
+        """True if current token is IDENT `map` and next is `fn` keyword."""
+        return (
+            self._peek().kind == "IDENT"
+            and self._peek().value == "map"
+            and self._peek(1).kind == "KW_FN"
+        )
+
+    def _parse_method_def(self) -> A.MethodDef:
+        annotations = self._parse_annotations()
+        is_map = False
+        # `map fn` modifier
+        if self._is_at_map_fn():
+            self.pos += 1  # consume `map`
+            is_map = True
+        kw = self._expect("KW_FN", "expected `fn` to start method definition")
+        name_tok = self._expect("IDENT", "expected method name")
+        name = name_tok.value
+        is_constructor = (name == "new")
+        self._expect("LPAREN")
+        params: list[A.Param] = []
+        while not self._at("RPAREN"):
+            ploc = self._peek().loc
+            pname = self._expect("IDENT").value
+            self._expect("COLON")
+            ptype = self._parse_type()
+            params.append(A.Param(loc=ploc, name=pname, type_ref=ptype))
+            if not self._eat("COMMA"):
+                break
+        self._expect("RPAREN")
+        return_type: Optional[A.TypeRef] = None
+        if self._eat("ARROW"):
+            return_type = self._parse_type()
+        # Abstract methods end at `;`; concrete methods have a `{ ... }` body.
+        body: list[A.Stmt] = []
+        is_abstract = False
+        if self._eat("SEMI"):
+            is_abstract = True
+        else:
+            body = self._parse_block()
+        return A.MethodDef(
+            loc=kw.loc,
+            name=name,
+            params=params,
+            return_type=return_type,
+            body=body,
+            is_abstract=is_abstract,
+            is_map=is_map,
+            is_constructor=is_constructor,
+            annotations=annotations,
+        )
+
+    def _parse_aggregate_def(self, annotations: list[A.Annotation], is_pub: bool) -> A.AggregateDef:
+        kw = self._expect("KW_AGGREGATE")
+        name = self._expect("IDENT").value
+        # signature: (param : T, ...) -> R
+        self._expect("LPAREN")
+        params: list[A.Param] = []
+        while not self._at("RPAREN"):
+            ploc = self._peek().loc
+            pname = self._expect("IDENT").value
+            self._expect("COLON")
+            ptype = self._parse_type()
+            params.append(A.Param(loc=ploc, name=pname, type_ref=ptype))
+            if not self._eat("COMMA"):
+                break
+        self._expect("RPAREN")
+        return_type: Optional[A.TypeRef] = None
+        if self._eat("ARROW"):
+            return_type = self._parse_type()
+        # body: `state { ... } step(...) { ... } merge(...) { ... }? finish() -> T { ... }`
+        self._expect("LBRACE", "expected `{` to start aggregate body")
+        state_fields: list[A.FieldDef] = []
+        state_defaults: list[A.Expr] = []
+        step_body: list[A.Stmt] = []
+        step_params: list[A.Param] = list(params)  # default: same as outer params
+        merge_body: Optional[list[A.Stmt]] = None
+        merge_other_name = "other"
+        finish_body: list[A.Stmt] = []
+        saw_state = saw_step = saw_finish = False
+        while not self._at("RBRACE", "EOF"):
+            cur = self._peek()
+            if cur.kind == "IDENT" and cur.value == "state":
+                if saw_state:
+                    raise ParseError("duplicate `state` block in aggregate", cur.loc)
+                saw_state = True
+                self.pos += 1
+                self._expect("LBRACE")
+                while not self._at("RBRACE", "EOF"):
+                    floc = self._peek().loc
+                    fname = self._expect("IDENT").value
+                    self._expect("COLON")
+                    ftype = self._parse_type()
+                    self._expect("EQ", "state field must have a `= default` expression")
+                    fdefault = self._parse_expr()
+                    self._expect("SEMI")
+                    state_fields.append(A.FieldDef(loc=floc, name=fname, type_ref=ftype))
+                    state_defaults.append(fdefault)
+                self._expect("RBRACE")
+                continue
+            if cur.kind == "IDENT" and cur.value == "step":
+                if saw_step:
+                    raise ParseError("duplicate `step` block in aggregate", cur.loc)
+                saw_step = True
+                self.pos += 1
+                # optional param list overrides outer params
+                if self._eat("LPAREN"):
+                    sp: list[A.Param] = []
+                    while not self._at("RPAREN"):
+                        ploc = self._peek().loc
+                        pname = self._expect("IDENT").value
+                        self._expect("COLON")
+                        ptype = self._parse_type()
+                        sp.append(A.Param(loc=ploc, name=pname, type_ref=ptype))
+                        if not self._eat("COMMA"):
+                            break
+                    self._expect("RPAREN")
+                    step_params = sp
+                step_body = self._parse_block()
+                continue
+            if cur.kind == "IDENT" and cur.value == "merge":
+                if merge_body is not None:
+                    raise ParseError("duplicate `merge` block in aggregate", cur.loc)
+                self.pos += 1
+                self._expect("LPAREN")
+                if not self._at("RPAREN"):
+                    merge_other_name = self._expect("IDENT").value
+                    self._expect("COLON")
+                    _ = self._parse_type()  # must be Self; we accept whatever and trust the user
+                self._expect("RPAREN")
+                merge_body = self._parse_block()
+                continue
+            if cur.kind == "IDENT" and cur.value == "finish":
+                if saw_finish:
+                    raise ParseError("duplicate `finish` block in aggregate", cur.loc)
+                saw_finish = True
+                self.pos += 1
+                self._expect("LPAREN")
+                self._expect("RPAREN")
+                if self._eat("ARROW"):
+                    return_type = self._parse_type()  # may override outer
+                finish_body = self._parse_block()
+                continue
+            raise ParseError(
+                f"expected `state` / `step` / `merge` / `finish` in aggregate body, got {cur.value!r}",
+                cur.loc,
+            )
+        self._expect("RBRACE")
+        if not saw_state:
+            raise ParseError("aggregate is missing a `state {}` block", kw.loc)
+        if not saw_step:
+            raise ParseError("aggregate is missing a `step(...) {}` block", kw.loc)
+        if not saw_finish:
+            raise ParseError("aggregate is missing a `finish() -> T {}` block", kw.loc)
+        return A.AggregateDef(
+            loc=kw.loc,
+            annotations=annotations,
+            is_pub=is_pub,
+            name=name,
+            params=params,
+            return_type=return_type,
+            state_fields=state_fields,
+            state_defaults=state_defaults,
+            step_body=step_body,
+            step_params=step_params,
+            merge_body=merge_body,
+            merge_other_name=merge_other_name,
+            finish_body=finish_body,
+        )
 
     def _parse_field_defs(self) -> list[A.FieldDef]:
         out: list[A.FieldDef] = []
@@ -606,6 +907,12 @@ class Parser:
         if cur.kind == "KW_NONE":
             self.pos += 1
             return A.NoneExpr(loc=cur.loc)
+        if cur.kind == "KW_SELF":
+            # `self` reads as a regular identifier in expressions; the emitter
+            # knows it refers to the method's receiver and renders it as the
+            # PL/SQL `SELF` parameter (which Oracle implicitly binds).
+            self.pos += 1
+            return A.Ident(loc=cur.loc, name="self")
         if self._at_keyword("Some"):
             self.pos += 1
             self._expect("LPAREN")
@@ -633,6 +940,15 @@ class Parser:
             if self._eat("RPAREN"):
                 return A.UnitLit(loc=cur.loc)
             e = self._parse_expr()
+            # `(a, b, c)` → tuple literal. `(x)` alone is a grouped expression.
+            if self._at("COMMA"):
+                elements = [e]
+                while self._eat("COMMA"):
+                    if self._at("RPAREN"):
+                        break  # trailing comma OK
+                    elements.append(self._parse_expr())
+                self._expect("RPAREN")
+                return A.TupleLit(loc=cur.loc, elements=elements)
             self._expect("RPAREN")
             return e
         if cur.kind == "LBRACKET":

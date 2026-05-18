@@ -12,6 +12,7 @@ pub fn run() -> number {
       values (:r.user_id, :r.movie_id, :r.rating, :r.ts)
     };
   }
+
   let t1: number = dbms_utility::get_time();
   return (t1 - t0) * 10;
 }

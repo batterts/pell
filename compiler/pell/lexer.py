@@ -19,6 +19,13 @@ KEYWORDS = {
     "if", "else", "for", "forall", "in", "match", "transaction",
     "record", "error", "true", "false", "Some", "None", "Ok", "Err",
     "unsafe", "finally", "and", "or", "not",
+    # §5.2 / §5.3 — types, sealed hierarchies, aggregates.
+    # `Self` (capitalized) is intentionally NOT a keyword — it's resolved
+    # by the parser/emitter as the enclosing type's name (so `Self` lives
+    # in type position only and reads as just a named type elsewhere).
+    "type", "sealed", "aggregate", "case", "self",
+    # External sequence references (no DDL).
+    "seq",
 }
 
 
