@@ -61,8 +61,9 @@ def test_balanced_begin_end_per_example():
 def test_package_spec_and_body_paired():
     for path in _example_paths():
         sql = _emit(path)
-        spec_pkg = re.search(r"CREATE OR REPLACE PACKAGE (\w+) AS", sql)
-        body_pkg = re.search(r"CREATE OR REPLACE PACKAGE BODY (\w+) AS", sql)
+        # Package name can now be schema-qualified (`schema.pkg`); match dotted form.
+        spec_pkg = re.search(r"CREATE OR REPLACE PACKAGE ([\w.]+) AS", sql)
+        body_pkg = re.search(r"CREATE OR REPLACE PACKAGE BODY ([\w.]+) AS", sql)
         assert spec_pkg and body_pkg, f"{path.name}: missing spec or body"
         assert spec_pkg.group(1) == body_pkg.group(1), (
             f"{path.name}: spec package {spec_pkg.group(1)!r} != body {body_pkg.group(1)!r}"

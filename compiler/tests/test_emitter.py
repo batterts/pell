@@ -27,8 +27,21 @@ def test_module_name_mangling():
         module hr.employees;
         pub fn ping() {}
     """)
-    assert "PACKAGE hr_employees AS" in sql
-    assert "PACKAGE BODY hr_employees AS" in sql
+    # First node of the module name is the schema; remainder is the package.
+    assert "CREATE OR REPLACE PACKAGE hr.employees AS" in sql
+    assert "CREATE OR REPLACE PACKAGE BODY hr.employees AS" in sql
+
+
+def test_single_node_module_no_schema_qualifier():
+    sql = compile_to_sql("""
+        module standalone;
+        pub fn ping() {}
+    """)
+    # No dot → no schema; bare package name (backwards compat).
+    assert "CREATE OR REPLACE PACKAGE standalone AS" in sql
+    assert "CREATE OR REPLACE PACKAGE BODY standalone AS" in sql
+    # No spurious schema prefix.
+    assert "CREATE OR REPLACE PACKAGE standalone." not in sql
 
 
 def test_record_emits_type_in_spec_when_pub():

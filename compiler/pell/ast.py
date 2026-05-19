@@ -521,6 +521,33 @@ class Module:
     items: list[Item] = field(default_factory=list)
 
     @property
+    def schema(self) -> Optional[str]:
+        """Schema name: the first dotted node of the module path, or None for
+        single-node modules.
+        e.g.: `module hr_app.employees` → 'hr_app'
+              `module foo`              → None
+        """
+        parts = self.name.split(".")
+        return parts[0] if len(parts) >= 2 else None
+
+    @property
     def package_name(self) -> str:
-        """The PL/SQL package name (mangled): hr.employees -> hr_employees."""
-        return self.name.replace(".", "_")
+        """The PL/SQL package name *within its schema*. For multi-node module
+        names the first node is the schema and is stripped; the remainder is
+        mangled with underscores.
+            `hr_app.employees`       → 'employees'
+            `hr_app.shared.utils`    → 'shared_utils'
+            `foo`                    → 'foo'
+        """
+        parts = self.name.split(".")
+        if len(parts) >= 2:
+            return "_".join(parts[1:])
+        return parts[0]
+
+    @property
+    def qualified_name(self) -> str:
+        """Schema-qualified form for use in PL/SQL CREATE statements.
+            `hr_app.employees`  →  'hr_app.employees'
+            `foo`               →  'foo'  (unqualified — current schema)
+        """
+        return f"{self.schema}.{self.package_name}" if self.schema else self.package_name

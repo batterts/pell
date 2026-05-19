@@ -27,12 +27,11 @@ def test_each_example_emits_matching_package_body():
         src = path.read_text()
         module = parse(src, str(path))
         sql = emit(module)
-        pkg = module.package_name
-        # spec
-        assert f"CREATE OR REPLACE PACKAGE {pkg} AS" in sql
-        # body
-        assert f"CREATE OR REPLACE PACKAGE BODY {pkg} AS" in sql
-        # closing
+        qn = module.qualified_name             # schema-qualified or bare
+        pkg = module.package_name              # bare package name (for END clause)
+        assert f"CREATE OR REPLACE PACKAGE {qn} AS" in sql
+        assert f"CREATE OR REPLACE PACKAGE BODY {qn} AS" in sql
+        # END clause uses just the package name (Oracle accepts either)
         assert f"END {pkg};" in sql
 
 

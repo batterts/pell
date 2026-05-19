@@ -26,7 +26,9 @@ def test_build_single_file_to_stdout():
 
 def test_build_directory_to_dir():
     out_dir = REPO / "compiler" / "expected"
-    result = _run_pell("build", str(EXAMPLES), "-d", str(out_dir))
+    # --reproducible omits volatile preamble fields so the snapshots stay
+    # byte-stable across runs (and diffs in PRs show only real changes).
+    result = _run_pell("build", str(EXAMPLES), "-d", str(out_dir), "--reproducible")
     assert result.returncode == 0, result.stderr
     assert (out_dir / "01_hello.sql").exists()
 

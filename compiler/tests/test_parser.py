@@ -14,7 +14,23 @@ def test_module_only():
 def test_dotted_module():
     m = parse("module hr.employees;")
     assert m.name == "hr.employees"
-    assert m.package_name == "hr_employees"
+    assert m.schema == "hr"                       # first node → schema
+    assert m.package_name == "employees"          # remainder → package
+    assert m.qualified_name == "hr.employees"     # composed for CREATE
+
+
+def test_deeply_nested_module():
+    m = parse("module hr_app.shared.utils;")
+    assert m.schema == "hr_app"
+    assert m.package_name == "shared_utils"       # deeper nodes joined with _
+    assert m.qualified_name == "hr_app.shared_utils"
+
+
+def test_single_node_module_no_schema():
+    m = parse("module foo;")
+    assert m.schema is None
+    assert m.package_name == "foo"
+    assert m.qualified_name == "foo"              # unqualified — backwards compat
 
 
 def test_simple_fn():

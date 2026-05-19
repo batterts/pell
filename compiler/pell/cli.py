@@ -34,7 +34,9 @@ def cmd_build(args: argparse.Namespace) -> int:
         try:
             src = src_path.read_text()
             module = parse(src, str(src_path))
-            sql = emit(module, target=args.target)
+            sql = emit(module, target=args.target,
+                       source_text=src, source_path=str(src_path),
+                       reproducible=getattr(args, "reproducible", False))
         except (LexError, ParseError, EmitError) as e:
             print(f"pell: {e}", file=sys.stderr)
             failures += 1
@@ -77,8 +79,11 @@ def cmd_runtime(args: argparse.Namespace) -> int:
     if not inputs:
         print(f"pell: no .pell files found in {args.input!r}", file=sys.stderr)
         return 2
-    # gather (package, error_name) pairs
-    errors: list[tuple[str, str]] = []
+    # gather (full-mangled-module-name, error_name, category) tuples.
+    # We use the full mangled name (with schema prefix when present) so
+    # `hr.employees::NotFound` and `acct.employees::NotFound` get distinct
+    # global identifiers `hr_employees_notfound` vs `acct_employees_notfound`.
+    errors: list[tuple[str, str, str]] = []
     failures = 0
     for src_path in inputs:
         try:
@@ -87,10 +92,10 @@ def cmd_runtime(args: argparse.Namespace) -> int:
             print(f"pell: {e}", file=sys.stderr)
             failures += 1
             continue
-        pkg = module.package_name
+        full = module.name.replace(".", "_")
         for item in module.items:
             if isinstance(item, A.ErrorDef):
-                errors.append((pkg, item.name))
+                errors.append((full, item.name, getattr(item, "category", "propagate")))
     # emit a merged pell_runtime.sql
     code_start = 20100
     lines = [
@@ -105,11 +110,17 @@ def cmd_runtime(args: argparse.Namespace) -> int:
         "  FUNCTION  get_err(p_key IN VARCHAR2) RETURN VARCHAR2;",
         "",
     ]
-    for i, (pkg, err) in enumerate(errors):
+    # Per-category SQLCODE counters — must mirror the per-module emitter's
+    # ranges so single-module installs and project-wide pell_runtime agree.
+    # propagate -20100..-20199 / skip -20200..-20299 / panic -20300..-20399.
+    bases = {"propagate": 20100, "skip": 20200, "panic": 20300}
+    counters = {"propagate": 0, "skip": 0, "panic": 0}
+    for pkg, err, cat in errors:
         exn = f"{pkg}_{err}".lower()
-        code = code_start + i
-        lines.append(f"  {exn} EXCEPTION;")
-        lines.append(f"  PRAGMA EXCEPTION_INIT({exn}, -{code});")
+        code = -(bases[cat] + counters[cat])
+        counters[cat] += 1
+        lines.append(f"  {exn} EXCEPTION;  -- {cat}")
+        lines.append(f"  PRAGMA EXCEPTION_INIT({exn}, {code});")
     lines += [
         "END pell_runtime;",
         "/",
@@ -205,6 +216,13 @@ def main(argv: list[str] | None = None) -> int:
         default="23",
         help="Oracle target version (default: 23). 19c downgrades JSON to "
         "VARCHAR2(32767) and BOOLEAN-in-OBJECT to NUMBER(1).",
+    )
+    b.add_argument(
+        "--reproducible",
+        action="store_true",
+        help="omit the build timestamp and uncommitted-working-tree hash from "
+        "the preamble so output is byte-stable across runs from the same "
+        "source + commit. Useful for golden snapshots.",
     )
     b.set_defaults(func=cmd_build)
 
