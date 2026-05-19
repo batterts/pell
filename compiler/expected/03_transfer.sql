@@ -3,9 +3,9 @@
 
 -- Additions to pell_runtime for module billing.charges:
 --   (collate these into a single CREATE OR REPLACE PACKAGE pell_runtime)
---   billing_charges_overdraft EXCEPTION;
+--   billing_charges_overdraft EXCEPTION;  -- propagate
 --   PRAGMA EXCEPTION_INIT(billing_charges_overdraft, -20100);
---   billing_charges_accountfrozen EXCEPTION;
+--   billing_charges_accountfrozen EXCEPTION;  -- propagate
 --   PRAGMA EXCEPTION_INIT(billing_charges_accountfrozen, -20101);
 
 CREATE OR REPLACE PACKAGE billing_charges AS

@@ -262,7 +262,25 @@ class Parser:
         else:
             # zero-payload error: `error Foo;`
             self._expect("SEMI")
-        return A.ErrorDef(loc=kw.loc, annotations=annotations, is_pub=is_pub, name=name, fields=fields)
+        # Lift category annotation (@skip / @propagate / @panic) into the
+        # ErrorDef.category field. Default is propagate (backwards compat
+        # with existing pell modules that declared errors without one).
+        category = "propagate"
+        remaining: list[A.Annotation] = []
+        for a in annotations:
+            if a.name in ("skip", "propagate", "panic"):
+                if a.args or a.kwargs:
+                    raise ParseError(
+                        f"@{a.name} on an error declaration takes no arguments",
+                        a.loc,
+                    )
+                category = a.name
+            else:
+                remaining.append(a)
+        return A.ErrorDef(
+            loc=kw.loc, annotations=remaining, is_pub=is_pub,
+            name=name, fields=fields, category=category,
+        )
 
     # ---- type / sealed type / aggregate ---------------------------------
 

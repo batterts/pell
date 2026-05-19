@@ -3,11 +3,11 @@
 
 -- Additions to pell_runtime for module orders.fulfillment:
 --   (collate these into a single CREATE OR REPLACE PACKAGE pell_runtime)
---   orders_fulfillment_ordernotfound EXCEPTION;
+--   orders_fulfillment_ordernotfound EXCEPTION;  -- propagate
 --   PRAGMA EXCEPTION_INIT(orders_fulfillment_ordernotfound, -20100);
---   orders_fulfillment_invalidstatus EXCEPTION;
+--   orders_fulfillment_invalidstatus EXCEPTION;  -- propagate
 --   PRAGMA EXCEPTION_INIT(orders_fulfillment_invalidstatus, -20101);
---   orders_fulfillment_insufficientinventory EXCEPTION;
+--   orders_fulfillment_insufficientinventory EXCEPTION;  -- propagate
 --   PRAGMA EXCEPTION_INIT(orders_fulfillment_insufficientinventory, -20102);
 
 CREATE OR REPLACE PACKAGE orders_fulfillment AS

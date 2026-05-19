@@ -63,6 +63,35 @@ SUPPORTED_TARGETS = ("23", "19c")
 PARAM_MODE_PL: dict[str, str] = {"in": "IN", "out": "OUT", "inout": "IN OUT"}
 
 
+# Each error category gets a distinct SQLCODE range; @retry uses the range
+# to decide whether a raised error is panic-class (re-raise immediately, no
+# retry) or normal (count an attempt, sleep, try again). The ranges are
+# disjoint so a single integer test classifies the error.
+SQLCODE_BASE: dict[str, int] = {
+    "propagate": 20100,  # -20100 .. -20199
+    "skip":      20200,  # -20200 .. -20299
+    "panic":     20300,  # -20300 .. -20399
+}
+SQLCODE_PANIC_LO = -(SQLCODE_BASE["panic"] + 99)  # -20399
+SQLCODE_PANIC_HI = -(SQLCODE_BASE["panic"] +  0)  # -20300
+
+# Oracle built-ins that should be classified as panic — invariant
+# violations, programming bugs, infrastructure failures that retry won't
+# fix. Anything not in this set defaults to propagate (retryable).
+ORACLE_PANIC_SQLCODES: tuple[int, ...] = (
+    -1476,   # ZERO_DIVIDE
+    -6502,   # VALUE_ERROR — type/conversion bug
+    -6592,   # CASE_NOT_FOUND
+    -4068,   # existing state of packages has been discarded
+    -1410,   # invalid ROWID
+    -1483,   # invalid LENGTH for DATE/NUMBER bind
+    -6500,   # PL/SQL: storage error
+    -6501,   # PL/SQL: program error
+    -6504,   # PL/SQL: cursor variables in mismatch
+    -7445,   # core dump
+)
+
+
 # Method-style aliases — each lowers `recv.method(args...)` to a fixed SQL
 # fragment. The receiver is rendered exactly once; arguments are rendered
 # left-to-right. These are dispatched AFTER object/method dispatch on
@@ -240,6 +269,29 @@ class Emitter:
         # Sequence names — used by _lower_ident to skip the `l_` local prefix
         # and by type inference to type `<seq>.nextval` / `<seq>.currval` as NUMBER.
         self._seq_names: set[str] = {s.name for s in self._sequences}
+        # Per-category SQLCODE assignment for declared errors. Each error gets
+        # a unique negative integer within its category's range. Computed once
+        # in __init__ so any helper (RAISE emit, runtime section, etc.) can
+        # ask "what code goes with `NotFound`?" without re-walking.
+        self._error_sqlcodes: dict[str, int] = {}
+        _counters = {"propagate": 0, "skip": 0, "panic": 0}
+        for e in self._errors:
+            cat = getattr(e, "category", "propagate")
+            if cat not in SQLCODE_BASE:
+                raise EmitError(
+                    f"error {e.name!r}: unknown category {cat!r} "
+                    "(expected skip / propagate / panic)",
+                    e.loc,
+                )
+            idx = _counters[cat]
+            if idx >= 99:
+                raise EmitError(
+                    f"too many {cat}-category errors in module {module.name} "
+                    f"(SQLCODE range exhausted)",
+                    e.loc,
+                )
+            _counters[cat] += 1
+            self._error_sqlcodes[e.name] = -(SQLCODE_BASE[cat] + idx)
         # all module-private and module-public fn names
         self._fn_names: set[str] = {f.name for f in self._fns}
         # names of declared types (so StructLit on a type emits an OBJECT constructor,
@@ -255,6 +307,10 @@ class Emitter:
         # Set when any `.split()` call is emitted — triggers a per-module
         # private helper function `pell_split_text` in the package body.
         self._needs_split_helper: bool = False
+        # Set when any `@retry` annotation is emitted — triggers a per-module
+        # private helper `pell_is_panic(p_code NUMBER) RETURN BOOLEAN` so the
+        # retry handler can decide whether to re-raise without retry.
+        self._needs_panic_helper: bool = False
         # convenience wrapper that threads self.target through type lowering
         self._lt = lambda t, *, param=False, sql_context=False: lower_type(
             t, param=param, target=self.target, sql_context=sql_context
@@ -377,8 +433,10 @@ class Emitter:
         lines.append("--   (collate these into a single CREATE OR REPLACE PACKAGE pell_runtime)")
         for e in self._errors:
             exn = self._exception_name(e.name)
-            lines.append(f"--   {exn} EXCEPTION;")
-            lines.append(f"--   PRAGMA EXCEPTION_INIT({exn}, -{20100 + self._errors.index(e)});")
+            code = self._error_sqlcodes[e.name]
+            cat = getattr(e, "category", "propagate")
+            lines.append(f"--   {exn} EXCEPTION;  -- {cat}")
+            lines.append(f"--   PRAGMA EXCEPTION_INIT({exn}, {code});")
         lines.append("")
         return "\n".join(lines)
 
@@ -474,6 +532,9 @@ class Emitter:
         if self._needs_split_helper:
             out.append("")
             out.append(self._split_helper_source())
+        if self._needs_panic_helper:
+            out.append("")
+            out.append(self._panic_helper_source())
         # all fns
         for chunk in fn_chunks:
             out.append("")
@@ -481,6 +542,25 @@ class Emitter:
         out.append(f"END {self.pkg};")
         out.append("/")
         return "\n".join(out)
+
+    def _panic_helper_source(self) -> str:
+        """A package-private helper for `@retry`. Returns TRUE for SQLCODEs
+        classified as `panic` — those should never be retried.
+
+        Includes pell's own panic-category range (-20300 .. -20399) plus
+        known Oracle built-in panic codes (ZERO_DIVIDE, VALUE_ERROR,
+        package-state-discarded, etc.). Unknown codes return FALSE — the
+        retry loop will treat them as retryable.
+        """
+        oracle_codes = ", ".join(str(c) for c in ORACLE_PANIC_SQLCODES)
+        return (
+            "  FUNCTION pell_is_panic(p_code IN NUMBER) RETURN BOOLEAN IS\n"
+            "  BEGIN\n"
+            f"    IF p_code BETWEEN {SQLCODE_PANIC_LO} AND {SQLCODE_PANIC_HI} THEN RETURN TRUE; END IF;\n"
+            f"    IF p_code IN ({oracle_codes}) THEN RETURN TRUE; END IF;\n"
+            "    RETURN FALSE;\n"
+            "  END pell_is_panic;"
+        )
 
     def _split_helper_source(self) -> str:
         """A package-private helper for `.split(delim)`. Splits using regexp."""
@@ -686,6 +766,75 @@ class Emitter:
             out.append("PRAGMA UDF;")
         return out
 
+    def _retry_for(self, fn: A.FnDef) -> Optional[dict]:
+        """If `fn` has a `@retry(...)` annotation, return its parsed params as
+        a dict. Returns None when the annotation isn't present.
+
+        Accepted shape:
+            @retry(N)
+            @retry(N, backoff_ms = X)
+            @retry(N, backoff_ms = X, exponential = true)
+            @retry(N, backoff_ms = X, jitter = true)
+            @retry(N, backoff_ms = X, cap_ms = Y, exponential = true, jitter = true)
+
+        N is a required positional int >= 1.
+        """
+        ann = next((a for a in fn.annotations if a.name == "retry"), None)
+        if ann is None:
+            return None
+        if not ann.args or not isinstance(ann.args[0], A.NumberLit):
+            raise EmitError(
+                f"@retry on fn {fn.name!r}: first argument must be a positive integer literal "
+                "(max attempts)",
+                ann.loc,
+            )
+        n = int(ann.args[0].value)
+        if n < 1:
+            raise EmitError(f"@retry({n}) requires n >= 1", ann.loc)
+
+        def _int_kw(name: str) -> Optional[int]:
+            v = ann.kwargs.get(name)
+            if v is None:
+                return None
+            if not isinstance(v, A.NumberLit):
+                raise EmitError(
+                    f"@retry({name}=...): expected a number literal", ann.loc,
+                )
+            return int(v.value)
+
+        def _bool_kw(name: str) -> bool:
+            v = ann.kwargs.get(name)
+            if v is None:
+                return False
+            if not isinstance(v, A.BoolLit):
+                raise EmitError(
+                    f"@retry({name}=...): expected true/false", ann.loc,
+                )
+            return v.value
+
+        return {
+            "n":           n,
+            "backoff_ms":  _int_kw("backoff_ms") or 0,
+            "exponential": _bool_kw("exponential"),
+            "jitter":      _bool_kw("jitter"),
+            "cap_ms":      _int_kw("cap_ms"),
+            "loc":         ann.loc,
+        }
+
+    def _retry_sleep_stmt(self, retry: dict) -> Optional[str]:
+        """Build the DBMS_SESSION.SLEEP statement for a retry policy, or
+        None if no delay is configured."""
+        if not retry["backoff_ms"]:
+            return None
+        expr = f"({retry['backoff_ms']} / 1000)"
+        if retry["exponential"]:
+            expr = f"({expr} * POWER(2, l_pell_attempt - 1))"
+        if retry["jitter"]:
+            expr = f"({expr} * (0.75 + DBMS_RANDOM.VALUE * 0.5))"
+        if retry["cap_ms"] is not None:
+            expr = f"LEAST(({retry['cap_ms']} / 1000), {expr})"
+        return f"DBMS_SESSION.SLEEP({expr});"
+
     def _check_annotation_conflicts(self, fn: A.FnDef) -> None:
         """Raise a compile-time error on illegal annotation combinations."""
         ann_names = {a.name for a in fn.annotations}
@@ -726,9 +875,36 @@ class Emitter:
         #     pell_finally_body;
         #   end;
         has_finally = fn.finally_body is not None
+        retry = self._retry_for(fn)
+        if retry is not None:
+            if has_finally:
+                raise EmitError(
+                    f"@retry on fn {fn.name!r}: not yet supported with `finally` blocks",
+                    retry["loc"],
+                )
+            if "autonomous" in {a.name for a in fn.annotations}:
+                raise EmitError(
+                    f"@retry on fn {fn.name!r}: not yet supported with @autonomous",
+                    retry["loc"],
+                )
+            if "pipelined" in {a.name for a in fn.annotations}:
+                raise EmitError(
+                    f"@retry on fn {fn.name!r}: not supported on @pipelined fns",
+                    retry["loc"],
+                )
+            self._needs_panic_helper = True
+            self._decl("l_pell_attempt PLS_INTEGER := 0;")
 
         body_stmt_lines: list[str] = []
-        body_indent = "      " if has_finally else "    "
+        # @retry adds an extra two indent levels (LOOP → inner BEGIN); finally
+        # adds one (outer BEGIN → inner BEGIN). Otherwise body lives directly
+        # under the function's BEGIN.
+        if retry is not None:
+            body_indent = "        "
+        elif has_finally:
+            body_indent = "      "
+        else:
+            body_indent = "    "
         for s in fn.body:
             body_stmt_lines.extend(self._emit_stmt(s, indent=body_indent))
 
@@ -756,7 +932,27 @@ class Emitter:
             out.append(f"    {p}")
         out.append(f"  BEGIN")
         is_autonomous = "autonomous" in {a.name for a in fn.annotations}
-        if has_finally:
+        if retry is not None:
+            sleep_stmt = self._retry_sleep_stmt(retry)
+            out.append("    LOOP")
+            out.append("      SAVEPOINT pell_attempt;")
+            out.append("      BEGIN")
+            if body_stmt_lines:
+                out.extend(body_stmt_lines)
+            else:
+                out.append("        NULL;")
+            out.append("        EXIT;")  # success path — unreachable for FUNCTIONs (RETURN exits first)
+            out.append("      EXCEPTION")
+            out.append("        WHEN OTHERS THEN")
+            out.append("          IF pell_is_panic(SQLCODE) THEN RAISE; END IF;")
+            out.append("          l_pell_attempt := l_pell_attempt + 1;")
+            out.append("          ROLLBACK TO pell_attempt;")
+            out.append(f"          IF l_pell_attempt >= {retry['n']} THEN RAISE; END IF;")
+            if sleep_stmt is not None:
+                out.append(f"          {sleep_stmt}")
+            out.append("      END;")
+            out.append("    END LOOP;")
+        elif has_finally:
             out.append("    BEGIN")
             if body_stmt_lines:
                 out.extend(body_stmt_lines)

@@ -1,0 +1,62 @@
+module retry_demo;
+
+// ---------------------------------------------------------------------------
+// Error categories — §6.x in design.md.
+//
+// Each pell error declares a *category* via @skip / @propagate / @panic.
+// The category determines which SQLCODE range the error gets, and how
+// `@retry` handles it:
+//   propagate (default) — caller must handle via Result<T, E>
+//   skip                — best-effort; log + swallow when uncaught
+//   panic               — invariant violation; @retry will never absorb
+// ---------------------------------------------------------------------------
+
+@panic
+pub error InvariantBroken { detail: text }
+
+@skip
+pub error AuditFailed { reason: text }
+
+@propagate
+pub error JobFailed { reason: text }
+
+// ---------------------------------------------------------------------------
+// `@retry` on a fn declaration — entire body becomes the retry unit.
+//
+// On each attempt the runtime:
+//   1. Sets a SAVEPOINT so DML mutations roll back between attempts
+//   2. Runs the body; success exits the loop naturally (RETURN or fallthrough)
+//   3. On unhandled exception, calls pell_is_panic(SQLCODE) to decide:
+//        panic → re-raise without retry
+//        anything else → increment attempt, rollback, sleep, retry
+//   4. When max attempts is reached the final exception propagates per the
+//      error's own category (skip = log+swallow at caller; propagate = bubble)
+//
+// Backoff: 100ms base, exponential doubling, ±25% jitter, capped at 5s.
+// On attempt N (1-indexed after the first failure), sleeps for
+//     min(5_000, 100 * 2^(N-1)) * (0.75 .. 1.25)   ms
+// ---------------------------------------------------------------------------
+
+@retry(5, backoff_ms = 100, exponential = true, jitter = true, cap_ms = 5000)
+pub fn enqueue_job(name: text) -> Result<Unit, JobFailed> {
+    sql! { insert into retry_jobs (name, status, attempted_at)
+           values (:name, 'PENDING', systimestamp) };
+    return Ok(());
+}
+
+@retry(3, backoff_ms = 50)
+pub fn audit_event(action: text) -> Result<Unit, AuditFailed> {
+    sql! { insert into retry_audit_log (action, ts)
+           values (:action, systimestamp) };
+    return Ok(());
+}
+
+// Verifies that ZERO_DIVIDE (an Oracle panic code) bypasses the retry loop
+// and re-raises immediately. Without the panic guard, this would loop 5x
+// and sleep ~3s between attempts before finally giving up.
+@retry(5, backoff_ms = 1000)
+pub fn divide_by_zero() -> number {
+    let z: number = 0;
+    let r: number = 1 / z;
+    return r;
+}

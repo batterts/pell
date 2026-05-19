@@ -3,9 +3,9 @@
 
 -- Additions to pell_runtime for module hr.employees:
 --   (collate these into a single CREATE OR REPLACE PACKAGE pell_runtime)
---   hr_employees_notfound EXCEPTION;
+--   hr_employees_notfound EXCEPTION;  -- propagate
 --   PRAGMA EXCEPTION_INIT(hr_employees_notfound, -20100);
---   hr_employees_policyviolation EXCEPTION;
+--   hr_employees_policyviolation EXCEPTION;  -- propagate
 --   PRAGMA EXCEPTION_INIT(hr_employees_policyviolation, -20101);
 
 CREATE OR REPLACE PACKAGE hr_employees AS

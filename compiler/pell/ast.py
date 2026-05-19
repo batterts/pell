@@ -397,6 +397,13 @@ class FieldDef:
 class ErrorDef(Item):
     name: str = ""
     fields: list[FieldDef] = field(default_factory=list)
+    # Disposition category (set by @skip / @propagate / @panic annotation;
+    # default propagate). Determines the SQLCODE range the error gets when
+    # lowered, and whether `@retry` will catch it.
+    #   propagate (default) — caller must handle via Result<T, E>
+    #   skip                — best-effort; log + swallow when uncaught
+    #   panic               — invariant violation; never caught by retry/skip
+    category: str = "propagate"
 
 
 @dataclass

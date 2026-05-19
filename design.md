@@ -1842,6 +1842,124 @@ who writes `find_user(id).expect("must exist")` against a fn returning
 `Result<Option<User>, DbError>` gets an `Option<User>` back and a type
 error one line later, which is the right outcome.
 
+### 6.5.2 Error categories — `@skip` / `@propagate` / `@panic`
+
+The original decree ("no `WHEN OTHERS`") is right for everyday code but
+leaves an ergonomic gap: side-effect operations (audit logs, slack
+notifications, metrics increments) really do want "fire-and-forget, log
+if it fails, don't crash the caller." The wildcard-catch in PL/SQL was
+the *only* tool for that — and the same tool catches invariant
+violations and infrastructure errors that should never be swallowed.
+
+Pell separates the two concerns: every error declares a *category*, and
+handlers ask for categories instead of specific errors:
+
+```pell
+@panic
+pub error InvariantBroken { detail: text }
+
+@skip
+pub error AuditFailed { reason: text }
+
+@propagate
+pub error NotFound { id: number }       // (or just `pub error NotFound { }` — propagate is default)
+```
+
+| Category | Use for | Caller behavior | Caught by `@retry`? |
+|---|---|---|---|
+| `propagate` | Domain errors (NotFound, Conflict, ValidationError). Default. | Must handle via `Result<T, E>` or `?`. | Yes |
+| `skip` | Best-effort side effects (audit, slack, metrics). | Auto-logged, control continues (when wrapped in a `catch skip` block — future work, §6.5.3). | Yes |
+| `panic` | Invariant violations, infrastructure failures (ORA-04068, ZERO_DIVIDE, package-state-lost). | Uncatchable from pell source. Always escapes. | **No** — `@retry` re-raises immediately. |
+
+**Lowering**: each category gets its own SQLCODE range so a single
+integer test classifies the error.
+
+```
+propagate  -20100 .. -20199
+skip       -20200 .. -20299
+panic      -20300 .. -20399
+```
+
+Plus Oracle built-ins are pre-classified by `pell_is_panic`: ZERO_DIVIDE,
+VALUE_ERROR, ORA-04068 (existing package state), invalid ROWID, storage
+errors → panic. Everything else Oracle raises is treated as propagate
+(retryable).
+
+### 6.5.3 `@retry` — per-function retry policy with category awareness
+
+The companion to categories. A function annotated `@retry(N, ...)`
+wraps its body in a `LOOP / SAVEPOINT / EXCEPTION` block:
+
+```pell
+@retry(5, backoff_ms = 100, exponential = true, jitter = true, cap_ms = 5000)
+pub fn enqueue_job(name: text) -> Result<Unit, JobFailed> {
+    sql! { insert into jobs (name, status) values (:name, 'PENDING') };
+    return Ok(());
+}
+```
+
+Lowers to:
+
+```sql
+PROCEDURE enqueue_job(p_name IN VARCHAR2) IS
+    l_pell_attempt PLS_INTEGER := 0;
+BEGIN
+    LOOP
+        SAVEPOINT pell_attempt;
+        BEGIN
+            INSERT INTO jobs (name, status) VALUES (p_name, 'PENDING');
+            RETURN;                                   -- success: exits FN
+            EXIT;                                     -- (unreachable here)
+        EXCEPTION
+            WHEN OTHERS THEN
+                IF pell_is_panic(SQLCODE) THEN RAISE; END IF;
+                l_pell_attempt := l_pell_attempt + 1;
+                ROLLBACK TO pell_attempt;
+                IF l_pell_attempt >= 5 THEN RAISE; END IF;
+                DBMS_SESSION.SLEEP(
+                    LEAST(
+                        (5000 / 1000),
+                        ((100 / 1000) * POWER(2, l_pell_attempt - 1))
+                                       * (0.75 + DBMS_RANDOM.VALUE * 0.5)
+                    )
+                );
+        END;
+    END LOOP;
+END enqueue_job;
+```
+
+**Composition with the categories** is the design payoff: `@retry` is
+purely an attempts policy. After retries are exhausted, the final `RAISE`
+hands control back to the error's own category — `propagate` bubbles
+up, `skip` would be swallowed by a parent `catch skip` block, `panic`
+never reaches this point because it bypasses retry entirely.
+
+**Mechanics:**
+
+- `SAVEPOINT pell_attempt` + `ROLLBACK TO` ensures DML from a failed
+  attempt is undone before the next try. Read-only retries pay the
+  savepoint overhead (negligible) but get the same guarantee for free.
+- `pell_is_panic(SQLCODE)` is a per-package private function emitted
+  exactly once when any `@retry` exists. It tests the SQLCODE against
+  pell's panic range AND the hardcoded Oracle panic codes (ZERO_DIVIDE,
+  VALUE_ERROR, etc.).
+- Backoff math is inlined into a single `DBMS_SESSION.SLEEP` call. The
+  expression composes as: `LEAST(cap, base * 2^(n-1) * jitter)`. Any of
+  cap/exponential/jitter can be omitted.
+
+**Restrictions in v1:**
+
+- `@retry` is mutually exclusive with `@finally`, `@autonomous`, and
+  `@pipelined`. Compile-time error if combined. The interactions are
+  defensible (retry-then-finalize, autonomous-per-attempt) but every one
+  has a "what does the user actually want" question; v1 punts.
+- Per-call-site `@retry(...) audit::record(...)` override isn't
+  surfaced. Retry policy lives on the fn declaration — callers see it
+  in the signature comments, not at the call site.
+- A surgical `on = [SpecificError]` filter is deferred. The default
+  "retry everything except panic" covers practically all cases; surgical
+  filtering can wait for a real example that needs it.
+
 ### 6.6 Lowering strategy (errors)
 
 **Chosen: (C) sentinel `EXCEPTION` per variant + `SYS_CONTEXT` payload

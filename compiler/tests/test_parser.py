@@ -334,6 +334,23 @@ def test_fn_with_out_and_inout_params():
     assert [p.mode for p in fn.params] == ["in", "out", "inout"]
 
 
+def test_error_category_annotations():
+    m = parse("""
+        module m;
+        @skip      pub error EmailFailed { reason: text }
+        @propagate pub error NotFound    { id: number }
+        @panic     pub error Invariant   { detail: text }
+        pub error UnannotatedDefault { foo: text }
+    """)
+    cats = {e.name: e.category for e in m.items if isinstance(e, A.ErrorDef)}
+    assert cats == {
+        "EmailFailed": "skip",
+        "NotFound": "propagate",
+        "Invariant": "panic",
+        "UnannotatedDefault": "propagate",   # default
+    }
+
+
 def test_method_param_modes():
     m = parse("""
         module m;

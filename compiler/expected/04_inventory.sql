@@ -3,7 +3,7 @@
 
 -- Additions to pell_runtime for module inventory.skus:
 --   (collate these into a single CREATE OR REPLACE PACKAGE pell_runtime)
---   inventory_skus_duplicatecode EXCEPTION;
+--   inventory_skus_duplicatecode EXCEPTION;  -- propagate
 --   PRAGMA EXCEPTION_INIT(inventory_skus_duplicatecode, -20100);
 
 CREATE OR REPLACE PACKAGE inventory_skus AS

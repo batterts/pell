@@ -957,6 +957,85 @@ def test_method_alias_wrong_arity_errors():
         """)
 
 
+def test_error_categories_get_distinct_sqlcode_ranges():
+    sql = compile_to_sql("""
+        module m;
+        @propagate pub error A { x: number }
+        @propagate pub error B { x: number }
+        @skip      pub error C { x: number }
+        @panic     pub error D { x: number }
+    """)
+    # propagate range -20100..-20199, skip -20200..-20299, panic -20300..-20399
+    assert "PRAGMA EXCEPTION_INIT(m_a, -20100)" in sql
+    assert "PRAGMA EXCEPTION_INIT(m_b, -20101)" in sql
+    assert "PRAGMA EXCEPTION_INIT(m_c, -20200)" in sql
+    assert "PRAGMA EXCEPTION_INIT(m_d, -20300)" in sql
+
+
+def test_retry_wraps_body_in_loop_and_savepoint():
+    sql = compile_to_sql("""
+        module m;
+        @propagate pub error Failed { reason: text }
+        @retry(3, backoff_ms = 100)
+        pub fn flaky() -> Result<Unit, Failed> {
+            sql! { insert into events (data) values ('ok') };
+            return Ok(());
+        }
+    """)
+    assert "FUNCTION pell_is_panic(p_code IN NUMBER) RETURN BOOLEAN" in sql
+    assert "l_pell_attempt PLS_INTEGER := 0;" in sql
+    assert "SAVEPOINT pell_attempt;" in sql
+    assert "IF pell_is_panic(SQLCODE) THEN RAISE; END IF;" in sql
+    assert "ROLLBACK TO pell_attempt;" in sql
+    assert "IF l_pell_attempt >= 3 THEN RAISE; END IF;" in sql
+    assert "DBMS_SESSION.SLEEP((100 / 1000));" in sql
+
+
+def test_retry_with_exponential_and_jitter_and_cap():
+    sql = compile_to_sql("""
+        module m;
+        @retry(5, backoff_ms = 100, exponential = true, jitter = true, cap_ms = 5000)
+        pub fn f() -> number { return 1; }
+    """)
+    # nested sleep expression with cap, exponential, and jitter factors
+    assert "LEAST((5000 / 1000)" in sql
+    assert "POWER(2, l_pell_attempt - 1)" in sql
+    assert "DBMS_RANDOM.VALUE" in sql
+
+
+def test_retry_without_backoff_emits_no_sleep():
+    sql = compile_to_sql("""
+        module m;
+        @retry(3)
+        pub fn f() -> number { return 1; }
+    """)
+    assert "l_pell_attempt PLS_INTEGER := 0;" in sql
+    assert "DBMS_SESSION.SLEEP" not in sql
+
+
+def test_retry_rejects_pipelined():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql("""
+            module m;
+            pub record R { x: number }
+            @pipelined
+            @retry(3)
+            pub fn p(rows: cursor<R>) -> stream<R> {
+                for r in rows { yield R { x: r.x }; }
+            }
+        """)
+
+
+def test_retry_panic_helper_only_when_used():
+    """No @retry → no helper."""
+    sql = compile_to_sql("""
+        module m;
+        pub fn f() -> number { return 1; }
+    """)
+    assert "pell_is_panic" not in sql
+
+
 def test_out_inout_param_modes_emit_correctly():
     sql = compile_to_sql("""
         module m;
