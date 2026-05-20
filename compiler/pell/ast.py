@@ -412,6 +412,27 @@ class ImportStmt(Item):
 
 
 @dataclass
+class EnumDef(Item):
+    """`pub enum Foo { A, B = "b-val", C }` — a finite set of named text
+    variants. Each variant has an implicit string value equal to its name
+    (uppercase) unless overridden with `= "..."`.
+
+    Lowers to a set of `CONSTANT VARCHAR2(...) := '<value>'` declarations
+    in the package spec, one per variant. References as `Foo::A` lower to
+    `pkg.foo_a` (the constant).
+    """
+    name: str = ""
+    variants: list["EnumVariant"] = field(default_factory=list)
+
+
+@dataclass
+class EnumVariant:
+    loc: Loc
+    name: str
+    value: Optional[str] = None  # explicit text value, or None → use name
+
+
+@dataclass
 class SequenceDef(Item):
     """`pub seq employee_id_seq;` — declares an external Oracle sequence.
 

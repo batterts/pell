@@ -331,6 +331,28 @@ def test_aggregate_with_merge_and_parallel():
     assert [a.name for a in ag.annotations] == ["parallel"]
 
 
+def test_enum_def_default_values():
+    m = parse('module m; pub enum Region { NORTH, SOUTH, EAST, WEST }')
+    e = m.items[0]
+    assert isinstance(e, A.EnumDef)
+    assert e.name == "Region"
+    assert [v.name for v in e.variants] == ["NORTH", "SOUTH", "EAST", "WEST"]
+    assert all(v.value is None for v in e.variants)
+
+
+def test_enum_def_explicit_values():
+    m = parse('''
+        module m;
+        pub enum Status {
+            OPEN = "open",
+            CLOSED = "closed",
+            PENDING = "pending",
+        }
+    ''')
+    e = m.items[0]
+    assert [v.value for v in e.variants] == ["open", "closed", "pending"]
+
+
 def test_sequence_def_simple():
     m = parse("module m; pub seq emp_id_seq;")
     sd = m.items[0]

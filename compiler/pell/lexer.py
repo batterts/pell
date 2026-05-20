@@ -28,6 +28,8 @@ KEYWORDS = {
     "seq",
     # Parameter modes (default is IN; absent = IN).
     "out", "inout",
+    # Finite enum types — variants lower to text constants.
+    "enum",
 }
 
 

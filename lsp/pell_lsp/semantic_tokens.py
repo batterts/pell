@@ -68,6 +68,7 @@ _KEYWORDS = {
     "type", "sealed", "aggregate", "case", "self",
     "seq",
     "out", "inout",
+    "enum",
 }
 
 # Pell built-in primitive types — render as `type`, not `variable`.

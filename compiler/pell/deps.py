@@ -122,6 +122,12 @@ def collect_module_deps(module) -> dict:
                 packages.add(pkg)
     if has_errors:
         packages.add("pell_runtime")
+    # Filter out enum names — `EnumName::VARIANT` references look like
+    # package references (`pkg::member`) to the AST walker, but they're
+    # really compile-time literal lookups, not cross-package calls.
+    from . import ast as A
+    enum_names = {i.name.lower() for i in module.items if isinstance(i, A.EnumDef)}
+    packages -= enum_names
     return {
         "tables":    sorted(all_tables),
         "dblinks":   sorted(all_dblinks),

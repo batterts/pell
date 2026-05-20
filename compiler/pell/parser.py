@@ -159,6 +159,8 @@ class Parser:
             return self._parse_aggregate_def(annotations, is_pub)
         if self._at_keyword("seq"):
             return self._parse_seq_def(annotations, is_pub)
+        if self._at_keyword("enum"):
+            return self._parse_enum_def(annotations, is_pub)
         raise ParseError(
             f"expected item (fn / record / error / import / type / sealed type / aggregate), got {cur.value!r}",
             cur.loc,
@@ -207,6 +209,27 @@ class Parser:
             if not self._eat("COMMA"):
                 break
         return params
+
+    def _parse_enum_def(self, annotations: list[A.Annotation], is_pub: bool) -> A.EnumDef:
+        kw = self._expect("KW_ENUM")
+        name = self._expect("IDENT").value
+        self._expect("LBRACE")
+        variants: list[A.EnumVariant] = []
+        while not self._at("RBRACE", "EOF"):
+            vloc = self._peek().loc
+            vname = self._expect("IDENT", "expected enum variant name").value
+            value: Optional[str] = None
+            if self._eat("EQ"):
+                vt = self._expect("STRING", "enum variant value must be a string literal")
+                value = vt.value
+            variants.append(A.EnumVariant(loc=vloc, name=vname, value=value))
+            if not self._eat("COMMA"):
+                break
+        self._expect("RBRACE")
+        return A.EnumDef(
+            loc=kw.loc, annotations=annotations, is_pub=is_pub,
+            name=name, variants=variants,
+        )
 
     def _parse_seq_def(self, annotations: list[A.Annotation], is_pub: bool) -> A.SequenceDef:
         kw = self._expect("KW_SEQ")

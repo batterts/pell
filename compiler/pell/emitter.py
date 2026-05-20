@@ -287,6 +287,15 @@ class Emitter:
         # Sequence names — used by _lower_ident to skip the `l_` local prefix
         # and by type inference to type `<seq>.nextval` / `<seq>.currval` as NUMBER.
         self._seq_names: set[str] = {s.name for s in self._sequences}
+        # Enums — map `<EnumName>::<VARIANT>` to the lowered text literal.
+        self._enums: list[A.EnumDef] = [i for i in module.items if isinstance(i, A.EnumDef)]
+        self._enum_variants: dict[tuple[str, str], str] = {}
+        for e in self._enums:
+            for v in e.variants:
+                lit = v.value if v.value is not None else v.name
+                self._enum_variants[(e.name, v.name)] = lit
+        # Names of declared enums for reference in type positions.
+        self._enum_names: set[str] = {e.name for e in self._enums}
         # Per-category SQLCODE assignment for declared errors. Each error gets
         # a unique negative integer within its category's range. Computed once
         # in __init__ so any helper (RAISE emit, runtime section, etc.) can
@@ -591,6 +600,18 @@ class Emitter:
                         )
         out: list[str] = []
         out.append(f"CREATE OR REPLACE PACKAGE {self._q(self.pkg)} AS")
+        # Enum constants — emitted before records so they can be referenced
+        # from record field defaults (future) and from fn bodies.
+        for e in self._enums:
+            if not e.is_pub:
+                continue
+            out.append(f"  -- enum {e.name}")
+            for v in e.variants:
+                lit = v.value if v.value is not None else v.name
+                out.append(
+                    f"  {e.name.lower()}_{v.name.lower()} CONSTANT VARCHAR2(200) := "
+                    f"{_sql_string(lit)};"
+                )
         # records (declare types public so callers can reference them)
         for rec in self._records:
             if rec.is_pub:
@@ -3113,6 +3134,11 @@ class Emitter:
         if name == "self" and self._in_method_type is not None:
             # Inside a member-fn body, `self` is Oracle's implicit SELF parameter.
             return "SELF"
+        # Enum variant references — `EnumName::VARIANT` lowers to the text literal.
+        if "::" in name:
+            head, _, tail = name.rpartition("::")
+            if (head, tail) in self._enum_variants:
+                return _sql_string(self._enum_variants[(head, tail)])
         # Declared sequence references — emit verbatim (with `::` → `.` for schemas).
         if name in self._seq_names:
             if "::" in name:

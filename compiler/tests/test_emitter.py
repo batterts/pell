@@ -884,6 +884,46 @@ def test_pipelined_parallel_order_and_cluster_conflict_errors():
         """)
 
 
+def test_enum_emits_constants_in_spec():
+    sql = compile_to_sql("""
+        module m;
+        pub enum Region { NORTH, SOUTH, EAST, WEST }
+        pub enum Status { OPEN = "open", CLOSED = "closed" }
+    """)
+    # Constants for each variant in the spec
+    assert "region_north CONSTANT VARCHAR2(200) := 'NORTH';" in sql
+    assert "region_west CONSTANT VARCHAR2(200) := 'WEST';" in sql
+    assert "status_open CONSTANT VARCHAR2(200) := 'open';" in sql
+    assert "status_closed CONSTANT VARCHAR2(200) := 'closed';" in sql
+
+
+def test_enum_variant_references_lower_to_literal():
+    sql = compile_to_sql("""
+        module m;
+        pub enum Region { NORTH, SOUTH }
+        pub fn label(r: text) -> text {
+            if r == Region::NORTH { return "northern"; }
+            return "other";
+        }
+    """)
+    # The reference becomes the literal text — no `pkg.region_north` lookup
+    # needed at the call site (constants exist for cross-module use).
+    assert "(p_r = 'NORTH')" in sql
+
+
+def test_enum_does_not_pollute_packages_manifest():
+    """`Region::NORTH` looks like `pkg::member` to the dep walker but enums
+    are compile-time literals, not packages — must not show up."""
+    sql = compile_to_sql("""
+        module m;
+        pub enum Region { NORTH }
+        pub fn f() -> text { return Region::NORTH; }
+    """)
+    # The manifest section is bounded by the preamble lines; check there's
+    # no `region` package listed.
+    assert "packages:\n--     region" not in sql
+
+
 def test_sequence_nextval_emits_bare_reference():
     """`pub seq name;` + `name.nextval` lowers to a bare PL/SQL reference,
     not the l_-prefixed local."""

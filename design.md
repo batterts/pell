@@ -2161,6 +2161,59 @@ Lets a DBA reading the generated PL/SQL grep the pell source for the
 matching `transaction { … }` or `@retry` block without spelunking line
 counts.
 
+### 7.0.3 `pub enum` — finite named text variants
+
+```pell
+pub enum Region {
+    NORTH,
+    SOUTH,
+    EAST,
+    WEST,
+}
+
+pub enum Status {
+    OPEN    = "open",
+    CLOSED  = "closed",
+    PENDING = "pending",
+}
+```
+
+A `pub enum` is a finite set of named text variants. By default each
+variant's text value is its uppercase name (`NORTH` → `'NORTH'`). The
+`= "..."` form overrides for cases where the on-the-wire value differs
+from the source-level name (e.g., the database column stores lowercase).
+
+**Lowering:** each variant becomes a `CONSTANT VARCHAR2(200)` in the
+package spec, named `<enum>_<variant>` (lowercased). References as
+`Region::NORTH` inline to the literal text in the emitted PL/SQL —
+they're compile-time constants, not function calls.
+
+```sql
+PACKAGE demo AS
+  -- enum Region
+  region_north CONSTANT VARCHAR2(200) := 'NORTH';
+  region_south CONSTANT VARCHAR2(200) := 'SOUTH';
+  ...
+END demo;
+```
+
+Use cases:
+- Domain enumerations (Region, OrderStatus, Severity) where the column
+  stores a discrete text value.
+- Driving typed pivot (§7.0.4, deferred) — the enum's variants become
+  the static column list in Oracle's `PIVOT` clause.
+- Anywhere you'd previously use a magic string and worry about typos.
+
+**Limitations in v1:**
+- Pell doesn't yet enforce that an enum-typed variable can only hold one
+  of the declared values (no real enum type machinery). For now, an enum
+  is documentation + a set of named literals. A future commit can add
+  the type-system enforcement.
+- Variant values must be string literals — no numeric or composite
+  variants yet.
+- No automatic `from_text` / `to_text` helpers; the inlining makes them
+  unnecessary in pell source, and SQL contexts use the raw text directly.
+
 ### 7.1 External sequences — `pub seq name;`
 
 Oracle sequences are use-site references in pell; the language doesn't own
