@@ -470,7 +470,7 @@ class Emitter:
         if any(manifest.values()):
             lines.append("--")
             lines.append("-- Dependencies (extracted from pell source):")
-            for kind in ("tables", "sequences", "dblinks", "modules"):
+            for kind in ("tables", "sequences", "packages", "dblinks"):
                 vals = manifest.get(kind, [])
                 if vals:
                     label = kind + " (incl. views/synonyms)" if kind == "tables" else kind

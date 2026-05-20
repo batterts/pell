@@ -80,6 +80,50 @@ def test_extract_comments_dont_pollute():
     assert t == {"real_table"}
 
 
+def test_collect_packages_from_qualified_calls():
+    from pell.deps import collect_module_deps
+    m = parse("""
+        module m;
+        pub fn f(x: text) -> number {
+            let h = dbms_utility::get_hash_value(x, 0, 1073741824);
+            log::info("hashed");
+            return h;
+        }
+    """)
+    deps = collect_module_deps(m)
+    assert "dbms_utility" in deps["packages"]
+    assert "log" in deps["packages"]
+
+
+def test_pell_runtime_in_packages_when_errors_declared():
+    from pell.deps import collect_module_deps
+    m = parse("""
+        module m;
+        pub error NotFound { id: number }
+        pub fn nothing() {}
+    """)
+    deps = collect_module_deps(m)
+    assert "pell_runtime" in deps["packages"]
+
+
+def test_no_packages_when_no_qualified_refs():
+    from pell.deps import collect_module_deps
+    m = parse("""
+        module m;
+        pub fn double(x: number) -> number { return x * 2; }
+    """)
+    deps = collect_module_deps(m)
+    assert deps["packages"] == []
+
+
+def test_nested_qualifier_takes_everything_before_last():
+    """`foo::bar::baz` → package `foo.bar`, member `baz`."""
+    from pell.deps import _package_from_qualified
+    assert _package_from_qualified("dbms_utility::get_hash_value") == "dbms_utility"
+    assert _package_from_qualified("foo::bar::baz") == "foo.bar"
+    assert _package_from_qualified("bare_name") is None
+
+
 def test_collect_module_deps_aggregates_across_fns():
     m = parse("""
         module hr.employees;

@@ -30,7 +30,7 @@ Known limitations (documented, accepted for v1):
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from typing import Iterable, Optional
 
 
 # Match a table-introducing keyword followed by an identifier.
@@ -79,37 +79,73 @@ def extract_sql_deps(sql_text: str) -> tuple[set[str], set[str]]:
 
 
 def collect_module_deps(module) -> dict:
-    """Walk every `SqlBlock` in a Module's AST and aggregate dependencies.
+    """Walk every AST node in a Module and aggregate external dependencies.
 
     Returns a dict with sorted-list values:
-        {"tables":  ["hr.employees", "departments"],
-         "dblinks": ["prod_db"],
-         "sequences": ["employee_id_seq"],
-         "modules":   ["accounts", "audit"]}
+        {"tables":    [...],   # from sql!{} bodies
+         "dblinks":   [...],   # from sql!{} bodies (`tbl@dblink`)
+         "sequences": [...],   # from `pub seq` declarations
+         "packages":  [...]}   # from `<pkg>::<member>` references
 
-    `sequences` comes from `pub seq` declarations (AST-visible).
-    `modules` is currently empty until cross-module call tracking is
-    surfaced — placeholder for future work.
+    A `packages` reference is anything with `::` in an Ident name —
+    user-defined other pell modules (`accounts::transfer`), Oracle
+    built-ins (`dbms_utility::get_hash_value`), or stdlib helpers
+    (`log::info`). We don't try to distinguish: any external package the
+    code calls into shows up here, and a DBA reading the manifest can
+    classify by name.
+
+    `pell_runtime` is added automatically when the module declares any
+    errors — every Err propagation goes through pell_runtime's set_err.
     """
     from . import ast as A
     all_tables: set[str] = set()
     all_dblinks: set[str] = set()
     sequences: set[str] = set()
+    packages: set[str] = set()
+    has_errors = False
     for item in module.items:
         if isinstance(item, A.SequenceDef):
             sequences.add(item.name.lower())
             continue
-        # Recurse through every statement-bearing item for sql blocks.
+        if isinstance(item, A.ErrorDef):
+            has_errors = True
+            continue
+        # Recurse through every statement-bearing item for SqlBlocks AND
+        # for any qualified Ident reference (the `::` package syntax).
         for node in _walk_items_for_sql(item):
             t, d = extract_sql_deps(node.sql)
             all_tables |= t
             all_dblinks |= d
+        for ident_name in _walk_items_for_qualified_idents(item):
+            pkg = _package_from_qualified(ident_name)
+            if pkg is not None:
+                packages.add(pkg)
+    if has_errors:
+        packages.add("pell_runtime")
     return {
         "tables":    sorted(all_tables),
         "dblinks":   sorted(all_dblinks),
         "sequences": sorted(sequences),
-        "modules":   [],
+        "packages":  sorted(packages),
     }
+
+
+def _package_from_qualified(name: str) -> Optional[str]:
+    """Extract the package portion of `pkg::member` or `pkg::sub::member`.
+
+    Everything before the LAST `::` is the package; the final segment is
+    the member. Returns None if the name has no `::`.
+
+        accounts::transfer            -> "accounts"
+        dbms_utility::get_hash_value  -> "dbms_utility"
+        foo::bar::baz                 -> "foo.bar"   (joined for display)
+    """
+    if "::" not in name:
+        return None
+    parts = name.split("::")
+    if len(parts) < 2:
+        return None
+    return ".".join(parts[:-1]).lower()
 
 
 def _walk_items_for_sql(item) -> Iterable:
@@ -220,6 +256,115 @@ def _walk_expr_for_sql(e):
                 yield from _walk_stmts_for_sql(body)
             else:
                 yield from _walk_expr_for_sql(body)
+
+
+def _walk_items_for_qualified_idents(item) -> Iterable[str]:
+    """Yield every `<pkg>::<member>` identifier name found inside a top-level
+    item. Mirrors _walk_items_for_sql but collects Ident names instead of
+    SqlBlock nodes.
+    """
+    from . import ast as A
+    if isinstance(item, A.FnDef):
+        yield from _walk_stmts_for_idents(item.body)
+        if item.finally_body:
+            yield from _walk_stmts_for_idents(item.finally_body)
+    elif isinstance(item, A.TypeDef):
+        for m in item.methods:
+            yield from _walk_stmts_for_idents(m.body)
+    elif isinstance(item, A.SealedTypeDef):
+        for m in item.methods:
+            yield from _walk_stmts_for_idents(m.body)
+        for case in item.cases:
+            for m in case.methods:
+                yield from _walk_stmts_for_idents(m.body)
+    elif isinstance(item, A.AggregateDef):
+        yield from _walk_stmts_for_idents(item.step_body)
+        if item.merge_body:
+            yield from _walk_stmts_for_idents(item.merge_body)
+        yield from _walk_stmts_for_idents(item.finish_body)
+
+
+def _walk_stmts_for_idents(stmts) -> Iterable[str]:
+    from . import ast as A
+    for s in stmts:
+        if isinstance(s, A.LetStmt) and s.value is not None:
+            yield from _walk_expr_for_idents(s.value)
+        elif isinstance(s, A.AssignStmt):
+            yield from _walk_expr_for_idents(s.target)
+            yield from _walk_expr_for_idents(s.value)
+        elif isinstance(s, A.ReturnStmt) and s.value is not None:
+            yield from _walk_expr_for_idents(s.value)
+        elif isinstance(s, A.ExprStmt):
+            yield from _walk_expr_for_idents(s.expr)
+        elif isinstance(s, A.YieldStmt):
+            yield from _walk_expr_for_idents(s.value)
+        elif isinstance(s, A.IfStmt):
+            yield from _walk_expr_for_idents(s.cond)
+            yield from _walk_stmts_for_idents(s.then_body)
+            if s.else_body:
+                yield from _walk_stmts_for_idents(s.else_body)
+        elif isinstance(s, (A.ForStmt, A.ForallStmt)):
+            yield from _walk_expr_for_idents(s.iterable)
+            yield from _walk_stmts_for_idents(s.body)
+        elif isinstance(s, A.MatchStmt):
+            yield from _walk_expr_for_idents(s.scrutinee)
+            for arm in s.arms:
+                body = arm.body
+                if isinstance(body, list):
+                    yield from _walk_stmts_for_idents(body)
+                else:
+                    yield from _walk_expr_for_idents(body)
+        elif isinstance(s, A.TransactionStmt):
+            yield from _walk_stmts_for_idents(s.body)
+
+
+def _walk_expr_for_idents(e) -> Iterable[str]:
+    """Yield qualified-Ident names from an expression tree. Only yields
+    names containing `::`; the caller extracts the package portion."""
+    from . import ast as A
+    if isinstance(e, A.Ident) and "::" in e.name:
+        yield e.name
+    elif isinstance(e, A.Call):
+        yield from _walk_expr_for_idents(e.callee)
+        for a in e.args:
+            yield from _walk_expr_for_idents(a)
+    elif isinstance(e, A.MemberAccess):
+        yield from _walk_expr_for_idents(e.obj)
+    elif isinstance(e, A.QuestionMark):
+        yield from _walk_expr_for_idents(e.inner)
+    elif isinstance(e, A.BinOp):
+        yield from _walk_expr_for_idents(e.left)
+        yield from _walk_expr_for_idents(e.right)
+    elif isinstance(e, A.UnaryOp):
+        yield from _walk_expr_for_idents(e.operand)
+    elif isinstance(e, A.StructLit):
+        for f in e.fields:
+            yield from _walk_expr_for_idents(f.value)
+    elif isinstance(e, A.ListLit):
+        for el in e.elements:
+            yield from _walk_expr_for_idents(el)
+    elif isinstance(e, A.PipelineExpr):
+        yield from _walk_expr_for_idents(e.source)
+        yield from _walk_expr_for_idents(e.target)
+    elif isinstance(e, A.OkExpr):
+        yield from _walk_expr_for_idents(e.inner)
+    elif isinstance(e, A.ErrExpr):
+        yield from _walk_expr_for_idents(e.inner)
+    elif isinstance(e, A.SomeExpr):
+        yield from _walk_expr_for_idents(e.inner)
+    elif isinstance(e, A.IfExpr):
+        yield from _walk_expr_for_idents(e.cond)
+        yield from _walk_stmts_for_idents(e.then_body)
+        if e.else_body:
+            yield from _walk_stmts_for_idents(e.else_body)
+    elif isinstance(e, A.MatchExpr):
+        yield from _walk_expr_for_idents(e.scrutinee)
+        for arm in e.arms:
+            body = arm.body
+            if isinstance(body, list):
+                yield from _walk_stmts_for_idents(body)
+            else:
+                yield from _walk_expr_for_idents(body)
 
 
 def _strip_strings_and_comments(sql: str) -> str:
