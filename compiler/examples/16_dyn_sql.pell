@@ -1,0 +1,37 @@
+module dyn_demo;
+
+// ---------------------------------------------------------------------------
+// `unsafe fn` + `@touches` + `@binds` + `exec_dyn` — annotation-driven
+// dynamic SQL (§6.5.3 in design.md).
+//
+// The `unsafe` modifier gates dynamic SQL features. Inside, `exec_dyn(s)`
+// lowers to `EXECUTE IMMEDIATE s` with:
+//   - INTO clause derived from the let-target's type
+//   - USING clause derived from `@binds(...)` in declaration order
+//
+// `@touches(t1, t2)` lists the tables the dynamic SQL may reference. These
+// flow into the dependency manifest AND emit pinning cursors at the package
+// level so Oracle's ALL_DEPENDENCIES sees the refs even though they're
+// hidden inside an EXECUTE IMMEDIATE string.
+//
+// Inside the SQL string:
+//   {var}    — pell-side interpolation; becomes `|| p_var ||` in PL/SQL
+//   :name    — SQL bind variable; receives a value from USING (per @binds)
+// ---------------------------------------------------------------------------
+
+// 1. Scalar SELECT with a dynamic table name and one bound parameter.
+@touches(dyn_orders, dyn_archive_orders)
+@binds(st)
+pub unsafe fn count_in(tname: text, st: text) -> number {
+    let n: number = exec_dyn(
+        "select count(*) from {tname} where status = :st"
+    )?;
+    return n;
+}
+
+// 2. Dynamic-table DML with one bind.
+@touches(dyn_orders)
+@binds(new_st, id)
+pub unsafe fn set_status(tname: text, new_st: text, id: number) {
+    exec_dyn("update {tname} set status = :new_st where id = :id");
+}

@@ -884,6 +884,84 @@ def test_pipelined_parallel_order_and_cluster_conflict_errors():
         """)
 
 
+def test_exec_dyn_emits_execute_immediate():
+    sql = compile_to_sql("""
+        module m;
+        @touches(orders)
+        @binds(st)
+        pub unsafe fn count_in(tname: text, st: text) -> number {
+            let n: number = exec_dyn("select count(*) from {tname} where status = :st")?;
+            return n;
+        }
+    """)
+    # EXECUTE IMMEDIATE with INTO target and USING the @binds.
+    assert "EXECUTE IMMEDIATE" in sql
+    assert "INTO l_n" in sql
+    assert "USING p_st" in sql
+    # tname is interpolated, not a bind:
+    assert "|| p_tname ||" in sql
+
+
+def test_exec_dyn_in_non_unsafe_fn_errors():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql("""
+            module m;
+            pub fn bad() -> number {
+                let n: number = exec_dyn("select 1 from dual")?;
+                return n;
+            }
+        """)
+
+
+def test_unsafe_fn_emits_pinning_cursors():
+    sql = compile_to_sql("""
+        module m;
+        @touches(orders, archive_orders)
+        @binds(id)
+        pub unsafe fn fetch(id: number) -> number {
+            let n: number = exec_dyn("select count(*) from orders where id = :id")?;
+            return n;
+        }
+    """)
+    assert "PROCEDURE pell_dep_pinning IS" in sql
+    assert "CURSOR pin_orders IS SELECT 1 FROM orders WHERE 1=0;" in sql
+    assert "CURSOR pin_archive_orders IS SELECT 1 FROM archive_orders WHERE 1=0;" in sql
+
+
+def test_touches_feeds_dep_manifest():
+    sql = compile_to_sql("""
+        module m;
+        @touches(orders, archive_orders)
+        @binds(id)
+        pub unsafe fn fetch(id: number) -> number {
+            let n: number = exec_dyn("select 1 from orders")?;
+            return n;
+        }
+    """)
+    # tables (incl. views/synonyms) list must contain the @touches.
+    assert "archive_orders" in sql
+    assert "orders" in sql
+
+
+def test_exec_dyn_dml_statement_no_into():
+    sql = compile_to_sql("""
+        module m;
+        @touches(audit_log)
+        @binds(action)
+        pub unsafe fn log(action: text) {
+            exec_dyn("insert into audit_log (action, ts) values (:action, systimestamp)");
+        }
+    """)
+    # No INTO clause for DML.
+    assert "EXECUTE IMMEDIATE" in sql
+    assert "USING p_action" in sql
+    # Check that no INTO appears in the same statement
+    exec_idx = sql.find("EXECUTE IMMEDIATE")
+    semi_idx = sql.find(";", exec_idx)
+    assert "INTO " not in sql[exec_idx:semi_idx]
+
+
 def test_enum_emits_constants_in_spec():
     sql = compile_to_sql("""
         module m;

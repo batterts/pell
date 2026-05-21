@@ -331,6 +331,18 @@ def test_aggregate_with_merge_and_parallel():
     assert [a.name for a in ag.annotations] == ["parallel"]
 
 
+def test_unsafe_fn_modifier():
+    m = parse('module m; pub unsafe fn foo() {}')
+    fn = m.items[0]
+    assert isinstance(fn, A.FnDef)
+    assert fn.is_unsafe is True
+
+
+def test_safe_fn_default():
+    m = parse('module m; pub fn foo() {}')
+    assert m.items[0].is_unsafe is False
+
+
 def test_enum_def_default_values():
     m = parse('module m; pub enum Region { NORTH, SOUTH, EAST, WEST }')
     e = m.items[0]

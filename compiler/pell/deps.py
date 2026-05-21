@@ -110,6 +110,16 @@ def collect_module_deps(module) -> dict:
         if isinstance(item, A.ErrorDef):
             has_errors = True
             continue
+        # `@touches(t1, t2)` on an unsafe fn declares opaque dependencies
+        # for dynamic SQL — pull them into the static manifest so the dep
+        # graph stays complete even when the SQL text is constructed at
+        # runtime.
+        if isinstance(item, A.FnDef):
+            for ann in item.annotations:
+                if ann.name == "touches":
+                    for arg in ann.args:
+                        if isinstance(arg, A.Ident):
+                            all_tables.add(arg.name.lower())
         # Recurse through every statement-bearing item for SqlBlocks AND
         # for any qualified Ident reference (the `::` package syntax).
         for node in _walk_items_for_sql(item):

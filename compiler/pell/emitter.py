@@ -665,6 +665,21 @@ class Emitter:
         if self._needs_panic_helper:
             out.append("")
             out.append(self._panic_helper_source())
+        # Pinning cursors for @touches dependencies from unsafe fns. Never
+        # called; the cursor declarations make Oracle's ALL_DEPENDENCIES
+        # track refs that would otherwise be invisible inside EXECUTE
+        # IMMEDIATE strings.
+        dyn_touches = self._collect_dyn_touches()
+        if dyn_touches:
+            out.append("")
+            out.append("  -- Pinning declarations for dynamic-SQL @touches. Never invoked;")
+            out.append("  -- exists so Oracle ALL_DEPENDENCIES tracks references hidden")
+            out.append("  -- in EXECUTE IMMEDIATE strings.")
+            out.append("  PROCEDURE pell_dep_pinning IS")
+            for t in dyn_touches:
+                slug = t.replace(".", "_").replace("@", "_at_")
+                out.append(f"    CURSOR pin_{slug} IS SELECT 1 FROM {t} WHERE 1=0;")
+            out.append("  BEGIN NULL; END pell_dep_pinning;")
         # all fns
         for chunk in fn_chunks:
             out.append("")
@@ -964,6 +979,95 @@ class Emitter:
         if retry["cap_ms"] is not None:
             expr = f"LEAST(({retry['cap_ms']} / 1000), {expr})"
         return f"DBMS_SESSION.SLEEP({expr});"
+
+    def _collect_dyn_touches(self) -> list[str]:
+        """All `@touches` table names from unsafe fns in this module, sorted.
+        Drives pinning-cursor emission so ALL_DEPENDENCIES sees the refs."""
+        names: set[str] = set()
+        for fn in self._fns:
+            if not getattr(fn, "is_unsafe", False):
+                continue
+            for ann in fn.annotations:
+                if ann.name == "touches":
+                    for arg in ann.args:
+                        if isinstance(arg, A.Ident):
+                            names.add(arg.name.lower())
+        return sorted(names)
+
+    def _emit_exec_dyn(self, target: Optional[str], call: A.Call, indent: str) -> list[str]:
+        """Lower `exec_dyn(<sql_string>)` to `EXECUTE IMMEDIATE`.
+
+        `target` is the PL/SQL identifier receiving a scalar result, or None
+        for DML / bare-statement form.
+
+        Requirements (compile-time error otherwise):
+        - Must be called inside an `unsafe fn`.
+        - exec_dyn takes exactly one argument — the SQL string expression.
+        - USING clause derived from the fn's `@binds(...)` annotation, in
+          declaration order. Each name resolves to the matching pell
+          variable in scope (parameter, local, or loop variable).
+        """
+        fn = self._current_fn
+        if fn is None or not getattr(fn, "is_unsafe", False):
+            raise EmitError(
+                "exec_dyn(...) can only be called inside an `unsafe fn`",
+                call.loc,
+            )
+        if len(call.args) != 1:
+            raise EmitError(
+                f"exec_dyn takes exactly 1 argument (the SQL string), got {len(call.args)}",
+                call.loc,
+            )
+        sql_code = self._emit_expr(call.args[0])
+        binds = self._fn_binds(fn)
+        using = ", ".join(self._lower_ident(b) for b in binds)
+        parts = [f"EXECUTE IMMEDIATE {sql_code}"]
+        if target is not None:
+            parts.append(f"INTO {target}")
+        if using:
+            parts.append(f"USING {using}")
+        return [f"{indent}{' '.join(parts)};"]
+
+    def _fn_touches(self, fn: A.FnDef) -> list[str]:
+        """Return the list of table names from `@touches(t1, t2, ...)` on a fn.
+        Each arg must be a bare Ident (no qualification). Empty list if absent.
+        """
+        ann = next((a for a in fn.annotations if a.name == "touches"), None)
+        if ann is None:
+            return []
+        names: list[str] = []
+        for arg in ann.args:
+            if isinstance(arg, A.Ident) and "::" not in arg.name:
+                names.append(arg.name.lower())
+            else:
+                raise EmitError(
+                    f"@touches argument must be a bare table identifier, got {type(arg).__name__}",
+                    ann.loc,
+                )
+        return names
+
+    def _fn_binds(self, fn: A.FnDef) -> list[str]:
+        """Return the list of `:bind_name` variables for a fn's @binds(...)
+        annotation. Order is significant — that's the order pell hands values
+        to EXECUTE IMMEDIATE's USING clause. The user is responsible for
+        aligning these with the `:name` placeholders in the SQL string.
+
+        Each arg must be a bare identifier. v1 doesn't validate types — pell
+        variables with the same names in scope provide the values.
+        """
+        ann = next((a for a in fn.annotations if a.name == "binds"), None)
+        if ann is None:
+            return []
+        names: list[str] = []
+        for arg in ann.args:
+            if isinstance(arg, A.Ident) and "::" not in arg.name:
+                names.append(arg.name)
+            else:
+                raise EmitError(
+                    f"@binds argument must be a bare identifier, got {type(arg).__name__}",
+                    ann.loc,
+                )
+        return names
 
     def _check_annotation_conflicts(self, fn: A.FnDef) -> None:
         """Raise a compile-time error on illegal annotation combinations."""
@@ -1266,13 +1370,17 @@ class Emitter:
 
     def _emit_assign_to(self, target: str, expr: A.Expr, indent: str) -> list[str]:
         """Emit one or more PL/SQL statements that assign `expr` to `target`."""
-        # Reduce any pipeline expressions first so the downstream dispatch can
-        # see the underlying SqlBlock or method call shape.
         if isinstance(expr, A.PipelineExpr):
             expr = self._reduce_pipeline(expr)
+        # `exec_dyn(<sql_string>)` (optionally wrapped in `?`) → EXECUTE
+        # IMMEDIATE … INTO target USING … . Only legal inside an unsafe fn.
+        inner_for_dyn = expr.inner if isinstance(expr, A.QuestionMark) else expr
+        if (isinstance(inner_for_dyn, A.Call)
+                and isinstance(inner_for_dyn.callee, A.Ident)
+                and inner_for_dyn.callee.name == "exec_dyn"):
+            return self._emit_exec_dyn(target, inner_for_dyn, indent)
         if isinstance(expr, A.QuestionMark):
             inner = expr.inner
-            # if it's a sql!{}.one()? pattern, emit a select-into; the RAISE on no-data is the propagation
             if isinstance(inner, A.Call):
                 return self._emit_questionmark_call(target, inner, indent)
         if isinstance(expr, A.Call):
@@ -2148,6 +2256,12 @@ class Emitter:
             sql_text = self._rewrite_binds(e.sql).strip().rstrip(";")
             lines = [f"{indent}{line}" for line in (sql_text + ";").splitlines()]
             return lines
+        # `exec_dyn(<sql>);` as a bare statement → EXECUTE IMMEDIATE with no
+        # INTO clause (DML or PL/SQL block).
+        if (isinstance(e, A.Call)
+                and isinstance(e.callee, A.Ident)
+                and e.callee.name == "exec_dyn"):
+            return self._emit_exec_dyn(None, e, indent)
         # otherwise just emit the expression with `;`
         return [f"{indent}{self._emit_expr(e)};"]
 

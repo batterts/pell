@@ -378,6 +378,9 @@ class FnDef(Item):
     return_type: Optional[TypeRef] = None
     body: list[Stmt] = field(default_factory=list)
     finally_body: Optional[list[Stmt]] = None  # `fn ... { ... } finally { ... }`
+    # `unsafe fn` — gates dynamic-SQL features (exec_dyn, @touches, @binds).
+    # A non-unsafe fn carrying those is a compile-time error.
+    is_unsafe: bool = False
 
 
 @dataclass

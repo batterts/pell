@@ -142,11 +142,13 @@ class Parser:
     def _parse_item(self) -> A.Item:
         annotations = self._parse_annotations()
         is_pub = bool(self._eat_keyword("pub"))
+        # `unsafe fn` — the modifier sits between `pub` and `fn`.
+        is_unsafe = bool(self._eat_keyword("unsafe"))
         cur = self._peek()
         if self._at_keyword("import"):
             return self._parse_import(annotations, is_pub)
         if self._at_keyword("fn"):
-            return self._parse_fn_def(annotations, is_pub)
+            return self._parse_fn_def(annotations, is_pub, is_unsafe=is_unsafe)
         if self._at_keyword("record"):
             return self._parse_record_def(annotations, is_pub)
         if self._at_keyword("error"):
@@ -243,7 +245,8 @@ class Parser:
         self._expect("SEMI")
         return A.ImportStmt(loc=kw.loc, annotations=annotations, is_pub=is_pub, path=path)
 
-    def _parse_fn_def(self, annotations: list[A.Annotation], is_pub: bool) -> A.FnDef:
+    def _parse_fn_def(self, annotations: list[A.Annotation], is_pub: bool, *,
+                      is_unsafe: bool = False) -> A.FnDef:
         kw = self._expect("KW_FN")
         name = self._expect("IDENT").value
         self._expect("LPAREN")
@@ -265,6 +268,7 @@ class Parser:
             return_type=return_type,
             body=body,
             finally_body=finally_body,
+            is_unsafe=is_unsafe,
         )
 
     def _parse_record_def(self, annotations: list[A.Annotation], is_pub: bool) -> A.RecordDef:
