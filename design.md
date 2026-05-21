@@ -2377,6 +2377,68 @@ them inline from literals is a future-work item.
 operators, callable from inside a `sql!{}` block but not from PL/SQL
 expressions. No special pell surface needed.
 
+#### Fluent dot-chain construction
+
+JSON values support a fluent builder API: `.set(path, value)`,
+`.remove(path)`, `.append(path, value)`. Chains compose; the emitter
+collapses them to a single `JSON_TRANSFORM` call with one operation per
+chained method.
+
+```pell
+let j: json = json::object()
+    .set("user.name", "Bob")
+    .set("user.email", "bob@example.com")
+    .set("user.address.city", "NYC")
+    .remove("draft")
+    .append("history", "edited");
+```
+
+Lowers to:
+
+```sql
+SELECT JSON_TRANSFORM(JSON_OBJECT(RETURNING JSON),
+    SET '$.user'             = JSON_OBJECT(RETURNING JSON) CREATE ON MISSING,
+    SET '$.user.name'        = 'Bob' CREATE ON MISSING,
+    SET '$.user.email'       = 'bob@example.com' CREATE ON MISSING,
+    SET '$.user.address'     = JSON_OBJECT(RETURNING JSON) CREATE ON MISSING,
+    SET '$.user.address.city' = 'NYC' CREATE ON MISSING,
+    REMOVE '$.draft',
+    APPEND '$.history'       = 'edited'
+) INTO l_j FROM dual;
+```
+
+**Auto-vivify** — Oracle's `JSON_TRANSFORM` won't create intermediate
+object nodes automatically. So for `.set("a.b.c", v)` pell injects a
+preceding `SET '$.a' = JSON_OBJECT() CREATE ON MISSING` and `SET '$.a.b'
+= JSON_OBJECT() CREATE ON MISSING`. Shared prefixes are deduplicated
+within a chain.
+
+**Path is a compile-time string** — `j.set(some_runtime_var, x)` is a
+compile-time error because Oracle's `JSON_TRANSFORM` parses path
+expressions at SQL compile time, not via bind variables. Dynamic-path
+construction needs `unsafe dyn_sql!{}`.
+
+**Why SELECT INTO and not a bare assignment** — `JSON_TRANSFORM`'s `SET`
+/ `REMOVE` / `APPEND` keywords are SQL-only operators; PL/SQL's parser
+rejects them in expression position. The `SELECT … INTO target FROM
+dual;` wrap is the standard idiom for using SQL-only constructs from
+PL/SQL.
+
+**Receiver detection** — the chain only activates when the base is
+provably json-typed (a `json::*` constructor result, a parameter
+declared `json`, or a `let x: json = …` local). On non-json receivers,
+`.set()` etc. fall through to the regular method-dispatch path, so a
+user `pub type Counter { fn set(...) }` still routes calls to the
+user's method.
+
+**Methods we deliberately didn't include:**
+- `.merge(other)` — Oracle's `JSON_TRANSFORM` doesn't have a merge
+  operation; needs `JSON_MERGEPATCH` which would break the
+  single-call collapse. Use `json::object(a = j1, b = j2)` for now,
+  or wait for a v2.
+- `.get(path)` — read access stays explicit via `json::get_text(j,
+  "$.path")` etc. to keep the read/write surface visibly distinct.
+
 **Things deliberately NOT surfaced in v1:**
 
 - **`j["key"]` indexer sugar** — pell has no indexer overloading;

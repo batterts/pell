@@ -71,3 +71,47 @@ pub fn parse_json(s: text) -> json {
 pub fn to_text(j: json) -> text {
     return json::stringify(j);
 }
+
+// ---------------------------------------------------------------------------
+// Fluent dot-chain construction — `j.set(path, value).set(...).remove(...)
+// .append(...)`. Receiver must be json-typed; chains collapse to a single
+// JSON_TRANSFORM call. Paths use pell `"a.b.c"` notation; pell prepends
+// `$.` and Oracle resolves the rest.
+//
+// Auto-vivify: nested SET paths automatically create their intermediate
+// objects via `SET '$.<prefix>' = JSON_OBJECT() CREATE ON MISSING`. Common
+// prefixes are deduplicated within a single chain.
+//
+// Note: the chain lowers as `SELECT JSON_TRANSFORM(...) INTO target FROM
+// dual;` rather than a bare PL/SQL assignment, because JSON_TRANSFORM's
+// SET keyword is SQL-only in current Oracle versions.
+// ---------------------------------------------------------------------------
+
+// Simple flat object.
+pub fn build_simple() -> json {
+    let j: json = json::object()
+        .set("name", "Alice")
+        .set("age", 30)
+        .set("status", "active");
+    return j;
+}
+
+// Nested with auto-vivify — `user`, `user.address` get created automatically.
+pub fn build_nested() -> json {
+    let j: json = json::object()
+        .set("user.name", "Bob")
+        .set("user.email", "bob@example.com")
+        .set("user.address.city", "NYC")
+        .set("user.address.zip", "10001")
+        .set("meta.created", "today");
+    return j;
+}
+
+// Modify an incoming JSON value — mix of set / remove / append.
+pub fn modify(input: json) -> json {
+    let j: json = input
+        .set("updated_at", "yes")
+        .remove("draft")
+        .append("history", "edited");
+    return j;
+}

@@ -884,6 +884,94 @@ def test_pipelined_parallel_order_and_cluster_conflict_errors():
         """)
 
 
+def test_json_chain_simple_set_collapses_to_single_transform():
+    sql = compile_to_sql("""
+        module m;
+        pub fn build() -> json {
+            let j: json = json::object()
+                .set("name", "Alice")
+                .set("age", 30);
+            return j;
+        }
+    """)
+    assert "SELECT JSON_TRANSFORM(JSON_OBJECT(" in sql
+    assert "SET '$.name' = 'Alice' CREATE ON MISSING" in sql
+    assert "SET '$.age' = 30 CREATE ON MISSING" in sql
+    assert ") INTO l_j FROM dual;" in sql
+
+
+def test_json_chain_autovivifies_intermediate_paths():
+    sql = compile_to_sql("""
+        module m;
+        pub fn build() -> json {
+            let j: json = json::object()
+                .set("user.name", "Bob")
+                .set("user.address.city", "NYC");
+            return j;
+        }
+    """)
+    # `user` and `user.address` get auto-create SETs:
+    assert "SET '$.user' = JSON_OBJECT(RETURNING JSON) CREATE ON MISSING" in sql
+    assert "SET '$.user.address' = JSON_OBJECT(RETURNING JSON) CREATE ON MISSING" in sql
+    # leaf SETs:
+    assert "SET '$.user.name' = 'Bob'" in sql
+    assert "SET '$.user.address.city' = 'NYC'" in sql
+
+
+def test_json_chain_dedupes_intermediate_creates():
+    """Two SETs with the same prefix share one autovivify SET."""
+    sql = compile_to_sql("""
+        module m;
+        pub fn f() -> json {
+            let j: json = json::object()
+                .set("u.a", 1)
+                .set("u.b", 2);
+            return j;
+        }
+    """)
+    assert sql.count("SET '$.u' = JSON_OBJECT(RETURNING JSON) CREATE ON MISSING") == 1
+
+
+def test_json_chain_remove_and_append():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(j: json) -> json {
+            let r: json = j.remove("draft").append("history", "edited");
+            return r;
+        }
+    """)
+    assert "REMOVE '$.draft'" in sql
+    assert "APPEND '$.history' = 'edited'" in sql
+
+
+def test_json_chain_on_non_json_falls_through():
+    """When the receiver isn't json-typed, .set() reverts to a regular method
+    dispatch (so user-defined `.set()` on other types still works)."""
+    sql = compile_to_sql("""
+        module m;
+        pub type Counter {
+            n: number;
+            fn set(value: number) { self.n = value; }
+        }
+        pub fn f(c: Counter) { c.set(5); }
+    """)
+    assert "p_c.set(5)" in sql       # dispatch hit the user's method
+    assert "JSON_TRANSFORM" not in sql
+
+
+def test_json_chain_runtime_path_errors():
+    """Path must be a string literal — runtime paths are rejected at compile time."""
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql("""
+            module m;
+            pub fn f(p: text) -> json {
+                let j: json = json::object().set(p, "x");
+                return j;
+            }
+        """)
+
+
 def test_json_object_kwargs_become_json_object():
     sql = compile_to_sql("""
         module m;

@@ -1377,6 +1377,13 @@ class Emitter:
         """Emit one or more PL/SQL statements that assign `expr` to `target`."""
         if isinstance(expr, A.PipelineExpr):
             expr = self._reduce_pipeline(expr)
+        # JSON dot-chain — `j.set(...).set(...).remove(...)` on a json-typed
+        # receiver collapses to a single JSON_TRANSFORM. Must lower as
+        # `SELECT ... INTO target FROM dual` because JSON_TRANSFORM's `SET`
+        # keyword is SQL-only and the PL/SQL parser doesn't accept it.
+        chain = self._maybe_emit_json_chain(target, expr, indent)
+        if chain is not None:
+            return chain
         # `exec_dyn(<sql_string>)` (optionally wrapped in `?`) → EXECUTE
         # IMMEDIATE … INTO target USING … . Only legal inside an unsafe fn.
         inner_for_dyn = expr.inner if isinstance(expr, A.QuestionMark) else expr
@@ -1698,6 +1705,151 @@ class Emitter:
             # nested records require manual unpacking.
             return f"JSON_QUERY({src}, {path})"
         return f"JSON_VALUE({src}, {path})"
+
+    # The four methods that participate in a JSON dot-chain.
+    _JSON_CHAIN_METHODS = {"set", "remove", "append"}
+
+    def _is_json_typed(self, e: A.Expr) -> bool:
+        """Best-effort: is `e` a json-typed expression?
+
+        Recognizes json::* constructors, .set/.remove/.append chains on
+        json bases, and Idents whose declared type is `json` (parameters
+        or annotated locals). Conservative: returns False on ambiguity, in
+        which case the .set/.remove/.append call falls through to the
+        regular method dispatch.
+        """
+        if isinstance(e, A.Call):
+            if isinstance(e.callee, A.Ident) and e.callee.name in (
+                "json::object", "json::array", "json::parse",
+                "json::from", "json::get_json",
+            ):
+                return True
+            if (isinstance(e.callee, A.MemberAccess)
+                    and e.callee.field in self._JSON_CHAIN_METHODS):
+                return self._is_json_typed(e.callee.obj)
+        if isinstance(e, A.Ident):
+            # fn parameter typed json
+            if self._current_fn is not None:
+                for p in self._current_fn.params:
+                    if (p.name == e.name
+                            and isinstance(p.type_ref, A.PrimType)
+                            and p.type_ref.name == "json"):
+                        return True
+            # let-local typed JSON via _local_types
+            if self._local_types.get(e.name) == "JSON":
+                return True
+        return False
+
+    def _collect_json_chain(self, e: A.Call) -> tuple[A.Expr, list[tuple[str, list[A.Expr], A.Loc]]]:
+        """Walk a `.set/.remove/.append` chain outward-to-inward; return the
+        innermost base expression plus the ops in *source* order."""
+        ops: list[tuple[str, list[A.Expr], A.Loc]] = []
+        cur: A.Expr = e
+        while (isinstance(cur, A.Call)
+               and isinstance(cur.callee, A.MemberAccess)
+               and cur.callee.field in self._JSON_CHAIN_METHODS):
+            ops.append((cur.callee.field, cur.args, cur.loc))
+            cur = cur.callee.obj
+        ops.reverse()    # restore source order
+        return cur, ops
+
+    def _maybe_emit_json_chain(self, target: str, expr: A.Expr,
+                               indent: str) -> Optional[list[str]]:
+        """If `expr` is a json dot-chain whose base is json-typed, emit a
+        `SELECT JSON_TRANSFORM(base, ops...) INTO target FROM dual;`
+        statement. Returns None otherwise.
+        """
+        if not isinstance(expr, A.Call):
+            return None
+        if not (isinstance(expr.callee, A.MemberAccess)
+                and expr.callee.field in self._JSON_CHAIN_METHODS):
+            return None
+        base, ops = self._collect_json_chain(expr)
+        if not self._is_json_typed(base):
+            return None
+        base_sql = self._emit_expr(base)
+        op_sqls = self._emit_json_chain_ops(ops)
+        if not op_sqls:
+            return None
+        return [
+            f"{indent}SELECT JSON_TRANSFORM({base_sql},",
+            *(f"{indent}  {op_sql}{',' if i < len(op_sqls) - 1 else ''}"
+              for i, op_sql in enumerate(op_sqls)),
+            f"{indent}) INTO {target} FROM dual;",
+        ]
+
+    def _emit_json_chain_ops(
+        self, ops: list[tuple[str, list[A.Expr], A.Loc]],
+    ) -> list[str]:
+        """Render the chain ops as JSON_TRANSFORM operation strings.
+
+        SET ops with multi-level paths get expanded with auto-vivify SETs
+        first — Oracle's JSON_TRANSFORM doesn't create intermediate object
+        nodes automatically, so for `.set("a.b.c", v)` we emit:
+            SET '$.a'     = JSON_OBJECT() CREATE ON MISSING,
+            SET '$.a.b'   = JSON_OBJECT() CREATE ON MISSING,
+            SET '$.a.b.c' = v CREATE ON MISSING
+        """
+        op_sqls: list[str] = []
+        seen_vivified: set[str] = set()
+        for method, args, loc in ops:
+            if method == "set":
+                if len(args) != 2:
+                    raise EmitError(
+                        f"json .set() takes (path, value), got {len(args)} args",
+                        loc,
+                    )
+                path_text = self._json_chain_path_text(args[0], loc)
+                # Auto-vivify intermediate object parents (only for dotted
+                # paths, not for array indices like `xs[0]`).
+                if "." in path_text and "[" not in path_text:
+                    parts = path_text.split(".")
+                    accum: list[str] = []
+                    for p in parts[:-1]:
+                        accum.append(p)
+                        prefix = ".".join(accum)
+                        if prefix in seen_vivified:
+                            continue
+                        seen_vivified.add(prefix)
+                        op_sqls.append(
+                            f"SET {_sql_string('$.' + prefix)} = "
+                            f"JSON_OBJECT(RETURNING JSON) CREATE ON MISSING"
+                        )
+                val_sql = self._emit_expr(args[1])
+                op_sqls.append(
+                    f"SET {_sql_string('$.' + path_text)} = {val_sql} CREATE ON MISSING"
+                )
+            elif method == "remove":
+                if len(args) != 1:
+                    raise EmitError(
+                        f"json .remove() takes (path), got {len(args)} args",
+                        loc,
+                    )
+                path_text = self._json_chain_path_text(args[0], loc)
+                op_sqls.append(f"REMOVE {_sql_string('$.' + path_text)}")
+            elif method == "append":
+                if len(args) != 2:
+                    raise EmitError(
+                        f"json .append() takes (path, value), got {len(args)} args",
+                        loc,
+                    )
+                path_text = self._json_chain_path_text(args[0], loc)
+                val_sql = self._emit_expr(args[1])
+                op_sqls.append(
+                    f"APPEND {_sql_string('$.' + path_text)} = {val_sql}"
+                )
+        return op_sqls
+
+    def _json_chain_path_text(self, expr: A.Expr, loc: A.Loc) -> str:
+        """Path arg must be a string literal — JSON_TRANSFORM path expressions
+        are compile-time SQL strings in 23ai."""
+        if isinstance(expr, A.TextLit):
+            return expr.value
+        raise EmitError(
+            "json chain path must be a string literal — Oracle's "
+            "JSON_TRANSFORM path is parsed at compile time, not runtime",
+            loc,
+        )
 
     def _emit_json_helper(self, call: A.Call) -> Optional[str]:
         """Lower `json::<helper>(...)` calls. Returns the PL/SQL expression
