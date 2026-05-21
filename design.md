@@ -2318,6 +2318,78 @@ declaration feeds both the dependency manifest and the
 `pell_dep_pinning` cursor declarations so Oracle's `ALL_DEPENDENCIES`
 sees the reference even though the runtime SQL is opaque.
 
+### 7.0.5 `json` type — Oracle JSON interop
+
+Pell's `json` primitive type lowers to Oracle's native JSON datatype on
+23ai (and to `VARCHAR2(32767)` on 19c — same surface, slightly different
+storage). The user-facing surface is a small `json::*` namespace that
+maps 1:1 to Oracle's `JSON_*` functions, plus record interop in both
+directions.
+
+| Pell | Lowers to (23ai) |
+|---|---|
+| `json::object(k = v, …)` | `JSON_OBJECT('k' VALUE v, … RETURNING JSON)` |
+| `json::array([v, …])` | `JSON_ARRAY(v, … RETURNING JSON)` |
+| `json::get_text(j, "$.path")` | `JSON_VALUE(j, '$.path')` |
+| `json::get_number(j, "$.path")` | `JSON_VALUE(j, '$.path' RETURNING NUMBER)` |
+| `json::get_json(j, "$.path")` | `JSON_QUERY(j, '$.path')` |
+| `json::has(j, "$.path")` | `JSON_EXISTS(j, '$.path')` |
+| `json::parse(text)` | `JSON(text)` |
+| `json::stringify(j)` | `JSON_SERIALIZE(j)` |
+| `json::from(record_var)` | per-field `JSON_OBJECT('field' VALUE v.field, …)` |
+| `json::into::<Record>(j)` | per-field assignment, each via `JSON_VALUE` or `JSON_QUERY` |
+
+**Missing paths** return NULL per Oracle's `JSON_VALUE` default. Wrap in
+`nvl()` when absence is a domain concern; don't try to force `Option<T>`
+on every path access — JSON itself is loose-typed at the field level,
+and pretending otherwise creates more ceremony than safety.
+
+**`json::from(record_var)`** resolves the record type from the
+identifier's declared shape (typically a fn parameter typed as a
+`record`). For a `pub record User { name: text, age: number }`, the
+emission is:
+
+```sql
+JSON_OBJECT('name' VALUE p_u.name, 'age' VALUE p_u.age RETURNING JSON)
+```
+
+**`json::into::<Record>(j)`** is a *multi-statement* lowering: one
+field-assignment per record field, each pulling its value through the
+right `JSON_*` function for its type. Numbers get `JSON_VALUE … RETURNING
+NUMBER`, nested `json` fields get `JSON_QUERY`, everything else (text,
+date, bool) takes default `JSON_VALUE`:
+
+```sql
+l_u.name := JSON_VALUE(p_j, '$.name');
+l_u.age  := JSON_VALUE(p_j, '$.age' RETURNING NUMBER);
+```
+
+**Pell does NOT yet** synthesize a record literal from JSON in
+expression position — `json::into` requires a `let target: Rec = …`
+binding so the multi-statement emission has a target. The same record
+constructor limitation that means you can't write `let u: User = User
+{ name: …, age: … }` from scratch applies here too. Pell records are
+populated from a *source* (SELECT INTO, JSON_VALUE, etc.) — building
+them inline from literals is a future-work item.
+
+**JSON aggregates inside `sql!{}`** (`json_objectagg`,
+`json_arrayagg`, `json_table`) work via pass-through — they're SQL-only
+operators, callable from inside a `sql!{}` block but not from PL/SQL
+expressions. No special pell surface needed.
+
+**Things deliberately NOT surfaced in v1:**
+
+- **`j["key"]` indexer sugar** — pell has no indexer overloading;
+  adding it for json only would be a one-off and ambiguous against
+  list indexing.
+- **Dot-notation `j.name`** — works in Oracle SQL contexts but PL/SQL
+  support is uneven across versions; explicit `json::get_text(j, "$.name")`
+  is the portable form.
+- **JSON Schema validation** — 23ai supports `IS JSON VALIDATING`
+  constraints; offer later via `@schema(...)` annotation on records.
+- **JSON Relational Duality** — a database-design feature, not a
+  language one.
+
 ### 7.1 External sequences — `pub seq name;`
 
 Oracle sequences are use-site references in pell; the language doesn't own

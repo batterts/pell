@@ -884,6 +884,82 @@ def test_pipelined_parallel_order_and_cluster_conflict_errors():
         """)
 
 
+def test_json_object_kwargs_become_json_object():
+    sql = compile_to_sql("""
+        module m;
+        pub fn make() -> json {
+            return json::object(name = "Alice", age = 30, role = "admin");
+        }
+    """)
+    assert "JSON_OBJECT('name' VALUE 'Alice', 'age' VALUE 30, 'role' VALUE 'admin' RETURNING JSON)" in sql
+
+
+def test_json_array_lowers_to_json_array():
+    sql = compile_to_sql("""
+        module m;
+        pub fn xs() -> json { return json::array([1, 2, 3]); }
+    """)
+    assert "JSON_ARRAY(1, 2, 3 RETURNING JSON)" in sql
+
+
+def test_json_path_access_helpers():
+    sql = compile_to_sql("""
+        module m;
+        pub fn t(j: json) -> text { return json::get_text(j, "$.name"); }
+        pub fn n(j: json) -> number { return json::get_number(j, "$.age"); }
+        pub fn q(j: json) -> json { return json::get_json(j, "$.addr"); }
+        pub fn h(j: json) -> bool { return json::has(j, "$.email"); }
+    """)
+    assert "JSON_VALUE(p_j, '$.name')" in sql
+    assert "JSON_VALUE(p_j, '$.age' RETURNING NUMBER)" in sql
+    assert "JSON_QUERY(p_j, '$.addr')" in sql
+    assert "JSON_EXISTS(p_j, '$.email')" in sql
+
+
+def test_json_parse_and_stringify():
+    sql = compile_to_sql("""
+        module m;
+        pub fn p(s: text) -> json { return json::parse(s); }
+        pub fn s(j: json) -> text { return json::stringify(j); }
+    """)
+    assert "JSON(p_s)" in sql
+    assert "JSON_SERIALIZE(p_j)" in sql
+
+
+def test_json_from_record_emits_json_object():
+    sql = compile_to_sql("""
+        module m;
+        pub record User { name: text, age: number }
+        pub fn pack(u: User) -> json { return json::from(u); }
+    """)
+    assert "JSON_OBJECT('name' VALUE p_u.name, 'age' VALUE p_u.age RETURNING JSON)" in sql
+
+
+def test_json_into_emits_field_by_field_extraction():
+    sql = compile_to_sql("""
+        module m;
+        pub record User { name: text, age: number }
+        pub fn unpack(j: json) -> text {
+            let u: User = json::into::<User>(j);
+            return u.name;
+        }
+    """)
+    assert "l_u.name := JSON_VALUE(p_j, '$.name');" in sql
+    assert "l_u.age := JSON_VALUE(p_j, '$.age' RETURNING NUMBER);" in sql
+
+
+def test_json_into_unknown_record_errors():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql("""
+            module m;
+            pub fn f(j: json) -> text {
+                let u: NotARecord = json::into::<NotARecord>(j);
+                return "x";
+            }
+        """)
+
+
 def test_call_kwargs_parse_in_position():
     """`fn(name = value, other = expr)` parses as Call with kwargs."""
     from pell.parser import parse

@@ -1009,7 +1009,11 @@ class Parser:
             loc = cur.loc
             parts = [cur.value]
             self.pos += 1
-            while self._eat("COLONCOLON"):
+            # Greedy `::` qualification, but stop at `::<` — that's a
+            # turbofish (type args) handled by the postfix parser.
+            while (self._at("COLONCOLON")
+                   and self._peek(1).kind != "LT"):
+                self._eat("COLONCOLON")
                 parts.append(self._expect("IDENT").value)
             name = "::".join(parts)
             # struct literal? `Name { field: expr, ... }`

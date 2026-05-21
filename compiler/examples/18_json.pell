@@ -1,0 +1,73 @@
+module json_demo;
+
+// ---------------------------------------------------------------------------
+// pell `json` type interop with Oracle 23ai's native JSON datatype.
+//
+// Surface:
+//   json::object(k = v, ...)         → JSON_OBJECT(...) RETURNING JSON
+//   json::array([v, ...])            → JSON_ARRAY(...) RETURNING JSON
+//   json::get_text(j, "$.path")      → JSON_VALUE(...)        // text
+//   json::get_number(j, "$.path")    → JSON_VALUE(... RETURNING NUMBER)
+//   json::get_json(j, "$.path")      → JSON_QUERY(...)        // nested
+//   json::has(j, "$.path")           → JSON_EXISTS(...)       // bool
+//   json::parse(text)                → JSON(text)             // text → json
+//   json::stringify(j)               → JSON_SERIALIZE(j)      // json → text
+//   json::from(record_var)           → field-by-field JSON_OBJECT
+//   json::into::<Record>(j)          → field-by-field JSON_VALUE/JSON_QUERY
+//
+// Missing paths return NULL per Oracle's JSON_VALUE default — wrap in nvl()
+// when the caller cares about absence.
+// ---------------------------------------------------------------------------
+
+pub record User {
+    name: text,
+    age: number,
+}
+
+// Record → JSON.
+pub fn pack(u: User) -> json {
+    return json::from(u);
+}
+
+// JSON → record (field-by-field; missing paths leave NULLs).
+pub fn unpack_name(j: json) -> text {
+    let u: User = json::into::<User>(j);
+    return u.name;
+}
+
+// Ad-hoc object construction with kwargs.
+pub fn audit_event(action: text, who: text) -> json {
+    return json::object(
+        action = action,
+        who    = who,
+        ts     = sysdate(),
+    );
+}
+
+// Array literal.
+pub fn list_things(a: number, b: number, c: number) -> json {
+    return json::array([a, b, c]);
+}
+
+// Path extraction — text and number variants.
+pub fn extract_text(j: json, path: text) -> text {
+    return json::get_text(j, path);
+}
+
+pub fn extract_number(j: json, path: text) -> number {
+    return json::get_number(j, path);
+}
+
+// JSON_EXISTS shortcut.
+pub fn has_path(j: json, path: text) -> bool {
+    return json::has(j, path);
+}
+
+// Parse / serialize.
+pub fn parse_json(s: text) -> json {
+    return json::parse(s);
+}
+
+pub fn to_text(j: json) -> text {
+    return json::stringify(j);
+}

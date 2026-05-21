@@ -1384,6 +1384,13 @@ class Emitter:
                 and isinstance(inner_for_dyn.callee, A.Ident)
                 and inner_for_dyn.callee.name == "exec_dyn"):
             return self._emit_exec_dyn(target, inner_for_dyn, indent)
+        # `json::into::<Record>(j_expr)` — multi-statement field-by-field
+        # population of `target` from a JSON value via JSON_VALUE / JSON_QUERY.
+        if (isinstance(inner_for_dyn, A.Call)
+                and isinstance(inner_for_dyn.callee, A.Ident)
+                and inner_for_dyn.callee.name == "json::into"
+                and inner_for_dyn.type_args):
+            return self._emit_json_into(target, inner_for_dyn, indent)
         if isinstance(expr, A.QuestionMark):
             inner = expr.inner
             if isinstance(inner, A.Call):
@@ -1424,6 +1431,17 @@ class Emitter:
         return None
 
     def _infer_call_type(self, call: A.Call) -> Optional[str]:
+        # json::* helpers — type by name (no fallthrough to free-fn lookup).
+        if isinstance(call.callee, A.Ident) and call.callee.name.startswith("json::"):
+            n = call.callee.name[len("json::"):]
+            if n in ("object", "array", "parse", "get_json", "from"):
+                return "JSON"
+            if n == "get_text" or n == "stringify":
+                return "VARCHAR2(4000)"
+            if n == "get_number":
+                return "NUMBER"
+            if n == "has":
+                return "BOOLEAN"
         # .one() / .first() / .one_or_none() on a sql!{} (possibly wrapped in lock modifiers)
         if isinstance(call.callee, A.MemberAccess):
             method = call.callee.field
@@ -1604,6 +1622,229 @@ class Emitter:
             f"{indent}OPEN l_pell_pivot_cur FOR l_pell_pivot_sql;",
             f"{indent}RETURN l_pell_pivot_cur;",
         ]
+
+    def _emit_json_into(self, target: str, call: A.Call, indent: str) -> list[str]:
+        """`json::into::<RecordName>(j_expr)` → one assignment per record field,
+        each pulling its value out of the JSON with the appropriate accessor:
+
+            target.text_field   := JSON_VALUE (j, '$.text_field');
+            target.num_field    := JSON_VALUE (j, '$.num_field' RETURNING NUMBER);
+            target.nested_field := JSON_QUERY (j, '$.nested_field');
+
+        Missing paths produce NULL per Oracle's JSON_VALUE default.
+        """
+        if len(call.args) != 1:
+            raise EmitError(
+                "json::into takes one json value: json::into::<T>(j_expr)",
+                call.loc,
+            )
+        if len(call.type_args) != 1:
+            raise EmitError(
+                "json::into needs a single record type argument: "
+                "json::into::<RecordName>(j)",
+                call.loc,
+            )
+        type_ref = call.type_args[0]
+        if not isinstance(type_ref, A.NamedType):
+            raise EmitError(
+                "json::into::<T>: T must be a record type", call.loc,
+            )
+        rec = next((r for r in self._records if r.name == type_ref.name), None)
+        if rec is None:
+            raise EmitError(
+                f"json::into::<{type_ref.name}>: record {type_ref.name!r} "
+                "not declared in this module",
+                call.loc,
+            )
+        # The json source expression is evaluated potentially many times if
+        # the record has many fields. For an Ident that's cheap; for a
+        # nested call we hoist it into a temp.
+        src_expr = call.args[0]
+        if isinstance(src_expr, A.Ident):
+            src_code = self._emit_expr(src_expr)
+        else:
+            # Hoist: declare a temp local, assign once, then reference.
+            tmp = f"l_pell_json_src_{self._sql_var_counter}"
+            self._sql_var_counter += 1
+            self._decl(f"{tmp} JSON;")
+            return [
+                f"{indent}{tmp} := {self._emit_expr(src_expr)};",
+                *self._emit_json_into_assignments(target, tmp, rec, indent),
+            ]
+        return self._emit_json_into_assignments(target, src_code, rec, indent)
+
+    def _emit_json_into_assignments(self, target: str, src: str,
+                                     rec: A.RecordDef, indent: str) -> list[str]:
+        out: list[str] = []
+        for f in rec.fields:
+            accessor = self._json_field_accessor(src, f)
+            out.append(f"{indent}{target}.{f.name.lower()} := {accessor};")
+        return out
+
+    def _json_field_accessor(self, src: str, f: A.FieldDef) -> str:
+        """Pick the right JSON_* function for a field type."""
+        t = f.type_ref
+        path = _sql_string(f"$.{f.name}")
+        if isinstance(t, A.PrimType):
+            if t.name == "number" or t.name == "int":
+                return f"JSON_VALUE({src}, {path} RETURNING NUMBER)"
+            if t.name == "json":
+                return f"JSON_QUERY({src}, {path})"
+            # text / bool / date / etc. all come back as VARCHAR2-ish via JSON_VALUE
+            return f"JSON_VALUE({src}, {path})"
+        if isinstance(t, A.NamedType):
+            # Record-typed field — pell can't reconstruct a nested record
+            # inline from JSON_QUERY (no constructor). v1 limitation:
+            # nested records require manual unpacking.
+            return f"JSON_QUERY({src}, {path})"
+        return f"JSON_VALUE({src}, {path})"
+
+    def _emit_json_helper(self, call: A.Call) -> Optional[str]:
+        """Lower `json::<helper>(...)` calls. Returns the PL/SQL expression
+        text, or None when this isn't a recognized helper (caller falls
+        through to the default `pkg.fn(args)` lowering).
+
+        `json::from(record_var)` and `json::object(k = v)` use the record /
+        kwargs to build a `JSON_OBJECT('k' VALUE v, ...)` literal. Missing
+        path access (`json::get_text`, `json::get_number`, `json::get_json`)
+        passes through Oracle's NULL-on-missing default.
+        """
+        name = call.callee.name[len("json::"):]   # after the prefix
+        emit = self._emit_expr
+
+        # --- construction ----------------------------------------------
+        # On 23+ we ask JSON_OBJECT / JSON_ARRAY to return the native JSON
+        # datatype (instead of the default VARCHAR2 text). 19c keeps the
+        # default since the JSON datatype doesn't exist there.
+        ret_clause = " RETURNING JSON" if self.target == "23" else ""
+
+        if name == "object":
+            # `json::object(name = "Alice", age = 30)` → JSON_OBJECT(...)
+            if call.args:
+                raise EmitError(
+                    "json::object takes keyword arguments only — "
+                    "use `json::object(field = value, ...)`",
+                    call.loc,
+                )
+            if not call.kwargs:
+                return f"JSON_OBJECT({ret_clause.lstrip()})" if ret_clause else "JSON_OBJECT()"
+            parts = ", ".join(
+                f"{_sql_string(k)} VALUE {emit(v)}"
+                for k, v in call.kwargs.items()
+            )
+            return f"JSON_OBJECT({parts}{ret_clause})"
+
+        if name == "array":
+            # `json::array([a, b, c])` → JSON_ARRAY(a, b, c)
+            if (len(call.args) != 1
+                    or not isinstance(call.args[0], A.ListLit)):
+                raise EmitError(
+                    "json::array takes a single list literal argument: "
+                    "`json::array([a, b, c])`",
+                    call.loc,
+                )
+            els = call.args[0].elements
+            if not els:
+                return f"JSON_ARRAY({ret_clause.lstrip()})" if ret_clause else "JSON_ARRAY()"
+            return f"JSON_ARRAY({', '.join(emit(e) for e in els)}{ret_clause})"
+
+        # --- path access -----------------------------------------------
+        if name == "get_text":
+            self._check_json_get_args(call, name)
+            return f"JSON_VALUE({emit(call.args[0])}, {emit(call.args[1])})"
+
+        if name == "get_number":
+            self._check_json_get_args(call, name)
+            return (
+                f"JSON_VALUE({emit(call.args[0])}, "
+                f"{emit(call.args[1])} RETURNING NUMBER)"
+            )
+
+        if name == "get_json":
+            self._check_json_get_args(call, name)
+            return f"JSON_QUERY({emit(call.args[0])}, {emit(call.args[1])})"
+
+        if name == "has":
+            self._check_json_get_args(call, name)
+            return f"JSON_EXISTS({emit(call.args[0])}, {emit(call.args[1])})"
+
+        # --- parse / stringify -----------------------------------------
+        if name == "parse":
+            if len(call.args) != 1:
+                raise EmitError("json::parse takes exactly 1 text argument", call.loc)
+            return f"JSON({emit(call.args[0])})"
+
+        if name == "stringify":
+            if len(call.args) != 1:
+                raise EmitError("json::stringify takes exactly 1 json argument", call.loc)
+            return f"JSON_SERIALIZE({emit(call.args[0])})"
+
+        # --- record → json ---------------------------------------------
+        if name == "from":
+            if len(call.args) != 1 or not isinstance(call.args[0], A.Ident):
+                raise EmitError(
+                    "json::from(<record_var>): argument must be a bare "
+                    "identifier referencing a typed record local or parameter",
+                    call.loc,
+                )
+            return self._emit_json_from_record(call.args[0], call.loc)
+
+        return None  # unknown helper — let caller fall through
+
+    def _check_json_get_args(self, call: A.Call, name: str) -> None:
+        if len(call.args) != 2:
+            raise EmitError(
+                f"json::{name} takes (json_value, '$.path') — got {len(call.args)} args",
+                call.loc,
+            )
+
+    def _emit_json_from_record(self, ident: A.Ident, loc: A.Loc) -> str:
+        """Resolve the named identifier's record type and emit a
+        `JSON_OBJECT(field1 VALUE recv.field1, ...)` literal."""
+        # Where does the record type live? Three places to look:
+        #   - current fn params (typed as NamedType referring to a record)
+        #   - in-scope let locals (we track these in _local_types)
+        # For v1 we only handle the fn-param case cleanly; let-locals
+        # only carry the lowered PL/SQL type string, not the pell type,
+        # so we'd need to thread record info through there. Punt with a
+        # clear error if we can't resolve.
+        rec_name: Optional[str] = None
+        if self._current_fn is not None:
+            for p in self._current_fn.params:
+                if p.name == ident.name and isinstance(p.type_ref, A.NamedType):
+                    rec_name = p.type_ref.name
+                    break
+        if rec_name is None:
+            # Try the local-types map — it has PL/SQL type strings of the
+            # form `t_<rec_name>`. Reverse-engineer the pell name.
+            pl_type = self._local_types.get(ident.name)
+            if pl_type is not None and pl_type.startswith("t_"):
+                candidate = pl_type[2:]
+                for rec in self._records:
+                    if rec.name.lower() == candidate:
+                        rec_name = rec.name
+                        break
+        if rec_name is None:
+            raise EmitError(
+                f"json::from({ident.name}): can't resolve a record type for "
+                f"`{ident.name}`. Annotate the local with `let {ident.name}: "
+                "<RecordName> = …` so pell knows the shape.",
+                loc,
+            )
+        rec = next((r for r in self._records if r.name == rec_name), None)
+        if rec is None:
+            raise EmitError(
+                f"json::from({ident.name}): record type {rec_name!r} not "
+                "declared in this module",
+                loc,
+            )
+        recv = self._lower_ident(ident.name)
+        parts = ", ".join(
+            f"{_sql_string(f.name)} VALUE {recv}.{f.name.lower()}"
+            for f in rec.fields
+        )
+        ret_clause = " RETURNING JSON" if self.target == "23" else ""
+        return f"JSON_OBJECT({parts}{ret_clause})"
 
     def _lower_typed_pivot(self, call: A.Call) -> A.SqlBlock:
         """Lower `pivot::sum(source=sql!{...}, rows=col, col=col, over=Enum, value=col)`
@@ -2618,6 +2859,15 @@ class Emitter:
         return "(" + " || ".join(chunks) + ")"
 
     def _emit_call_expr(self, e: A.Call) -> str:
+        # JSON helper namespace — `json::object`, `json::array`, `json::get_text`,
+        # `json::get_number`, `json::get_json`, `json::has`, `json::parse`,
+        # `json::stringify`, `json::from`. (`json::into::<T>(...)?` is handled
+        # at let-statement level since it produces a multi-statement
+        # field-by-field record construction.)
+        if isinstance(e.callee, A.Ident) and e.callee.name.startswith("json::"):
+            result = self._emit_json_helper(e)
+            if result is not None:
+                return result
         # Detect simple method calls and inline them.
         if isinstance(e.callee, A.MemberAccess):
             recv = e.callee.obj
@@ -3407,10 +3657,13 @@ class Emitter:
         if "::" in name:
             parts = name.split("::")
             return ".".join(parts[:-1]).lower() + "." + parts[-1].lower()
-        if name in self._fn_names:
-            return name.lower()
+        # Parameters shadow same-named fn references — a fn's own param
+        # always wins inside its body. (Was the other way around and caused
+        # subtle aliasing when, e.g., a param `s` shadowed a sibling fn `s`.)
         if name in self._params:
             return param_name(name)
+        if name in self._fn_names:
+            return name.lower()
         # cursor FOR-loop variables are referenced bare, no prefix
         for scope in reversed(self._loop_vars):
             if name in scope:
