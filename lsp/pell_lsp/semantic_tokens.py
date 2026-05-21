@@ -205,6 +205,32 @@ class _Scanner:
                     if self.i < self.n:
                         self.advance()  # closing }
                     continue
+            # jq!{ ... } block — highlight the marker as macro; the body is
+            # left to plain text for now (we don't have a jq tokenizer yet).
+            if self.starts("jq!"):
+                j = self.i + 3
+                while j < self.n and self.src[j] in " \t":
+                    j += 1
+                if j < self.n and self.src[j] == "{":
+                    sl, sc = self.line, self.col
+                    out.append(_Tok(sl, sc, 3, _T_MACRO))
+                    self.advance(3)
+                    while self.i < self.n and self.src[self.i] in " \t":
+                        self.advance()
+                    self.advance()  # opening {
+                    depth = 1
+                    while self.i < self.n and depth > 0:
+                        c = self.src[self.i]
+                        if c == "{":
+                            depth += 1
+                        elif c == "}":
+                            depth -= 1
+                            if depth == 0:
+                                break
+                        self.advance()
+                    if self.i < self.n:
+                        self.advance()  # closing }
+                    continue
             # decorator: @name
             if ch == "@":
                 sl, sc = self.line, self.col

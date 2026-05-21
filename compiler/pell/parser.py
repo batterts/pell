@@ -977,6 +977,25 @@ class Parser:
             self.pos += 1
             binds, is_dml, has_returning = _extract_binds_and_kind(cur.value)
             return A.SqlBlock(loc=cur.loc, sql=cur.value, binds=binds, is_dml=is_dml, has_returning=has_returning)
+        if cur.kind == "JQ_BLOCK":
+            self.pos += 1
+            from .jq import parse_jq, JqParseError
+            try:
+                parsed = parse_jq(cur.value)
+            except JqParseError as e:
+                raise ParseError(f"invalid jq!{{...}}: {e}", cur.loc)
+            filters = [
+                A.JqFilter(field_path=f.field_path, op=f.op, literal=f.literal, join=f.join)
+                for f in parsed.filters
+            ]
+            return A.JqBlock(
+                loc=cur.loc,
+                text=cur.value,
+                source=parsed.source,
+                path=parsed.path,
+                filters=filters,
+                projection=parsed.projection,
+            )
         if cur.kind == "LPAREN":
             self.pos += 1
             if self._eat("RPAREN"):

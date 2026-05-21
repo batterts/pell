@@ -1,0 +1,47 @@
+module jq_demo;
+
+// ---------------------------------------------------------------------------
+// `jq!{}` macro — jq-style queries that lower to JSON_TABLE.
+//
+// Surface (subset):
+//   src | .path[]                     // iterate an array
+//   src | .path[] | select(.f == 1)   // filter
+//   src | .path[] | .field            // project a scalar
+//   select() supports: ==, !=, <, <=, >, >= and `and`/`or`
+//
+// Composes with .collect() and .one() exactly like sql!{}.
+// ---------------------------------------------------------------------------
+
+pub record User {
+    name: text,
+    age:  number,
+}
+
+// Project a scalar field — list<text>.
+pub fn adult_names(j: json) -> list<text> {
+    let names: list<text> = jq!{ j | .users[] | select(.age >= 18) | .name }
+        .collect();
+    return names;
+}
+
+// Default to iterating the top-level array — list<text>.
+pub fn first_names(j: json) -> list<text> {
+    let names: list<text> = jq!{ j | .[] | .name }.collect();
+    return names;
+}
+
+// Project into a record — list<User>.
+pub fn all_users(j: json) -> list<User> {
+    let users: list<User> = jq!{ j | .users[] }.collect();
+    return users;
+}
+
+// AND-combined filters.
+pub fn working_age(j: json) -> list<text> {
+    let names: list<text> = jq!{
+        j | .users[]
+          | select(.age >= 18 and .age <= 65)
+          | .name
+    }.collect();
+    return names;
+}

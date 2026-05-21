@@ -1502,3 +1502,98 @@ def test_unknown_callee_passes_through_as_builtin():
     """)
     assert "bitand(SELF.acc, p_v)" in sql
     assert "l_bitand" not in sql
+
+
+# ---------------------------------------------------------------------------
+# jq!{...} macro — JSON_TABLE-backed iteration
+# ---------------------------------------------------------------------------
+
+
+def test_jq_scalar_projection_lowers_to_json_table():
+    sql = compile_to_sql("""
+        module m;
+        pub fn names(j: json) -> list<text> {
+            let xs: list<text> = jq!{ j | .users[] | .name }.collect();
+            return xs;
+        }
+    """)
+    assert "JSON_TABLE(p_j, '$.users[*]'" in sql
+    assert "v VARCHAR2(4000) PATH '$.name'" in sql
+    assert "BULK COLLECT INTO l_xs" in sql
+
+
+def test_jq_select_filter_adds_where():
+    sql = compile_to_sql("""
+        module m;
+        pub fn adults(j: json) -> list<text> {
+            let xs: list<text> = jq!{ j | .users[] | select(.age >= 18) | .name }
+                .collect();
+            return xs;
+        }
+    """)
+    assert "f0 NUMBER PATH '$.age'" in sql
+    assert "WHERE jt.f0 >= 18" in sql
+
+
+def test_jq_and_or_combinator():
+    sql = compile_to_sql("""
+        module m;
+        pub fn picks(j: json) -> list<text> {
+            let xs: list<text> = jq!{
+                j | .users[] | select(.age >= 18 and .age <= 65) | .name
+            }.collect();
+            return xs;
+        }
+    """)
+    assert "AND" in sql
+    assert ">= 18" in sql and "<= 65" in sql
+
+
+def test_jq_record_projection_emits_per_field_columns():
+    sql = compile_to_sql("""
+        module m;
+        pub record User { name: text, age: number }
+        pub fn all_users(j: json) -> list<User> {
+            let xs: list<User> = jq!{ j | .users[] }.collect();
+            return xs;
+        }
+    """)
+    assert "name VARCHAR2(4000) PATH '$.name'" in sql
+    assert "age NUMBER PATH '$.age'" in sql
+    assert "jt.name, jt.age" in sql
+
+
+def test_jq_top_level_array_iterator():
+    sql = compile_to_sql("""
+        module m;
+        pub fn names(j: json) -> list<text> {
+            let xs: list<text> = jq!{ j | .[] | .name }.collect();
+            return xs;
+        }
+    """)
+    assert "JSON_TABLE(p_j, '$[*]'" in sql
+
+
+def test_jq_without_target_type_errors():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql("""
+            module m;
+            pub fn names(j: json) -> json {
+                let xs = jq!{ j | .users[] }.collect();
+                return xs;
+            }
+        """)
+
+
+def test_jq_string_literal_filter():
+    sql = compile_to_sql("""
+        module m;
+        pub fn pick(j: json) -> list<text> {
+            let xs: list<text> = jq!{ j | .users[] | select(.role == "admin") | .name }
+                .collect();
+            return xs;
+        }
+    """)
+    assert "f0 VARCHAR2(4000) PATH '$.role'" in sql
+    assert "jt.f0 = 'admin'" in sql

@@ -7,7 +7,7 @@ plain dataclasses; the parser builds them, the emitter consumes them.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 
 @dataclass(frozen=True)
@@ -198,6 +198,30 @@ class SqlBlock(Expr):
     binds: list[str] = field(default_factory=list)  # the :name binds referenced
     is_dml: bool = False  # write (insert/update/delete/merge) vs read (select)
     has_returning: bool = False
+
+
+@dataclass
+class JqBlock(Expr):
+    """jq!{ source | .path[] | select(...) | .field } — jq-style query macro.
+
+    The lexer captures the raw text; the parser invokes a dedicated jq sub-parser
+    that produces a structured pipeline. The emitter lowers it to a SqlBlock
+    backed by JSON_TABLE so it composes with .collect()/.one()/for-loops.
+    """
+    text: str  # raw text between the braces (kept for diagnostics)
+    source: str = ""  # the source identifier (left of first |)
+    path: str = ""  # JSON path expression, e.g. "$.users[*]"
+    filters: list["JqFilter"] = field(default_factory=list)  # select(...) stages
+    projection: Optional[str] = None  # final ".field" projection — a single field, if present
+
+
+@dataclass
+class JqFilter:
+    """A `select(.field op literal)` filter, possibly joined by and/or."""
+    field_path: str  # e.g. ".age" or ".user.name"
+    op: str  # one of ==, !=, <, <=, >, >=
+    literal: Any  # number or text literal
+    join: str = ""  # "", "and", "or" — how this combines with the previous filter
 
 
 @dataclass

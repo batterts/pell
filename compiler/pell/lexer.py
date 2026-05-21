@@ -107,8 +107,13 @@ class Lexer:
                 self._advance(2)
                 continue
             # `sql!{ ... }` raw block — allow optional whitespace between `sql!` and `{`
-            if self._starts_with("sql!") and self._matches_sql_block_start():
-                toks.append(self._read_sql_block())
+            if self._starts_with("sql!") and self._matches_macro_block_start("sql!"):
+                toks.append(self._read_macro_block("sql!", "SQL_BLOCK"))
+                continue
+            # `jq!{ ... }` raw block — same shape; lexer just captures the text,
+            # the dedicated jq parser handles it at AST-time.
+            if self._starts_with("jq!") and self._matches_macro_block_start("jq!"):
+                toks.append(self._read_macro_block("jq!", "JQ_BLOCK"))
                 continue
             # identifiers / keywords
             if ch.isalpha() or ch == "_":
@@ -183,22 +188,24 @@ class Lexer:
         return Token("STRING", "".join(out), loc)
 
     def _matches_sql_block_start(self) -> bool:
-        """Check if `sql!` (already known) is followed by optional whitespace then `{`."""
-        i = self.pos + len("sql!")
+        return self._matches_macro_block_start("sql!")
+
+    def _matches_macro_block_start(self, prefix: str) -> bool:
+        """Check if `<prefix>` (already known) is followed by optional whitespace then `{`."""
+        i = self.pos + len(prefix)
         while i < len(self.src) and self.src[i] in " \t\r\n":
             i += 1
         return i < len(self.src) and self.src[i] == "{"
 
-    def _read_sql_block(self) -> Token:
-        """Read a `sql!{ ... }` raw block.
+    def _read_macro_block(self, prefix: str, token_kind: str) -> Token:
+        """Read a `<prefix>{ ... }` raw block. Used for `sql!{ ... }`
+        (token_kind SQL_BLOCK) and `jq!{ ... }` (token_kind JQ_BLOCK).
 
-        Tracks brace depth so braces inside SQL string literals (single or
-        double quoted) and `q'[...]'` quoted literals don't break out
-        prematurely.
+        Tracks brace depth so braces inside SQL string literals don't break
+        out prematurely.
         """
         loc = self._loc()
-        self._advance(len("sql!"))
-        # skip whitespace between sql! and {
+        self._advance(len(prefix))
         while self.pos < len(self.src) and self._peek() in " \t\r\n":
             self._advance()
         self._advance(1)  # consume the {
@@ -216,7 +223,6 @@ class Lexer:
                     break
                 self._advance()
                 continue
-            # SQL single-quoted string
             if ch == "'":
                 self._advance()
                 while self.pos < len(self.src) and self._peek() != "'":
@@ -226,7 +232,6 @@ class Lexer:
                 if self.pos < len(self.src):
                     self._advance()
                 continue
-            # SQL double-quoted identifier
             if ch == '"':
                 self._advance()
                 while self.pos < len(self.src) and self._peek() != '"':
@@ -234,17 +239,16 @@ class Lexer:
                 if self.pos < len(self.src):
                     self._advance()
                 continue
-            # SQL line comment
             if self._starts_with("--"):
                 while self.pos < len(self.src) and self._peek() != "\n":
                     self._advance()
                 continue
             self._advance()
         if self.pos >= len(self.src):
-            raise LexError("unterminated sql!{ ... } block", loc)
-        sql_text = self.src[start : self.pos]
+            raise LexError(f"unterminated {prefix}{{ ... }} block", loc)
+        text = self.src[start : self.pos]
         self._advance()  # consume the closing }
-        return Token("SQL_BLOCK", sql_text, loc)
+        return Token(token_kind, text, loc)
 
 
 # ---------------------------------------------------------------------------

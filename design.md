@@ -2452,6 +2452,86 @@ user's method.
 - **JSON Relational Duality** — a database-design feature, not a
   language one.
 
+### 7.0.6 `jq!{}` macro — jq-style JSON queries
+
+JSON construction has the dot-chain builder (§7.0.5); JSON *querying* gets
+the `jq!{}` macro. It accepts a small but practical subset of jq's surface
+syntax and lowers to `JSON_TABLE`. The result composes with `.collect()` /
+`.one()` exactly like a `sql!{}` block.
+
+Supported grammar:
+
+```
+source | .path[]                          // iterate
+       | .path[] | select(.f op literal)  // filter
+       | .path[] | .field                 // project a scalar
+       | .[]                              // iterate the source array directly
+```
+
+`select(...)` admits comparison ops (`==`, `!=`, `<`, `<=`, `>`, `>=`)
+combined with `and` / `or`. Literals are numbers, single- or
+double-quoted strings, `true` / `false`, `null`.
+
+Examples:
+
+```pell
+// Single field across a JSON array, filtered:
+let adults: list<text> = jq!{ j | .users[] | select(.age >= 18) | .name }
+    .collect();
+
+// All records — no projection — into a typed list:
+pub record User { name: text, age: number }
+let users: list<User> = jq!{ j | .users[] }.collect();
+
+// Top-level array:
+let names: list<text> = jq!{ j | .[] | .name }.collect();
+```
+
+Lowering rules:
+
+- **Source identifier** becomes a `:bind` against the JSON variable.
+- **Path** becomes the JSON_TABLE row pattern (`'$.users[*]'`,
+  `'$[*]'`, etc.).
+- **COLUMNS clause** is shaped by the surrounding `let`'s element type:
+    - scalar `list<T>` with a trailing projection → one column `v T PATH '$.<proj>'`.
+    - record `list<Rec>` → one column per field, `<field> <T> PATH '$.<field>'`.
+- **Filter fields** that aren't already projected are added as
+  synthetic columns (`f0`, `f1`, …) typed from the comparison literal
+  (`NUMBER` for numeric literals, `VARCHAR2(4000)` for strings,
+  `NUMBER(1)` for booleans). The WHERE clause references the column
+  aliases — no nested `JSON_VALUE` calls in the predicate.
+
+Result for the first example above:
+
+```sql
+SELECT jt.v
+  BULK COLLECT INTO l_adults
+  FROM JSON_TABLE(p_j, '$.users[*]'
+    COLUMNS (v VARCHAR2(4000) PATH '$.name',
+             f0 NUMBER PATH '$.age')) jt
+  WHERE jt.f0 >= 18;
+```
+
+Requires an element-typed target — a `let` without a type annotation
+(or one whose annotation isn't `list<T>` or a record) is rejected at
+compile time. The macro deliberately doesn't try to *infer* the shape;
+the user names the target type and the COLUMNS clause is shaped from
+there.
+
+Things deliberately NOT in the subset:
+
+- Multiple iteration stages (nested `[]`) — Oracle's `JSON_TABLE` supports
+  nested COLUMNS but jq composes these very differently; out of scope for v0.
+- Computed projections (`.a + .b`, `length`, `keys`, etc.) — pell has
+  no general jq evaluator. If you need that, project the columns you
+  want and compute in pell.
+- `select()` with non-comparison predicates (`has`, `contains`, `test`)
+   — would need a per-op SQL lowering. Drop the predicate inside pell
+  with an explicit `if` instead.
+- `.[N]` indexed access — only `[]` / `[*]` are recognized.
+- `|=` / `=` mutations — `jq` is read-only here; for writes use the
+  dot-chain builder.
+
 ### 7.1 External sequences — `pub seq name;`
 
 Oracle sequences are use-site references in pell; the language doesn't own

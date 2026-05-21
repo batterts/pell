@@ -268,6 +268,11 @@ class Emitter:
         self._list_locals: dict[str, str] = {}  # name -> element type spelling
         # name → PL/SQL identifier override (used by list-loop shadows)
         self._loop_var_override: dict[str, str] = {}
+        # Element type for the *current* jq!{}-receiving target (set by the
+        # surrounding let-binding before recursing into _emit_assign_to /
+        # _emit_call_assignment, restored after). For scalar list<T>, this is T.
+        # For a record-typed target (.one()), it's the record type itself.
+        self._pending_jq_elem_type: Optional[A.TypeRef] = None
         # Schema-level CREATE TYPE statements emitted before the package
         self._schema_types: list[str] = []
         self._schema_types_emitted: set[str] = set()
@@ -1321,8 +1326,15 @@ class Emitter:
         # if value present, emit assignment
         if s.value is None:
             return []
-        # special handling if the expression is a QuestionMark on a Result-typed call
-        return self._emit_assign_to(nm, s.value, indent)
+        # If the user annotated a target type, expose it to jq!{} lowering so a
+        # `.one()` chain on a record-typed target can shape the COLUMNS clause.
+        prev_jq = self._pending_jq_elem_type
+        if s.type_annot is not None:
+            self._pending_jq_elem_type = s.type_annot
+        try:
+            return self._emit_assign_to(nm, s.value, indent)
+        finally:
+            self._pending_jq_elem_type = prev_jq
 
     def _emit_list_let_from_expr(self, s: A.LetStmt, nm: str, indent: str) -> list[str]:
         """`let xs: list<T> = <expr>;` for non-literal RHS (e.g. .collect())."""
@@ -1340,7 +1352,12 @@ class Emitter:
         self._list_locals[s.name] = elem_sql
         if s.value is None:
             return []
-        return self._emit_assign_to(nm, s.value, indent)
+        prev_jq = self._pending_jq_elem_type
+        self._pending_jq_elem_type = elem_t
+        try:
+            return self._emit_assign_to(nm, s.value, indent)
+        finally:
+            self._pending_jq_elem_type = prev_jq
 
     def _emit_list_let(self, s: A.LetStmt, nm: str, indent: str) -> list[str]:
         """Lower `let xs: list<T> = [v1, v2, ...];` to:
@@ -2053,6 +2070,120 @@ class Emitter:
             has_returning=False,
         )
 
+    def _lower_jq_block(self, jq: A.JqBlock, elem_type: Optional[A.TypeRef]) -> A.SqlBlock:
+        """Lower `jq!{ src | .path[] | select(...) | .field }` to a SqlBlock
+        backed by JSON_TABLE.
+
+        The COLUMNS clause's shape is determined by `elem_type`, which the
+        surrounding let-binding pushes onto `_pending_jq_elem_type`:
+          - projection present + scalar elem_type (text/number/bool) →
+              single column with the inferred PL/SQL type
+          - no projection + NamedType referencing a record →
+              one column per field, with `PATH '$.<field>'`
+        """
+        if elem_type is None:
+            raise EmitError(
+                "jq!{} requires a typed target — annotate the surrounding `let` "
+                "with the element type (e.g. `let xs: list<text> = jq!{ ... }.collect();`).",
+                jq.loc,
+            )
+
+        # Map each filter field to a column-alias inside JSON_TABLE so the
+        # WHERE clause can compare against `jt.<alias>` instead of nested
+        # JSON_VALUE calls. Filters on a field that's also projected reuse
+        # that column.
+        filter_cols: dict[str, tuple[str, str]] = {}  # path -> (alias, sql_type)
+        if jq.projection is not None:
+            elem_sql = self._lt(elem_type)
+            col_parts = [f"v {elem_sql} PATH '$.{jq.projection}'"]
+            select_list = "jt.v"
+            # Add filter columns
+            for f in jq.filters:
+                if f.field_path in filter_cols:
+                    continue
+                if f.field_path == "$." + jq.projection:
+                    filter_cols[f.field_path] = ("v", elem_sql)
+                    continue
+                alias = f"f{len(filter_cols)}"
+                sql_type = _jq_literal_pl_type(f.literal)
+                filter_cols[f.field_path] = (alias, sql_type)
+                col_parts.append(f"{alias} {sql_type} PATH '{f.field_path}'")
+            cols_sql = ", ".join(col_parts)
+        else:
+            rec = None
+            if isinstance(elem_type, A.NamedType):
+                rec = self._lookup_record(elem_type.name)
+            if rec is None:
+                raise EmitError(
+                    "jq!{} without a trailing projection requires a record-typed "
+                    f"target; got {_render_type(elem_type)}. Either add `| .field` "
+                    "to project a scalar, or annotate the target with a `pub record`.",
+                    jq.loc,
+                )
+            col_parts = []
+            sel_parts: list[str] = []
+            for f in rec.fields:
+                col_sql = self._lt(f.type_ref)
+                col_parts.append(f"{f.name} {col_sql} PATH '$.{f.name}'")
+                sel_parts.append(f"jt.{f.name}")
+                filter_cols["$." + f.name] = (f.name, col_sql)
+            for f in jq.filters:
+                if f.field_path in filter_cols:
+                    continue
+                alias = f"f{len(filter_cols) - len(rec.fields)}"
+                sql_type = _jq_literal_pl_type(f.literal)
+                filter_cols[f.field_path] = (alias, sql_type)
+                col_parts.append(f"{alias} {sql_type} PATH '{f.field_path}'")
+            cols_sql = ", ".join(col_parts)
+            select_list = ", ".join(sel_parts)
+
+        where_sql = self._jq_filters_to_where(jq.filters, filter_cols)
+        sql_lines = [
+            f"SELECT {select_list}",
+            f"  FROM JSON_TABLE(:{jq.source}, '{jq.path}'",
+            f"    COLUMNS ({cols_sql})) jt",
+        ]
+        if where_sql:
+            sql_lines.append(f"  WHERE {where_sql}")
+        return A.SqlBlock(
+            loc=jq.loc,
+            sql="\n".join(sql_lines),
+            binds=[jq.source],
+            is_dml=False,
+            has_returning=False,
+        )
+
+    def _jq_filters_to_where(
+        self,
+        filters: list[A.JqFilter],
+        filter_cols: dict[str, tuple[str, str]],
+    ) -> str:
+        """Render a `select(.a > 1 and .b == "x")` filter list as the WHERE
+        clause for the JSON_TABLE-backed SELECT. Each `.field` reference
+        resolves to the column alias provisioned in JSON_TABLE COLUMNS
+        (always populated by the caller). Comparison operators map verbatim
+        except `==`/`!=` which become `=`/`<>`."""
+        if not filters:
+            return ""
+        op_map = {"==": "=", "!=": "<>", "<": "<", "<=": "<=", ">": ">", ">=": ">="}
+        parts: list[str] = []
+        for i, f in enumerate(filters):
+            if i > 0:
+                parts.append(f.join.upper() if f.join else "AND")
+            alias, _ = filter_cols[f.field_path]
+            lhs = f"jt.{alias}"
+            op = op_map.get(f.op, f.op)
+            if isinstance(f.literal, bool):
+                rhs = "1" if f.literal else "0"
+            elif isinstance(f.literal, (int, float)):
+                rhs = str(f.literal)
+            elif f.literal is None:
+                rhs = "NULL"
+            else:
+                rhs = _sql_string(str(f.literal))
+            parts.append(f"{lhs} {op} {rhs}")
+        return " ".join(parts)
+
     def _pivot_col_ref(self, role: str, expr: A.Expr, loc: A.Loc) -> str:
         """Validate that a pivot kwarg is a bare-identifier column reference
         and return its SQL spelling (lowercased)."""
@@ -2093,6 +2224,11 @@ class Emitter:
         # the same way they would a literal `sql!{}`.
         if isinstance(cur, A.Call) and isinstance(cur.callee, A.Ident) and cur.callee.name == "pivot::sum":
             cur = self._lower_typed_pivot(cur)
+        # jq!{ ... } — lower to a JSON_TABLE-backed SqlBlock once we know the
+        # target element type (pushed by the surrounding let/.collect()/.one()
+        # so the COLUMNS clause and SELECT list can be shape-correct).
+        if isinstance(cur, A.JqBlock):
+            cur = self._lower_jq_block(cur, self._pending_jq_elem_type)
         if isinstance(cur, A.SqlBlock):
             if lock_parts:
                 new_sql = A.SqlBlock(
@@ -3852,6 +3988,16 @@ def _is_unit_like(t: A.TypeRef) -> bool:
 
 def _sql_string(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
+
+
+def _jq_literal_pl_type(lit: object) -> str:
+    """Infer the JSON_TABLE COLUMNS type for a synthetic filter column based
+    on the literal value being compared against."""
+    if isinstance(lit, bool):
+        return "NUMBER(1)"
+    if isinstance(lit, (int, float)):
+        return "NUMBER"
+    return "VARCHAR2(4000)"
 
 
 def emit(module: A.Module, target: str = "23", *,
