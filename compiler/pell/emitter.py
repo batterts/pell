@@ -171,6 +171,11 @@ def lower_type(
             return f"t_{_safe(_render_type(t.params[0]))}_to_{_safe(_render_type(t.params[1]))}"
         if t.base == "set" and t.params:
             return f"t_{_safe(_render_type(t.params[0]))}_set"
+        if t.base == "cursor":
+            # `cursor<T>` outside @pipelined contexts lowers to a weakly-typed
+            # SYS_REFCURSOR. Pipelined fns get their own param-type lowering
+            # (strong REF CURSOR when @parallel partition= is set).
+            return "SYS_REFCURSOR"
         return f"t_{_safe(t.base)}"
     if isinstance(t, A.ErrorUnionType):
         # Error unions never appear in a slot; they're for Result<T, _>'s second param
@@ -1535,6 +1540,136 @@ class Emitter:
                 return (None, None, None)
         return (None, None, None)
 
+    def _emit_dyn_pivot_return(self, call: A.Call, indent: str) -> list[str]:
+        """Lower `return pivot::sum_dyn(source=…, rows=…, col=…, value=…)`.
+
+        Two-step at runtime:
+          1. SELECT LISTAGG to compute the dynamic `IN (...)` column list.
+          2. Build the PIVOT SQL via string concat, then OPEN a SYS_REFCURSOR
+             via EXECUTE IMMEDIATE.
+
+        Locals (`l_pell_pivot_cols`, `l_pell_pivot_sql`, `l_pell_pivot_cur`)
+        are added to the fn's declares. Only legal inside `unsafe fn`.
+        """
+        fn = self._current_fn
+        if fn is None or not getattr(fn, "is_unsafe", False):
+            raise EmitError(
+                "pivot::sum_dyn(...) requires the enclosing fn to be `unsafe fn` "
+                "— dynamic SQL is the underlying mechanism",
+                call.loc,
+            )
+        kw = call.kwargs
+        for key in ("source", "rows", "col", "value"):
+            if key not in kw:
+                raise EmitError(
+                    f"pivot::sum_dyn: missing required kwarg `{key}=`",
+                    call.loc,
+                )
+        source = kw["source"]
+        if not isinstance(source, A.SqlBlock):
+            raise EmitError(
+                "pivot::sum_dyn: `source=` must be a sql!{ … } block", call.loc,
+            )
+        rows  = self._pivot_col_ref("rows",  kw["rows"],  call.loc)
+        col   = self._pivot_col_ref("col",   kw["col"],   call.loc)
+        value = self._pivot_col_ref("value", kw["value"], call.loc)
+        source_sql = source.sql.strip().rstrip(";")
+
+        # Register locals on the enclosing fn's declares.
+        self._decl("l_pell_pivot_cols VARCHAR2(4000);")
+        self._decl("l_pell_pivot_sql  VARCHAR2(32767);")
+        self._decl("l_pell_pivot_cur  SYS_REFCURSOR;")
+
+        # The source SQL goes verbatim — but we need it as a quoted literal
+        # for the dynamic SQL string. Escape any single quotes.
+        source_quoted = source_sql.replace("'", "''")
+        return [
+            # Step 1: discover columns.
+            f"{indent}SELECT LISTAGG('''' || {col} || ''' AS \"' || {col} || '\"', ', ')",
+            f"{indent}         WITHIN GROUP (ORDER BY {col})",
+            f"{indent}  INTO l_pell_pivot_cols",
+            f"{indent}  FROM (SELECT DISTINCT {col} FROM (",
+            f"{indent}{source_sql}",
+            f"{indent}  )) WHERE {col} IS NOT NULL;",
+            # Step 2: construct the PIVOT SQL string. We embed the source SQL
+            # inline (single-quoted) so the resulting text is a single
+            # standalone SELECT … FROM (…) PIVOT (… IN (cols)) statement.
+            f"{indent}l_pell_pivot_sql :=",
+            f"{indent}  'SELECT * FROM (' ||",
+            f"{indent}  '{source_quoted}' ||",
+            f"{indent}  ') PIVOT (SUM({value}) FOR {col} IN (' ||",
+            f"{indent}  l_pell_pivot_cols ||",
+            f"{indent}  '))';",
+            # Step 3: open + return.
+            f"{indent}OPEN l_pell_pivot_cur FOR l_pell_pivot_sql;",
+            f"{indent}RETURN l_pell_pivot_cur;",
+        ]
+
+    def _lower_typed_pivot(self, call: A.Call) -> A.SqlBlock:
+        """Lower `pivot::sum(source=sql!{...}, rows=col, col=col, over=Enum, value=col)`
+        to a SqlBlock containing Oracle's PIVOT clause with the enum's
+        variants as the static `FOR <col> IN (...)` list. Result composes
+        with .collect() / .one() chains via _strip_lock_modifiers.
+        """
+        kw = call.kwargs
+        required = ("source", "rows", "col", "over", "value")
+        for key in required:
+            if key not in kw:
+                raise EmitError(
+                    f"pivot::sum: missing required kwarg `{key}=` "
+                    f"(need: {', '.join(required)})",
+                    call.loc,
+                )
+        source = kw["source"]
+        if not isinstance(source, A.SqlBlock):
+            raise EmitError(
+                "pivot::sum: `source=` must be a sql!{ … } block", call.loc,
+            )
+        rows  = self._pivot_col_ref("rows",  kw["rows"],  call.loc)
+        col   = self._pivot_col_ref("col",   kw["col"],   call.loc)
+        value = self._pivot_col_ref("value", kw["value"], call.loc)
+        over = kw["over"]
+        if not isinstance(over, A.Ident) or "::" in over.name:
+            raise EmitError(
+                "pivot::sum: `over=` must reference a pell enum by name",
+                call.loc,
+            )
+        enum_def = next((e for e in self._enums if e.name == over.name), None)
+        if enum_def is None:
+            raise EmitError(
+                f"pivot::sum: enum {over.name!r} is not declared in this module "
+                "(typed pivot needs a `pub enum` to enumerate the columns)",
+                call.loc,
+            )
+        cols_in = ",\n      ".join(
+            f"{_sql_string(v.value or v.name)} AS \"{v.name}\""
+            for v in enum_def.variants
+        )
+        pivot_sql = (
+            f"SELECT * FROM (\n"
+            f"  {source.sql.strip()}\n"
+            f") PIVOT (\n"
+            f"  SUM({value}) FOR {col} IN (\n      {cols_in}\n  )\n"
+            f")"
+        )
+        return A.SqlBlock(
+            loc=call.loc,
+            sql=pivot_sql,
+            binds=source.binds,
+            is_dml=False,
+            has_returning=False,
+        )
+
+    def _pivot_col_ref(self, role: str, expr: A.Expr, loc: A.Loc) -> str:
+        """Validate that a pivot kwarg is a bare-identifier column reference
+        and return its SQL spelling (lowercased)."""
+        if isinstance(expr, A.Ident) and "::" not in expr.name:
+            return expr.name.lower()
+        raise EmitError(
+            f"pivot::sum: `{role}=` must be a bare column identifier",
+            loc,
+        )
+
     def _strip_lock_modifiers(self, expr: A.Expr) -> tuple[Optional[A.Expr], Optional[A.SqlBlock]]:
         """Unwrap `.for_update()` / `.nowait()` / `.skip_locked()` modifiers and
         return the underlying SqlBlock (with the FOR UPDATE clause appended).
@@ -1560,6 +1695,11 @@ class Emitter:
             else:
                 break
             cur = cur.callee.obj
+        # `pivot::sum(...)` synthesizes a SqlBlock at lowering time. Once
+        # rewritten, downstream `.collect()` / `.one()` chains pick it up
+        # the same way they would a literal `sql!{}`.
+        if isinstance(cur, A.Call) and isinstance(cur.callee, A.Ident) and cur.callee.name == "pivot::sum":
+            cur = self._lower_typed_pivot(cur)
         if isinstance(cur, A.SqlBlock):
             if lock_parts:
                 new_sql = A.SqlBlock(
@@ -1788,6 +1928,11 @@ class Emitter:
             prefix.append(f"{indent}pell_finally_body;")
         if s.value is None:
             return prefix + [f"{indent}RETURN;"]
+        # `return pivot::sum_dyn(...)` — dynamic pivot, opens a SYS_REFCURSOR.
+        if (isinstance(s.value, A.Call)
+                and isinstance(s.value.callee, A.Ident)
+                and s.value.callee.name == "pivot::sum_dyn"):
+            return prefix + self._emit_dyn_pivot_return(s.value, indent)
         # `return Err(...)` → set payload + RAISE (always, even in procedures)
         if isinstance(s.value, A.ErrExpr):
             return self._emit_err_return(s.value.inner, indent)

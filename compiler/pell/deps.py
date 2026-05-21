@@ -138,6 +138,9 @@ def collect_module_deps(module) -> dict:
     from . import ast as A
     enum_names = {i.name.lower() for i in module.items if isinstance(i, A.EnumDef)}
     packages -= enum_names
+    # Pell built-in pseudo-packages — `pivot::sum` etc. expand at compile
+    # time, they're not real PL/SQL packages the deployed code reaches into.
+    packages -= {"pivot"}
     return {
         "tables":    sorted(all_tables),
         "dblinks":   sorted(all_dblinks),

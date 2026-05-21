@@ -105,15 +105,26 @@ def test_no_double_semicolons_outside_strings():
 
 
 def test_select_into_has_into_between_list_and_from():
-    """SELECT INTO must have INTO between the select list and FROM."""
+    """SELECT INTO must have INTO between the select list and FROM.
+
+    Restricted to the SELECT's own statement (terminated by `;`) so we
+    don't pair an INTO from a later statement with this SELECT's FROM.
+    Also skips SELECTs inside EXECUTE IMMEDIATE strings — those live in
+    their own quoted SQL and the outer INTO belongs to the PL/SQL bind.
+    """
     for path in _example_paths():
         sql = _normalize(_emit(path))
-        # find each SELECT ... INTO ... FROM block; INTO must come BEFORE FROM
         for m in re.finditer(r"\bselect\b", sql, re.IGNORECASE):
-            tail = sql[m.start():m.start() + 500]
+            preceding = sql[max(0, m.start() - 100):m.start()]
+            if re.search(r"EXECUTE\s+IMMEDIATE", preceding, re.IGNORECASE):
+                continue
+            # Limit the search window to this SELECT's own statement —
+            # stop at the next semicolon (or end of file).
+            rest = sql[m.start():]
+            semi = rest.find(";")
+            tail = rest[:semi] if semi >= 0 else rest
             into = re.search(r"\bINTO\b", tail, re.IGNORECASE)
             frm = re.search(r"\bfrom\b", tail, re.IGNORECASE)
-            # only check the ones with both INTO and FROM (the SELECT INTO ones)
             if into and frm:
                 assert into.start() < frm.start(), (
                     f"{path.name}: SELECT...INTO...FROM ordering wrong at {m.start()}"

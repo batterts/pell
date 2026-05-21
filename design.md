@@ -2214,6 +2214,110 @@ Use cases:
 - No automatic `from_text` / `to_text` helpers; the inlining makes them
   unnecessary in pell source, and SQL contexts use the raw text directly.
 
+### 7.0.4 `pivot::sum` and `pivot::sum_dyn` — column-pivoting helpers
+
+Oracle's `PIVOT` clause requires you to enumerate every output column up
+front. That's fine when the set is bounded (use the typed form) and a
+problem when it isn't (use the dynamic form). Pell surfaces both.
+
+#### Typed pivot — `pivot::sum(over = SomeEnum)`
+
+```pell
+pub enum Region { NORTH, SOUTH, EAST, WEST }
+
+pub record RegionTotals {
+    product: text,
+    NORTH: number,
+    SOUTH: number,
+    EAST: number,
+    WEST: number,
+}
+
+pub fn list_totals() -> list<RegionTotals> {
+    let rows: list<RegionTotals> = pivot::sum(
+        source = sql!{ select product, region, sales from orders },
+        rows   = product,
+        col    = region,
+        over   = Region,
+        value  = sales,
+    ).collect();
+    return rows;
+}
+```
+
+Lowers to:
+
+```sql
+SELECT *
+  BULK COLLECT INTO l_rows
+  FROM (
+    select product, region, sales from orders
+  ) PIVOT (
+    SUM(sales) FOR region IN (
+      'NORTH' AS "NORTH",
+      'SOUTH' AS "SOUTH",
+      'EAST'  AS "EAST",
+      'WEST'  AS "WEST"
+    )
+  );
+```
+
+The `over = Region` argument is the source of truth for the column list.
+Adding a variant to `Region` regenerates the SQL on the next build. The
+result is a regular `SqlBlock` under the hood, so `.collect()`,
+`.one()`, etc. all compose normally.
+
+You write the receiving `record` yourself (one field per enum variant)
+because pell doesn't synthesize record types from enums in v1 — the
+explicit declaration keeps the storage layout visible at the use site.
+
+#### Dynamic pivot — `pivot::sum_dyn(...)`
+
+```pell
+@touches(orders)
+pub unsafe fn region_sales_dyn() -> cursor<text> {
+    return pivot::sum_dyn(
+        source = sql!{ select product, region, sales from orders },
+        rows   = product,
+        col    = region,
+        value  = sales,
+    );
+}
+```
+
+Lowers to a two-step PL/SQL block:
+
+```sql
+FUNCTION region_sales_dyn RETURN SYS_REFCURSOR IS
+    l_pell_pivot_cols VARCHAR2(4000);
+    l_pell_pivot_sql  VARCHAR2(32767);
+    l_pell_pivot_cur  SYS_REFCURSOR;
+BEGIN
+    -- 1. discover column values
+    SELECT LISTAGG('''' || region || ''' AS "' || region || '"', ', ')
+             WITHIN GROUP (ORDER BY region)
+      INTO l_pell_pivot_cols
+      FROM (SELECT DISTINCT region FROM (
+        select product, region, sales from orders
+      )) WHERE region IS NOT NULL;
+    -- 2. build the dynamic PIVOT statement
+    l_pell_pivot_sql :=
+      'SELECT * FROM (' || 'select product, region, sales from orders' ||
+      ') PIVOT (SUM(sales) FOR region IN (' || l_pell_pivot_cols || '))';
+    -- 3. open + return
+    OPEN l_pell_pivot_cur FOR l_pell_pivot_sql;
+    RETURN l_pell_pivot_cur;
+END;
+```
+
+Returns a `SYS_REFCURSOR` (pell type `cursor<…>`). The caller iterates
+the cursor and FETCHes columns positionally — there's no way around the
+shape being dynamic. Only legal inside `unsafe fn` because the
+underlying mechanism is `EXECUTE IMMEDIATE`. The `@touches(orders)`
+declaration feeds both the dependency manifest and the
+`pell_dep_pinning` cursor declarations so Oracle's `ALL_DEPENDENCIES`
+sees the reference even though the runtime SQL is opaque.
+
 ### 7.1 External sequences — `pub seq name;`
 
 Oracle sequences are use-site references in pell; the language doesn't own

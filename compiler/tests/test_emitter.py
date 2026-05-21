@@ -884,6 +884,88 @@ def test_pipelined_parallel_order_and_cluster_conflict_errors():
         """)
 
 
+def test_call_kwargs_parse_in_position():
+    """`fn(name = value, other = expr)` parses as Call with kwargs."""
+    from pell.parser import parse
+    m = parse("""
+        module m;
+        pub fn f() -> number {
+            let n = foo(a = 1, b = 2);
+            return n;
+        }
+    """)
+    from pell import ast as A
+    call = m.items[0].body[0].value
+    assert isinstance(call, A.Call)
+    assert "a" in call.kwargs and "b" in call.kwargs
+
+
+def test_typed_pivot_emits_static_pivot_clause():
+    sql = compile_to_sql("""
+        module m;
+        pub enum Region { NORTH, SOUTH, EAST, WEST }
+        pub record Totals { product: text, NORTH: number, SOUTH: number, EAST: number, WEST: number }
+        pub fn totals() -> list<Totals> {
+            let rows: list<Totals> = pivot::sum(
+                source = sql!{ select product, region, sales from orders },
+                rows = product, col = region, over = Region, value = sales,
+            ).collect();
+            return rows;
+        }
+    """)
+    assert "PIVOT (" in sql
+    assert "SUM(sales) FOR region IN" in sql
+    assert "'NORTH' AS \"NORTH\"" in sql
+    assert "'WEST' AS \"WEST\"" in sql
+    assert "BULK COLLECT INTO l_rows" in sql
+
+
+def test_typed_pivot_requires_known_enum():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql("""
+            module m;
+            pub fn f() -> number {
+                let _ = pivot::sum(
+                    source = sql!{ select 1 from dual }, rows = a, col = b, over = NotAnEnum, value = c,
+                ).collect();
+                return 1;
+            }
+        """)
+
+
+def test_dyn_pivot_emits_listagg_and_open_for():
+    sql = compile_to_sql("""
+        module m;
+        @touches(orders)
+        pub unsafe fn region_sales_dyn() -> cursor<text> {
+            return pivot::sum_dyn(
+                source = sql!{ select product, region, sales from orders },
+                rows = product, col = region, value = sales,
+            );
+        }
+    """)
+    assert "LISTAGG" in sql
+    assert "WITHIN GROUP (ORDER BY region)" in sql
+    assert "OPEN l_pell_pivot_cur FOR l_pell_pivot_sql;" in sql
+    assert "RETURN l_pell_pivot_cur;" in sql
+    # Pinning cursor from @touches
+    assert "CURSOR pin_orders IS SELECT 1 FROM orders" in sql
+
+
+def test_dyn_pivot_requires_unsafe_fn():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql("""
+            module m;
+            pub fn f() -> cursor<text> {
+                return pivot::sum_dyn(
+                    source = sql!{ select 1 from dual }, rows = a, col = b, value = c,
+                );
+            }
+        """)
+
+
 def test_exec_dyn_emits_execute_immediate():
     sql = compile_to_sql("""
         module m;

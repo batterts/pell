@@ -891,12 +891,21 @@ class Parser:
                 continue
             if self._eat("LPAREN"):
                 args: list[A.Expr] = []
-                if not self._at("RPAREN"):
-                    args.append(self._parse_expr())
-                    while self._eat("COMMA"):
+                kwargs: dict[str, A.Expr] = {}
+                while not self._at("RPAREN"):
+                    # `name = expr` → kwarg; same heuristic the annotation
+                    # parser uses. Plain `expr` → positional arg.
+                    if (self._peek().kind == "IDENT"
+                            and self._peek(1).kind == "EQ"):
+                        kname = self._expect("IDENT").value
+                        self._expect("EQ")
+                        kwargs[kname] = self._parse_expr()
+                    else:
                         args.append(self._parse_expr())
+                    if not self._eat("COMMA"):
+                        break
                 self._expect("RPAREN")
-                expr = A.Call(loc=expr.loc, callee=expr, args=args)
+                expr = A.Call(loc=expr.loc, callee=expr, args=args, kwargs=kwargs)
                 continue
             # turbofish `::<T, ...>` for type args on methods like .into::<T>() and .returning::<T>()
             if self._at("COLONCOLON") and self._peek(1).kind == "LT":

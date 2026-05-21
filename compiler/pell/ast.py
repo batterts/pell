@@ -151,6 +151,11 @@ class Call(Expr):
     callee: Expr
     args: list[Expr] = field(default_factory=list)
     type_args: list[TypeRef] = field(default_factory=list)  # for .into::<T>(), .returning::<T>()
+    # Keyword arguments — `name = expr` inside the call's parens. Same shape
+    # as annotation kwargs. Used by built-ins like `pivot::sum(source=...,
+    # rows=..., col=..., over=..., value=...)` where positional order would
+    # be brittle.
+    kwargs: dict[str, Expr] = field(default_factory=dict)
 
 
 @dataclass

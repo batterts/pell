@@ -1,0 +1,61 @@
+module pivot_demo;
+
+// ---------------------------------------------------------------------------
+// Two pivot forms — typed (column set known at compile time) and dynamic
+// (columns discovered at runtime).
+//
+// Both produce Oracle's `PIVOT` clause; the typed form composes with regular
+// `.collect()` / `.one()` chains because it lowers to a synthesized SqlBlock.
+// The dynamic form opens a SYS_REFCURSOR via EXECUTE IMMEDIATE — it lives in
+// an `unsafe fn` and carries the usual `@touches` for the dep manifest.
+// ---------------------------------------------------------------------------
+
+pub enum Region {
+    NORTH,
+    SOUTH,
+    EAST,
+    WEST,
+}
+
+// Result type for the typed pivot. One field per enum variant, names
+// matching. Pell doesn't yet synthesize this for you — you write it
+// explicitly so the storage layout is visible at the use site.
+pub record RegionTotals {
+    product: text,
+    NORTH: number,
+    SOUTH: number,
+    EAST: number,
+    WEST: number,
+}
+
+// Typed pivot — column set known statically from the `over = Region` enum.
+// Lowers to a `SELECT * FROM (<source>) PIVOT (SUM(sales) FOR region IN
+// ('NORTH' AS "NORTH", 'SOUTH' AS "SOUTH", ...))`. Result is a plain
+// SqlBlock that BULK COLLECTs into the record list — no dynamic SQL,
+// no unsafe.
+pub fn list_totals() -> list<RegionTotals> {
+    let rows: list<RegionTotals> = pivot::sum(
+        source = sql!{ select product, region, sales from pivot_orders },
+        rows   = product,
+        col    = region,
+        over   = Region,
+        value  = sales,
+    ).collect();
+    return rows;
+}
+
+// Dynamic pivot — column values discovered at runtime via SELECT DISTINCT
+// then a constructed PIVOT clause executed via EXECUTE IMMEDIATE. Result
+// is a SYS_REFCURSOR (Oracle's only honest shape for unknown columns).
+// Requires `unsafe` for the same reason exec_dyn does — and the `@touches`
+// pinning cursor keeps ALL_DEPENDENCIES accurate even with the SQL hidden
+// inside a quoted string.
+@touches(pivot_orders)
+pub unsafe fn region_sales_dyn() -> cursor<text> {
+    return pivot::sum_dyn(
+        source = sql!{ select product, region, sales from pivot_orders },
+        rows   = product,
+        col    = region,
+        value  = sales,
+    );
+}
