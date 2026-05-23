@@ -17,7 +17,7 @@ pub fn parse_phone(s: text) -> Phone {
     // Backtick raw string — preserves `{`, `}`, and `\` verbatim.
     let p: Phone = re::capture::<Phone>(
         s,
-        `(?<area>\d{3})-(?<prefix>\d{3})-(?<line>\d{4})`
+        /(?<area>\d{3})-(?<prefix>\d{3})-(?<line>\d{4})/
     );
     return p;
 }
@@ -28,7 +28,7 @@ pub record Email {
 }
 
 pub fn parse_email(s: text) -> Email {
-    let e: Email = re::capture::<Email>(s, `(?<user>\w+)@(?<domain>[\w.]+)`);
+    let e: Email = re::capture::<Email>(s, /(?<user>\w+)@(?<domain>[\w.]+)/);
     return e;
 }
 
@@ -38,6 +38,6 @@ pub record KV {
 }
 
 pub fn parse_kv(s: text) -> KV {
-    let kv: KV = re::capture::<KV>(s, `(?<k>\w+)=(?<v>\S+)`);
+    let kv: KV = re::capture::<KV>(s, /(?<k>\w+)=(?<v>\S+)/);
     return kv;
 }

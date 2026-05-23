@@ -133,6 +133,15 @@ class Lexer:
             if ch == "`":
                 toks.append(self._read_raw_string())
                 continue
+            # regex literal `/pattern/` — only when the previous token leaves
+            # us in a position where an expression could start. JavaScript-style
+            # disambiguation: after IDENT/NUMBER/STRING/`)` we're after a value
+            # and `/` is division; everything else (operators, keywords,
+            # openers) means a regex can start here.
+            if ch == "/" and not self._starts_with("//") and not self._starts_with("/*"):
+                if _regex_allowed_after(toks[-1] if toks else None):
+                    toks.append(self._read_regex())
+                    continue
             # multi-char operators (longest first)
             for two in ("..=", "::", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "..", "|>",):
                 if self._starts_with(two):
@@ -173,6 +182,42 @@ class Lexer:
             while self.pos < len(self.src) and self._peek().isdigit():
                 self._advance()
         return Token("NUMBER", self.src[start : self.pos], loc)
+
+    def _read_regex(self) -> Token:
+        """Read a `/pattern/` regex literal. Inside the pattern, `\\/` is
+        a literal `/` (so the engine sees `\\/` and treats it as `/`), and
+        `\\\\` is a literal backslash. Newlines are not allowed — regex
+        literals are single-line.
+
+        Flags after the closing `/` (e.g. `/foo/i`) are not yet supported;
+        we error out cleanly so the user knows to wait or use a leading
+        `(?i)` inside the pattern.
+        """
+        loc = self._loc()
+        self._advance()  # opening /
+        start = self.pos
+        while self.pos < len(self.src):
+            c = self._peek()
+            if c == "\\":
+                self._advance()
+                if self.pos < len(self.src):
+                    self._advance()
+                continue
+            if c == "/":
+                break
+            if c == "\n":
+                raise LexError("regex literal cannot span lines", loc)
+            self._advance()
+        if self.pos >= len(self.src):
+            raise LexError("unterminated regex literal", loc)
+        text = self.src[start : self.pos]
+        self._advance()  # closing /
+        if self.pos < len(self.src) and self._peek() in "imsx":
+            raise LexError(
+                "regex flags (i/m/s/x) aren't supported yet — for case-insensitive "
+                "match, prepend `(?i)` inside the pattern instead", loc,
+            )
+        return Token("REGEX", text, loc)
 
     def _read_raw_string(self) -> Token:
         """Read a backtick-delimited raw string. Everything between the
@@ -306,6 +351,24 @@ _PUNCT: dict[str, str] = {
 
 def _punct_kind(s: str) -> str:
     return _PUNCT[s]
+
+
+# Token kinds that *produce a value* in expression context — if one of
+# these is the previous token, then `/` is division. Anything else means
+# the `/` is starting a regex literal.
+_VALUE_TOKEN_KINDS = frozenset({
+    "IDENT", "NUMBER", "STRING", "RAWSTRING", "REGEX",
+    "RPAREN", "RBRACKET", "RBRACE",
+    "KW_TRUE", "KW_FALSE", "KW_NIL", "KW_NULL", "KW_SELF",
+    # macro blocks are values
+    "SQL_BLOCK", "JQ_BLOCK",
+})
+
+
+def _regex_allowed_after(prev_tok) -> bool:
+    if prev_tok is None:
+        return True
+    return prev_tok.kind not in _VALUE_TOKEN_KINDS
 
 
 def tokenize(source: str, filename: str = "<input>") -> list[Token]:

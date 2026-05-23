@@ -943,6 +943,11 @@ class Parser:
         if cur.kind == "RAWSTRING":
             self.pos += 1
             return A.TextLit(loc=cur.loc, value=cur.value, is_raw=True)
+        if cur.kind == "REGEX":
+            self.pos += 1
+            # Regex literal `/pattern/` is just a raw text value at the type
+            # level — pell_re takes a VARCHAR2 pattern and caches the compile.
+            return A.TextLit(loc=cur.loc, value=cur.value, is_raw=True)
         if cur.kind == "KW_TRUE":
             self.pos += 1
             return A.BoolLit(loc=cur.loc, value=True)

@@ -1781,3 +1781,96 @@ def test_re_capture_requires_record_type_arg():
                 return p;
             }
         """)
+
+
+# ---------------------------------------------------------------------------
+# /pattern/ regex literals
+# ---------------------------------------------------------------------------
+
+
+def test_regex_literal_after_comma_lowers_to_string():
+    sql = compile_to_sql(r"""
+        module m;
+        pub fn f(s: text) -> bool {
+            return re::matches(s, /\d+/);
+        }
+    """)
+    assert "pell_re.matches(p_s, '\\d+')" in sql
+
+
+def test_regex_literal_with_quantifier_braces():
+    sql = compile_to_sql(r"""
+        module m;
+        pub fn f(s: text) -> text {
+            return re::find(s, /\d{3,5}/);
+        }
+    """)
+    assert "pell_re.find(p_s, '\\d{3,5}')" in sql
+
+
+def test_division_after_identifier_still_works():
+    """The lexer must NOT mistake `n / 2` for a regex literal."""
+    sql = compile_to_sql("""
+        module m;
+        pub fn half(n: number) -> number {
+            return n / 2;
+        }
+    """)
+    assert "(p_n / 2)" in sql
+
+
+def test_division_after_rparen_still_works():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(xs: list<number>) -> number {
+            return xs(1) / 2;
+        }
+    """)
+    assert "(p_xs(1) / 2)" in sql
+
+
+def test_regex_then_division_in_same_fn():
+    sql = compile_to_sql(r"""
+        module m;
+        pub fn f(s: text, n: number) -> number {
+            let ok: bool = re::matches(s, /\w+/);
+            let half: number = n / 2;
+            return half;
+        }
+    """)
+    assert "pell_re.matches(p_s, '\\w+')" in sql
+    assert "(p_n / 2)" in sql
+
+
+def test_regex_literal_after_return():
+    sql = compile_to_sql(r"""
+        module m;
+        pub fn f(s: text) -> bool {
+            return re::matches(s, /^foo$/);
+        }
+    """)
+    assert "'^foo$'" in sql
+
+
+def test_regex_named_capture_via_literal():
+    sql = compile_to_sql(r"""
+        module m;
+        pub record P { area: text }
+        pub fn parse(s: text) -> P {
+            let p: P = re::capture::<P>(s, /(?<area>\d{3})/);
+            return p;
+        }
+    """)
+    assert "pell_re.capture_by_name(p_s, '(?<area>\\d{3})')" in sql
+    assert "EXISTS('area')" in sql
+
+
+def test_regex_flags_not_yet_supported():
+    from pell.lexer import LexError
+    with pytest.raises(LexError):
+        compile_to_sql(r"""
+            module m;
+            pub fn f(s: text) -> bool {
+                return re::matches(s, /foo/i);
+            }
+        """)
