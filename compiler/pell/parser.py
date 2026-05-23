@@ -940,6 +940,9 @@ class Parser:
         if cur.kind == "STRING":
             self.pos += 1
             return A.TextLit(loc=cur.loc, value=cur.value)
+        if cur.kind == "RAWSTRING":
+            self.pos += 1
+            return A.TextLit(loc=cur.loc, value=cur.value, is_raw=True)
         if cur.kind == "KW_TRUE":
             self.pos += 1
             return A.BoolLit(loc=cur.loc, value=True)

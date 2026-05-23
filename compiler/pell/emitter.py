@@ -349,6 +349,11 @@ class Emitter:
         # Set when any `.split()` call is emitted — triggers a per-module
         # private helper function `pell_split_text` in the package body.
         self._needs_split_helper: bool = False
+        # Names of `re::find_all` / `re::split` adapters needed by this
+        # package. Adapters copy pell_re's foreign collection type into
+        # the package's own t_text_list (PL/SQL nominal typing for
+        # collections leaves no other route).
+        self._needs_re_adapter: set[str] = set()
         # Set when any `@retry` annotation is emitted — triggers a per-module
         # private helper `pell_is_panic(p_code NUMBER) RETURN BOOLEAN` so the
         # retry handler can decide whether to re-raise without retry.
@@ -746,6 +751,9 @@ class Emitter:
         if self._needs_panic_helper:
             out.append("")
             out.append(self._panic_helper_source())
+        for adapter in sorted(self._needs_re_adapter):
+            out.append("")
+            out.append(self._re_adapter_source(adapter))
         # Pinning cursors for @touches dependencies from unsafe fns. Never
         # called; the cursor declarations make Oracle's ALL_DEPENDENCIES
         # track refs that would otherwise be invisible inside EXECUTE
@@ -786,6 +794,22 @@ class Emitter:
             f"    IF p_code IN ({oracle_codes}) THEN RETURN TRUE; END IF;\n"
             "    RETURN FALSE;\n"
             "  END pell_is_panic;"
+        )
+
+    def _re_adapter_source(self, op: str) -> str:
+        """A package-private adapter for `re::find_all` / `re::split` that
+        bridges pell_re's collection type into the package's t_text_list."""
+        return (
+            f"  FUNCTION pell_re_{op}(p_s VARCHAR2, p_pat VARCHAR2) RETURN t_text_list IS\n"
+            f"    src pell_re.t_text_list := pell_re.{op}(p_s, p_pat);\n"
+            f"    out t_text_list;\n"
+            f"  BEGIN\n"
+            f"    IF src.COUNT = 0 THEN RETURN out; END IF;\n"
+            f"    FOR i IN src.FIRST .. src.LAST LOOP\n"
+            f"      out(i) := src(i);\n"
+            f"    END LOOP;\n"
+            f"    RETURN out;\n"
+            f"  END pell_re_{op};"
         )
 
     def _split_helper_source(self) -> str:
@@ -1486,6 +1510,13 @@ class Emitter:
                 and inner_for_dyn.callee.name == "json::into"
                 and inner_for_dyn.type_args):
             return self._emit_json_into(target, inner_for_dyn, indent)
+        # `re::capture::<Record>(s, pat)` — populate target's record fields
+        # from named captures in the regex result.
+        if (isinstance(inner_for_dyn, A.Call)
+                and isinstance(inner_for_dyn.callee, A.Ident)
+                and inner_for_dyn.callee.name == "re::capture"
+                and inner_for_dyn.type_args):
+            return self._emit_re_capture(target, inner_for_dyn, indent)
         if isinstance(expr, A.QuestionMark):
             inner = expr.inner
             if isinstance(inner, A.Call):
@@ -1537,6 +1568,21 @@ class Emitter:
                 return "NUMBER"
             if n == "has":
                 return "BOOLEAN"
+        # re::* helpers — type by name. find_all/split return collections
+        # and are handled in the let-binding path; here we type only the
+        # scalar returners. capture::<T> returns T.
+        if isinstance(call.callee, A.Ident) and call.callee.name.startswith("re::"):
+            n = call.callee.name[len("re::"):]
+            if n == "matches":
+                return "BOOLEAN"
+            if n in ("find", "replace_all"):
+                return "VARCHAR2(4000)"
+            if n in ("find_all", "split"):
+                return "t_text_list"
+            if n == "capture" and call.type_args:
+                ta = call.type_args[0]
+                if isinstance(ta, A.NamedType):
+                    return _record_type_name(ta.name)
         # .one() / .first() / .one_or_none() on a sql!{} (possibly wrapped in lock modifiers)
         if isinstance(call.callee, A.MemberAccess):
             method = call.callee.field
@@ -1717,6 +1763,61 @@ class Emitter:
             f"{indent}OPEN l_pell_pivot_cur FOR l_pell_pivot_sql;",
             f"{indent}RETURN l_pell_pivot_cur;",
         ]
+
+    def _emit_re_capture(self, target: str, call: A.Call, indent: str) -> list[str]:
+        """`re::capture::<RecordName>(s, pattern)` → one assignment per record
+        field, each pulling its value out of pell_re's capture-by-name map.
+
+        Lowering:
+            l_pell_caps_N := pell_re.capture_by_name(s, pattern);
+            IF l_pell_caps_N.EXISTS('field1') THEN
+              target.field1 := l_pell_caps_N('field1').match_text;
+            END IF;
+            ... (one IF per record field)
+
+        Fields whose names don't match a `(?<name>...)` group in the pattern
+        are left at their default (NULL). v0 of capture extracts everything
+        as VARCHAR2 — non-text record fields get an implicit TO_NUMBER /
+        TO_DATE conversion via assignment, which raises if the captured
+        text doesn't parse.
+        """
+        if len(call.args) != 2:
+            raise EmitError(
+                "re::capture takes (s, pattern): "
+                "re::capture::<RecordName>(s, pat)", call.loc,
+            )
+        if len(call.type_args) != 1:
+            raise EmitError(
+                "re::capture needs a single record type argument: "
+                "re::capture::<RecordName>(s, pat)", call.loc,
+            )
+        type_ref = call.type_args[0]
+        if not isinstance(type_ref, A.NamedType):
+            raise EmitError(
+                "re::capture::<T>: T must be a record type", call.loc,
+            )
+        rec = next((r for r in self._records if r.name == type_ref.name), None)
+        if rec is None:
+            raise EmitError(
+                f"re::capture::<{type_ref.name}>: record {type_ref.name!r} "
+                "not declared in this module", call.loc,
+            )
+        s_expr   = self._emit_expr(call.args[0])
+        pat_expr = self._emit_expr(call.args[1])
+        tmp = f"l_pell_caps_{self._sql_var_counter}"
+        self._sql_var_counter += 1
+        self._decl(f"{tmp} pell_re.t_capture_map;")
+        out: list[str] = [
+            f"{indent}{tmp} := pell_re.capture_by_name({s_expr}, {pat_expr});",
+        ]
+        for f in rec.fields:
+            key = _sql_string(f.name)
+            out.extend([
+                f"{indent}IF {tmp}.EXISTS({key}) THEN",
+                f"{indent}  {target}.{f.name.lower()} := {tmp}({key}).match_text;",
+                f"{indent}END IF;",
+            ])
+        return out
 
     def _emit_json_into(self, target: str, call: A.Call, indent: str) -> list[str]:
         """`json::into::<RecordName>(j_expr)` → one assignment per record field,
@@ -2085,6 +2186,64 @@ class Emitter:
         )
         ret_clause = " RETURNING JSON" if self.target == "23" else ""
         return f"JSON_OBJECT({parts}{ret_clause})"
+
+    def _emit_re_helper(self, call: A.Call) -> Optional[str]:
+        """Lower `re::<helper>(...)` calls to the pell_re runtime package.
+
+        Scalar returners (matches/find/replace_all) pass through directly.
+        Collection returners (find_all/split) route through a per-package
+        adapter that copies the runtime's t_text_list into the package's
+        own t_text_list — PL/SQL collections are nominally typed and
+        assigning between two structurally-identical TABLE types is a
+        PLS-00382, so the adapter is unavoidable.
+        """
+        name = call.callee.name[len("re::"):]
+        emit = self._emit_expr
+
+        if name == "matches":
+            if len(call.args) != 2:
+                raise EmitError(
+                    "re::matches takes (s, pattern)", call.loc,
+                )
+            return f"pell_re.matches({emit(call.args[0])}, {emit(call.args[1])})"
+
+        if name == "find":
+            if len(call.args) not in (2, 3):
+                raise EmitError(
+                    "re::find takes (s, pattern [, start_pos])", call.loc,
+                )
+            args = ", ".join(emit(a) for a in call.args)
+            return f"pell_re.find({args})"
+
+        if name == "replace_all":
+            if len(call.args) != 3:
+                raise EmitError(
+                    "re::replace_all takes (s, pattern, replacement)", call.loc,
+                )
+            args = ", ".join(emit(a) for a in call.args)
+            return f"pell_re.replace_all({args})"
+
+        if name in ("find_all", "split"):
+            if len(call.args) != 2:
+                raise EmitError(
+                    f"re::{name} takes (s, pattern)", call.loc,
+                )
+            # Make sure the package-local t_text_list type exists by
+            # pre-registering it through the same list-type machinery the
+            # rest of the emitter uses for `list<text>`.
+            text_type = A.PrimType(loc=call.loc, name="text")
+            list_type = f"t_{_safe(_render_type(text_type))}_list"
+            if list_type not in self._list_types_emitted:
+                self._list_type_decls.append(
+                    f"  TYPE {list_type} IS TABLE OF VARCHAR2(4000) INDEX BY PLS_INTEGER;"
+                )
+                self._list_types_emitted.add(list_type)
+            # Mark we need the adapter; one per pattern-shape (find_all vs split)
+            self._needs_re_adapter.add(name)
+            args = ", ".join(emit(a) for a in call.args)
+            return f"pell_re_{name}({args})"
+
+        return None
 
     def _lower_typed_pivot(self, call: A.Call) -> A.SqlBlock:
         """Lower `pivot::sum(source=sql!{...}, rows=col, col=col, over=Enum, value=col)`
@@ -3166,11 +3325,17 @@ class Emitter:
         identifiers, member access, and method calls all work
         (`{name}`, `{p.field}`, `{bulk.rowcount(i)}`).
         Brace doubling escapes: `{{` → `{`, `}}` → `}`.
+
+        Raw literals (backtick-delimited, `is_raw=True`) skip interpolation
+        entirely — `{` and `}` are kept verbatim. This is what lets regex
+        patterns like `\\d{3}` survive without doubling the braces.
         """
         import re
         from .lexer import tokenize
         from .parser import Parser, ParseError
         s = e.value
+        if e.is_raw:
+            return _sql_string(s)
         if "{" not in s and "}" not in s:
             return _sql_string(s)
         # walk the string, accumulating literal runs and {expr} interpolations
@@ -3225,6 +3390,15 @@ class Emitter:
         # field-by-field record construction.)
         if isinstance(e.callee, A.Ident) and e.callee.name.startswith("json::"):
             result = self._emit_json_helper(e)
+            if result is not None:
+                return result
+        # re::* helpers — route to the runtime pell_re package. Scalar
+        # returners pass through directly; list-returners go through a
+        # per-package adapter that copies pell_re.t_text_list into the
+        # package's own t_text_list (PL/SQL uses nominal typing for
+        # collections, so we can't just RETURN the foreign type).
+        if isinstance(e.callee, A.Ident) and e.callee.name.startswith("re::"):
+            result = self._emit_re_helper(e)
             if result is not None:
                 return result
         # Detect simple method calls and inline them.

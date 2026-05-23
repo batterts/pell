@@ -1665,3 +1665,119 @@ def test_emit_anon_block_rejects_schema_level_items():
     """)
     with pytest.raises(EmitError):
         emit_anon_block(items, stmts)
+
+
+# ---------------------------------------------------------------------------
+# re:: surface — pell_re package bindings
+# ---------------------------------------------------------------------------
+
+
+def test_re_matches_lowers_to_pell_re_call():
+    sql = compile_to_sql(r"""
+        module m;
+        pub fn ok(s: text) -> bool {
+            return re::matches(s, "\d+");
+        }
+    """)
+    assert "pell_re.matches(p_s, '\\d+')" in sql
+
+
+def test_re_find_lowers_to_pell_re_call():
+    sql = compile_to_sql(r"""
+        module m;
+        pub fn first(s: text) -> text {
+            return re::find(s, "\w+");
+        }
+    """)
+    assert "pell_re.find(p_s, '\\w+')" in sql
+
+
+def test_re_find_all_emits_adapter():
+    sql = compile_to_sql(r"""
+        module m;
+        pub fn nums(s: text) -> list<text> {
+            return re::find_all(s, "\d+");
+        }
+    """)
+    assert "FUNCTION pell_re_find_all" in sql
+    assert "pell_re.find_all(p_s, p_pat)" in sql
+    assert "FOR i IN src.FIRST .. src.LAST" in sql
+
+
+def test_re_split_emits_adapter():
+    sql = compile_to_sql(r"""
+        module m;
+        pub fn words(s: text) -> list<text> {
+            return re::split(s, "\s+");
+        }
+    """)
+    assert "FUNCTION pell_re_split" in sql
+    assert "pell_re.split(p_s, p_pat)" in sql
+
+
+def test_string_escape_preserves_unknown_sequences():
+    """Lexer keeps `\\d` `\\w` `\\s` etc. so regex patterns survive."""
+    sql = compile_to_sql(r"""
+        module m;
+        pub fn f() -> text { return "\d\w\s\b"; }
+    """)
+    assert "'\\d\\w\\s\\b'" in sql
+
+
+def test_string_escape_still_handles_known_sequences():
+    sql = compile_to_sql(r"""
+        module m;
+        pub fn f() -> text { return "line1\nline2"; }
+    """)
+    # `\n` becomes a real newline in the PL/SQL literal
+    assert "line1\nline2'" in sql
+
+
+# ---------------------------------------------------------------------------
+# re::capture::<Record> + raw-string literals (backticks)
+# ---------------------------------------------------------------------------
+
+
+def test_re_capture_emits_field_by_field_assignment():
+    sql = compile_to_sql(r"""
+        module m;
+        pub record Phone { area: text, prefix: text, line: text }
+        pub fn parse(s: text) -> Phone {
+            let p: Phone = re::capture::<Phone>(s, `(?<area>\d{3})-(?<prefix>\d{3})-(?<line>\d{4})`);
+            return p;
+        }
+    """)
+    assert "pell_re.t_capture_map" in sql
+    assert "pell_re.capture_by_name(p_s," in sql
+    assert "EXISTS('area')" in sql
+    assert "l_p.area := " in sql
+    assert ".match_text" in sql
+
+
+def test_backtick_raw_strings_preserve_braces_and_backslashes():
+    sql = compile_to_sql(r"""
+        module m;
+        pub fn f() -> text { return `\d{3}`; }
+    """)
+    assert "'\\d{3}'" in sql
+
+
+def test_backtick_raw_strings_skip_interpolation():
+    sql = compile_to_sql(r"""
+        module m;
+        pub fn f() -> text { return `{name}`; }
+    """)
+    # `{name}` is preserved verbatim — no interpolation
+    assert "'{name}'" in sql
+
+
+def test_re_capture_requires_record_type_arg():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql(r"""
+            module m;
+            pub fn f(s: text) -> text {
+                let p: text = re::capture::<text>(s, `(?<a>\d+)`);
+                return p;
+            }
+        """)

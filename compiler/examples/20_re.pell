@@ -1,0 +1,40 @@
+module re_demo;
+
+// ---------------------------------------------------------------------------
+// `re::` — PCRE-ish regex via the pell_re runtime package.
+//
+// Surface:
+//   re::matches(s, pattern)        -> bool
+//   re::find(s, pattern[, pos])    -> text          // first match or NULL
+//   re::find_all(s, pattern)       -> list<text>    // all matches
+//   re::replace_all(s, pat, rep)   -> text          // literal replacement (v0)
+//   re::split(s, pattern)          -> list<text>    // split on every match
+//
+// Patterns use backtick raw strings — preserves `{`, `}`, and `\` verbatim
+// so regex syntax survives pell's text-literal interpolation. Double-quoted
+// patterns still work for simple shorthand-only cases (`"\d+"`).
+//
+// Supports: literal chars . * + ? {n,m} | (...) [...] [^...] [a-z]
+//           shorthand \d \D \w \W \s \S, anchors ^ $ \A \z \b \B
+// Excluded (v0): backreferences, lookbehinds.
+// ---------------------------------------------------------------------------
+
+pub fn is_email(s: text) -> bool {
+    return re::matches(s, `\w+@\w+\.\w+`);
+}
+
+pub fn first_number(s: text) -> text {
+    return re::find(s, `\d+`);
+}
+
+pub fn all_numbers(s: text) -> list<text> {
+    return re::find_all(s, `\d+`);
+}
+
+pub fn redact_digits(s: text) -> text {
+    return re::replace_all(s, `\d`, "*");
+}
+
+pub fn words(s: text) -> list<text> {
+    return re::split(s, `\s+`);
+}

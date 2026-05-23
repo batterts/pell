@@ -127,6 +127,12 @@ class Lexer:
             if ch == '"':
                 toks.append(self._read_string())
                 continue
+            # raw strings — backticks. No interpolation, no escape processing.
+            # Useful for regex patterns, file paths, anything with `{` `}` or
+            # backslashes that shouldn't be touched by the lexer.
+            if ch == "`":
+                toks.append(self._read_raw_string())
+                continue
             # multi-char operators (longest first)
             for two in ("..=", "::", "->", "=>", "==", "!=", "<=", ">=", "&&", "||", "..", "|>",):
                 if self._starts_with(two):
@@ -168,6 +174,23 @@ class Lexer:
                 self._advance()
         return Token("NUMBER", self.src[start : self.pos], loc)
 
+    def _read_raw_string(self) -> Token:
+        """Read a backtick-delimited raw string. Everything between the
+        backticks is preserved verbatim — no `\\n` escapes, no `{name}`
+        interpolation. Use this for regex patterns and other content where
+        the lexer's default string processing would mangle the source.
+        """
+        loc = self._loc()
+        self._advance()  # opening `
+        start = self.pos
+        while self.pos < len(self.src) and self._peek() != "`":
+            self._advance()
+        if self.pos >= len(self.src):
+            raise LexError("unterminated raw string literal", loc)
+        text = self.src[start : self.pos]
+        self._advance()  # closing `
+        return Token("RAWSTRING", text, loc)
+
     def _read_string(self) -> Token:
         loc = self._loc()
         self._advance()  # consume opening "
@@ -178,7 +201,16 @@ class Lexer:
                 self._advance()
                 esc = self._peek()
                 self._advance()
-                out.append({"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "0": "\0"}.get(esc, esc))
+                mapping = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "0": "\0"}
+                if esc in mapping:
+                    out.append(mapping[esc])
+                else:
+                    # Preserve unknown escape sequences verbatim — pell strings
+                    # are commonly used to carry regex patterns (`\d`, `\w`,
+                    # `\s`, `\b`) and SQL fragments (`\%`), so swallowing the
+                    # backslash would be more surprising than keeping it.
+                    out.append("\\")
+                    out.append(esc)
                 continue
             out.append(ch)
             self._advance()

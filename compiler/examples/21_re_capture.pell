@@ -1,0 +1,43 @@
+module re_capture_demo;
+
+// ---------------------------------------------------------------------------
+// `re::capture::<Record>` — extract named groups directly into a typed record.
+//
+// Each `(?<name>...)` group in the pattern maps to the record field of the
+// same name. Fields with no matching capture group remain NULL.
+// ---------------------------------------------------------------------------
+
+pub record Phone {
+    area:   text,
+    prefix: text,
+    line:   text,
+}
+
+pub fn parse_phone(s: text) -> Phone {
+    // Backtick raw string — preserves `{`, `}`, and `\` verbatim.
+    let p: Phone = re::capture::<Phone>(
+        s,
+        `(?<area>\d{3})-(?<prefix>\d{3})-(?<line>\d{4})`
+    );
+    return p;
+}
+
+pub record Email {
+    user:   text,
+    domain: text,
+}
+
+pub fn parse_email(s: text) -> Email {
+    let e: Email = re::capture::<Email>(s, `(?<user>\w+)@(?<domain>[\w.]+)`);
+    return e;
+}
+
+pub record KV {
+    k: text,
+    v: text,
+}
+
+pub fn parse_kv(s: text) -> KV {
+    let kv: KV = re::capture::<KV>(s, `(?<k>\w+)=(?<v>\S+)`);
+    return kv;
+}

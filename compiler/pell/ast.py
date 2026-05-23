@@ -116,6 +116,10 @@ class NumberLit(Expr):
 class TextLit(Expr):
     value: str  # already stripped of quotes; interpolation parts kept in `parts` if any
     parts: list["InterpPart"] = field(default_factory=list)
+    # Raw (backtick-delimited) literals skip `{name}` interpolation, so the
+    # value is taken verbatim. Lets regex patterns, file paths, etc. carry
+    # literal `{` and `}` characters.
+    is_raw: bool = False
 
 
 @dataclass
