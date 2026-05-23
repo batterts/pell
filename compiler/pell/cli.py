@@ -15,9 +15,9 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .emitter import emit, EmitError
+from .emitter import emit, emit_anon_block, EmitError
 from .lexer import tokenize
-from .parser import parse, ParseError
+from .parser import parse, parse_cell, ParseError
 from .lexer import LexError
 
 
@@ -202,6 +202,71 @@ def _dump_ast(node, depth: int = 0) -> None:
         print(f"{pad}{node!r}")
 
 
+def cmd_repl(args: argparse.Namespace) -> int:
+    try:
+        from .repl import run_repl
+    except ImportError as e:
+        print(f"pell: `pell repl` needs the optional repl dependencies; "
+              f"install with: pip install -e .[repl]\n  ({e})", file=sys.stderr)
+        return 2
+    return run_repl(args.connect, target=args.target)
+
+
+def cmd_exec(args: argparse.Namespace) -> int:
+    """Compile a pell cell (file or `-e` snippet) into an anonymous PL/SQL
+    block and run it against the connected database."""
+    if args.expr is not None and args.input is not None:
+        print("pell: pass either a file or -e, not both", file=sys.stderr)
+        return 2
+    if args.expr is not None:
+        source = args.expr
+        source_path = "<-e>"
+    elif args.input is not None:
+        source_path = args.input
+        source = Path(args.input).read_text()
+    else:
+        source = sys.stdin.read()
+        source_path = "<stdin>"
+    try:
+        items, stmts = parse_cell(source, source_path)
+    except (LexError, ParseError) as e:
+        print(f"pell: {e}", file=sys.stderr)
+        return 1
+    if not items and not stmts:
+        return 0
+    try:
+        block = emit_anon_block(items, stmts, target=args.target, source_path=source_path)
+    except EmitError as e:
+        print(f"pell: {e}", file=sys.stderr)
+        return 1
+    if args.dry_run:
+        print(block)
+        return 0
+    try:
+        from . import driver
+    except ImportError as e:
+        print(f"pell: `pell exec` needs the optional driver dependency; "
+              f"install with: pip install -e .[repl]\n  ({e})", file=sys.stderr)
+        return 2
+    try:
+        conn = driver.connect(args.connect)
+    except Exception as e:
+        print(f"pell: connection failed: {e}", file=sys.stderr)
+        return 1
+    try:
+        lines = conn.run_block(block)
+    except Exception as e:
+        print(f"pell: execution failed: {e}", file=sys.stderr)
+        if args.show_block:
+            print(block, file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    for ln in lines:
+        print(ln)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="pell", description=f"pell compiler v{__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -238,6 +303,25 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("input", help="path to a .pell file or a directory of them")
     r.add_argument("-o", "--output", help="write to this file instead of stdout")
     r.set_defaults(func=cmd_runtime)
+
+    ex = sub.add_parser(
+        "exec",
+        help="compile a pell cell to an anonymous PL/SQL block and run it",
+    )
+    ex.add_argument("input", nargs="?", help="path to a .pell file (or omit for stdin)")
+    ex.add_argument("-e", "--expr", help="inline pell source to execute")
+    ex.add_argument("-c", "--connect", help="user/pass@host:port/service (or set PELL_DB_URL)")
+    ex.add_argument("--target", choices=("23", "19c"), default="23")
+    ex.add_argument("--dry-run", action="store_true",
+                    help="print the emitted block and exit; don't connect to a database")
+    ex.add_argument("--show-block", action="store_true",
+                    help="on error, also print the emitted block to stderr")
+    ex.set_defaults(func=cmd_exec)
+
+    rp = sub.add_parser("repl", help="interactive pell notebook against a live Oracle")
+    rp.add_argument("-c", "--connect", help="user/pass@host:port/service (or set PELL_DB_URL)")
+    rp.add_argument("--target", choices=("23", "19c"), default="23")
+    rp.set_defaults(func=cmd_repl)
 
     args = p.parse_args(argv)
     return args.func(args)

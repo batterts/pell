@@ -30,6 +30,10 @@ PRIM_MAP = {
     "number":    "NUMBER",
     "int":       "PLS_INTEGER",
     "text":      "VARCHAR2(4000)",
+    # bigtext is `text` for input/output purposes, but lowers to CLOB so
+    # payloads can exceed 32K. Use it for params/columns that may hold
+    # large strings (file contents, log entries, JSON-as-text, etc.).
+    "bigtext":   "CLOB",
     "bool":      "BOOLEAN",
     "date":      "DATE",
     "timestamp": "TIMESTAMP",
@@ -45,6 +49,7 @@ PRIM_PARAM_MAP = {
     "number":    "NUMBER",
     "int":       "PLS_INTEGER",
     "text":      "VARCHAR2",
+    "bigtext":   "CLOB",
     "bool":      "BOOLEAN",
     "date":      "DATE",
     "timestamp": "TIMESTAMP",
@@ -384,6 +389,72 @@ class Emitter:
         chunks.append("")
         chunks.append(self._emit_body())
         return "\n".join(chunks)
+
+    def emit_anon(self) -> str:
+        """Emit the module as a self-contained DECLARE/BEGIN/END block.
+
+        Caller is responsible for synthesizing a `pell_anon_main` fn from the
+        cell's top-level statements; this method just nests every fn + record
+        in the DECLARE section and calls `pell_anon_main` from BEGIN.
+        """
+        # OBJECT-TYPE-requiring items have no place in an anon block —
+        # CREATE TYPE is schema-level only.
+        if self._types:
+            t = self._types[0]
+            raise EmitError(
+                "anon-block mode: `type` declarations need CREATE TYPE — "
+                "use `pell build` for the module instead.",
+                t.loc,
+            )
+        if self._sealed_types:
+            st = self._sealed_types[0]
+            raise EmitError(
+                "anon-block mode: `sealed type` needs CREATE TYPE.",
+                st.loc,
+            )
+        if self._aggregates:
+            ag = self._aggregates[0]
+            raise EmitError(
+                "anon-block mode: `aggregate` needs CREATE TYPE + AGGREGATE USING.",
+                ag.loc,
+            )
+        for fn in self._fns:
+            if any(a.name == "pipelined" for a in fn.annotations):
+                raise EmitError(
+                    "anon-block mode: @pipelined fns need schema-level OBJECT TYPES.",
+                    fn.loc,
+                )
+        if self._errors:
+            err = self._errors[0]
+            raise EmitError(
+                "anon-block mode: pell `error` decls need the runtime package — "
+                "install it once with `pell runtime`, then use `pell build`.",
+                err.loc,
+            )
+
+        # Drive per-fn body emit so list_type_decls and helper flags populate.
+        fn_bodies = [self._fn_body(fn) for fn in self._fns]
+
+        out: list[str] = []
+        out.append("DECLARE")
+        for rec in self._records:
+            out.append(self._render_record_type(rec, indent="  "))
+        for decl in self._list_type_decls:
+            out.append(decl)
+        if self._needs_split_helper:
+            out.append("")
+            out.append(self._split_helper_source())
+        if self._needs_panic_helper:
+            out.append("")
+            out.append(self._panic_helper_source())
+        for chunk in fn_bodies:
+            out.append("")
+            out.append(chunk)
+        out.append("BEGIN")
+        out.append("  pell_anon_main;")
+        out.append("END;")
+        out.append("/")
+        return "\n".join(out)
 
     # ---- pipelined schema types ----------------------------------------
 
@@ -4009,3 +4080,43 @@ def emit(module: A.Module, target: str = "23", *,
         source_text=source_text, source_path=source_path,
         reproducible=reproducible,
     ).emit()
+
+
+def emit_anon_block(
+    items: list[A.Item],
+    stmts: list[A.Stmt],
+    target: str = "23",
+    *,
+    source_path: Optional[str] = None,
+) -> str:
+    """Emit a cell (items + top-level statements) as a self-contained
+    anonymous PL/SQL block. Used by `pell exec` and the REPL.
+
+    `record` and `fn` items are nested as DECLARE-local types and
+    subprograms. `type` / `sealed` / `aggregate` items require schema-level
+    OBJECT TYPE and raise EmitError — use `pell build` for those.
+    """
+    loc = A.Loc(file=source_path or "<cell>", line=1, col=1)
+    if stmts:
+        loc = stmts[0].loc
+    elif items:
+        loc = items[0].loc
+    main_fn = A.FnDef(
+        loc=loc,
+        annotations=[],
+        is_pub=False,
+        name="pell_anon_main",
+        params=[],
+        return_type=None,
+        body=list(stmts),
+        finally_body=None,
+        is_unsafe=False,
+    )
+    module = A.Module(
+        loc=loc,
+        name="_pell_anon",
+        items=list(items) + [main_fn],
+    )
+    return Emitter(
+        module, target=target, source_path=source_path, reproducible=True,
+    ).emit_anon()

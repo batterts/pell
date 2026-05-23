@@ -1081,7 +1081,7 @@ class Parser:
         return A.MatchExpr(loc=kw.loc, scrutinee=scrut, arms=arms)
 
 
-PRIMITIVES = {"number", "int", "text", "bool", "date", "timestamp", "interval", "bytes", "json", "Unit"}
+PRIMITIVES = {"number", "int", "text", "bigtext", "bool", "date", "timestamp", "interval", "bytes", "json", "Unit"}
 
 
 def _looks_like_struct_lit(p: Parser) -> bool:
@@ -1104,3 +1104,29 @@ def _looks_like_struct_lit(p: Parser) -> bool:
 def parse(source: str, filename: str = "<input>") -> A.Module:
     toks = tokenize(source, filename)
     return Parser(toks).parse_module()
+
+
+_ITEM_LEAD_KEYWORDS = (
+    "pub", "unsafe", "import", "fn", "record", "error",
+    "sealed", "type", "aggregate", "seq", "enum",
+)
+
+
+def parse_cell(source: str, filename: str = "<cell>") -> tuple[list[A.Item], list[A.Stmt]]:
+    """Parse a REPL/exec cell: a stream of items and statements interleaved,
+    no `module` header required. Items go into the running module; statements
+    become the body of the anonymous PL/SQL block.
+
+    Annotations (`@name`) ahead of an item lead are part of the item; ahead
+    of anything else, they're a parse error.
+    """
+    toks = tokenize(source, filename)
+    p = Parser(toks)
+    items: list[A.Item] = []
+    stmts: list[A.Stmt] = []
+    while not p._at("EOF"):
+        if p._at("AT") or any(p._at_keyword(kw) for kw in _ITEM_LEAD_KEYWORDS):
+            items.append(p._parse_item())
+        else:
+            stmts.append(p._parse_stmt())
+    return items, stmts

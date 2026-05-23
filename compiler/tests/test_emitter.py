@@ -1597,3 +1597,71 @@ def test_jq_string_literal_filter():
     """)
     assert "f0 VARCHAR2(4000) PATH '$.role'" in sql
     assert "jt.f0 = 'admin'" in sql
+
+
+def test_bigtext_lowers_to_clob():
+    sql = compile_to_sql("""
+        module m;
+        pub fn store(payload: bigtext) -> number {
+            return length(payload);
+        }
+        pub fn echo_back(payload: bigtext) -> bigtext {
+            return payload;
+        }
+    """)
+    assert "FUNCTION store(p_payload IN CLOB) RETURN NUMBER" in sql
+    assert "FUNCTION echo_back(p_payload IN CLOB) RETURN CLOB" in sql
+
+
+def test_bigtext_in_record_field_lowers_to_clob():
+    sql = compile_to_sql("""
+        module m;
+        pub record Doc {
+            id: number,
+            body: bigtext,
+        }
+    """)
+    assert "body CLOB" in sql
+
+
+# ---------------------------------------------------------------------------
+# emit_anon_block — anonymous PL/SQL for `pell exec` / REPL
+# ---------------------------------------------------------------------------
+
+
+def test_emit_anon_block_wraps_stmts_in_pell_anon_main():
+    from pell.parser import parse_cell
+    from pell.emitter import emit_anon_block
+    items, stmts = parse_cell("""
+        let x: number = 21;
+        let y: number = x * 2;
+    """)
+    block = emit_anon_block(items, stmts)
+    assert block.startswith("DECLARE")
+    assert "PROCEDURE pell_anon_main IS" in block
+    assert "l_x NUMBER" in block and "l_y NUMBER" in block
+    assert "BEGIN\n  pell_anon_main;\nEND;" in block
+
+
+def test_emit_anon_block_nests_fns_and_records():
+    from pell.parser import parse_cell
+    from pell.emitter import emit_anon_block
+    items, stmts = parse_cell("""
+        fn square(n: number) -> number { return n * n; }
+        record Pair { a: number, b: number }
+        let p: number = square(7);
+    """)
+    block = emit_anon_block(items, stmts)
+    assert "FUNCTION square(p_n IN NUMBER) RETURN NUMBER IS" in block
+    assert "TYPE t_pair IS RECORD" in block
+    assert "l_p := square(7);" in block
+
+
+def test_emit_anon_block_rejects_schema_level_items():
+    from pell.parser import parse_cell
+    from pell.emitter import emit_anon_block, EmitError
+    items, stmts = parse_cell("""
+        pub type Animal { name: text; }
+    """)
+    with pytest.raises(EmitError):
+        emit_anon_block(items, stmts)

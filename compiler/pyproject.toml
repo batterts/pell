@@ -4,6 +4,14 @@ version = "0.0.1"
 description = "MVP transpiler from pell to Oracle PL/SQL 23"
 requires-python = ">=3.11"
 
+[project.optional-dependencies]
+# `pell exec` and `pell repl` need a driver and a TUI. Compiler stays
+# dependency-free; install with `pip install -e .[repl]` to enable.
+repl = [
+    "oracledb>=2.0",
+    "prompt_toolkit>=3.0",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
