@@ -1,0 +1,67 @@
+module signups.validate;
+
+// ---------------------------------------------------------------------------
+// Input validation for a signup form. Demonstrates typed errors composed
+// into a Result<T, E1 | E2 | E3> union, the `?` propagation operator, and
+// the @skip / @propagate error categories from §6.x of design.md.
+//
+// Each individual checker returns Result<value, specific-error>; the
+// top-level `validate_signup` composes them with `?` so the first failure
+// short-circuits and the caller gets exactly one variant back.
+// ---------------------------------------------------------------------------
+
+pub record SignupForm {
+    name: text,
+    email: text,
+    age: number,
+}
+
+pub error MissingField     { field: text }
+pub error InvalidEmail     { value: text, reason: text }
+pub error AgeOutOfRange    { value: number, min: number, max: number }
+
+// Required-field check: rejects NULL or whitespace-only input.
+// Note we explicitly compare against `is_empty()` because Oracle's `''`
+// is NULL — direct equality with `""` would always evaluate to UNKNOWN.
+pub fn require_text(field: text, value: text) -> Result<text, MissingField> {
+    if value.is_empty() {
+        return Err(MissingField { field: field });
+    }
+    return Ok(value);
+}
+
+// Email-shape check: minimal "has an @ and a dot after it" heuristic.
+// Real systems should use RFC 5322 + a verification round-trip; this is
+// a cheap front-end gate to catch typos.
+pub fn require_email(value: text) -> Result<text, InvalidEmail> {
+    if value.is_empty() {
+        return Err(InvalidEmail { value: value, reason: "empty" });
+    }
+    if value.contains("@") == false {
+        return Err(InvalidEmail { value: value, reason: "no @" });
+    }
+    if value.ends_with(".") || value.starts_with(".") {
+        return Err(InvalidEmail { value: value, reason: "leading/trailing dot" });
+    }
+    return Ok(value);
+}
+
+// Age range — common "between 13 and 120" gate.
+pub fn require_age(value: number) -> Result<number, AgeOutOfRange> {
+    if value < 13 || value > 120 {
+        return Err(AgeOutOfRange { value: value, min: 13, max: 120 });
+    }
+    return Ok(value);
+}
+
+// Compose the whole pipeline. Each `?` propagates the FIRST error
+// encountered and bypasses subsequent checks; on success we get back a
+// validated SignupForm record.
+pub fn validate_signup(form: SignupForm)
+    -> Result<SignupForm, MissingField | InvalidEmail | AgeOutOfRange>
+{
+    let name: text = require_text("name", form.name)?;
+    let email: text = require_email(form.email)?;
+    let age: number = require_age(form.age)?;
+    return Ok(SignupForm { name: name, email: email, age: age });
+}

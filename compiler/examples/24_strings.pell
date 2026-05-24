@@ -1,0 +1,86 @@
+module text_utils;
+
+// ---------------------------------------------------------------------------
+// Everyday string utilities — wraps common Oracle text functions and the
+// pell `.contains` / `.starts_with` / `.ends_with` / `.is_empty` aliases
+// behind a tidy interface so callers don't have to remember which name
+// Oracle uses (LENGTH vs LEN, SUBSTR vs SUBSTRING, INSTR vs INDEX_OF, etc.).
+// ---------------------------------------------------------------------------
+
+// Length in characters (uses Oracle's LENGTH, not LENGTHB).
+pub fn len(s: text) -> number {
+    return length(s);
+}
+
+// Surrounding-whitespace trim using LTRIM + RTRIM (Oracle's TRIM(BOTH ...)
+// requires a separator literal at SQL parse time).
+pub fn trim_ws(s: text) -> text {
+    return ltrim(rtrim(s));
+}
+
+// Lowercase / uppercase. Named `to_lower`/`to_upper` rather than
+// `lower`/`upper` to avoid shadowing Oracle's bare-function builtins —
+// pell's free-fn resolution prefers same-module fns over builtins, so a
+// fn named `lower` calling `lower(s)` would infinitely recurse instead
+// of reaching `LOWER(...)`.
+pub fn to_lower(s: text) -> text { return lower(s); }
+pub fn to_upper(s: text) -> text { return upper(s); }
+
+// 1-indexed substring; semantics match Oracle's SUBSTR(s, start, length).
+// A length of 0 returns "" (which becomes NULL by Oracle semantics — see
+// memory: `''` is NULL — so callers should treat the absence of value as
+// "either empty or genuinely missing").
+pub fn substring(s: text, start: number, length: number) -> text {
+    return substr(s, start, length);
+}
+
+// True when `s` looks blank — NULL, empty, or whitespace-only.
+pub fn is_blank(s: text) -> bool {
+    return s.is_empty() || trim_ws(s).is_empty();
+}
+
+// True when haystack contains needle.
+pub fn has(haystack: text, needle: text) -> bool {
+    return haystack.contains(needle);
+}
+
+// Replace every occurrence of `from_` with `to_`. Named `replace_all`
+// rather than `replace` because Oracle's REPLACE has slightly different
+// edge-case behavior around NULL replacements; we make ours explicit.
+pub fn replace_all(s: text, from_: text, to_: text) -> text {
+    return replace(s, from_, to_);
+}
+
+// Left-pad with a single character so the result is at least `width` wide.
+// Wraps Oracle's LPAD; passing a width <= len(s) returns s unchanged.
+pub fn left_pad(s: text, width: number, ch: text) -> text {
+    return lpad(s, width, ch);
+}
+
+// Right-pad with a single character (RPAD).
+pub fn right_pad(s: text, width: number, ch: text) -> text {
+    return rpad(s, width, ch);
+}
+
+// Split `s` on `delim` into a list<text> via the pell .split() method,
+// which lowers to a per-module REGEXP_SUBSTR helper.
+pub fn split(s: text, delim: text) -> list<text> {
+    let parts: list<text> = s.split(delim);
+    return parts;
+}
+
+// Count occurrences of `needle` in `haystack`. Uses INSTR-walk semantics
+// so overlapping matches are counted only once.
+pub fn count_of(haystack: text, needle: text) -> number {
+    let n: number = sql! {
+        select regexp_count(:haystack, :needle) from dual
+    }.one();
+    return n;
+}
+
+// Reverse the characters in `s`. Oracle's REVERSE is byte-level by default,
+// which behaves correctly only for single-byte charsets; for multibyte
+// data, callers should use a regexp-based reverse instead.
+pub fn reversed(s: text) -> text {
+    return reverse(s);
+}

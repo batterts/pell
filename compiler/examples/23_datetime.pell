@@ -1,0 +1,170 @@
+module std.datetime;
+
+// ---------------------------------------------------------------------------
+// Date / time / timezone library — wraps Oracle's native types so callers
+// see a friendly API and never need to write EXTRACT / FROM_TZ / AT TIME ZONE
+// directly. Surface:
+//
+//   now()              → current SYSTIMESTAMP (TIMESTAMP)
+//   today()            → midnight today (DATE-truncated TIMESTAMP)
+//   utc_now()          → current UTC instant (TIMESTAMP)
+//
+//   convert_tz(ts, src, dst)      → re-project a naive TIMESTAMP between zones
+//   to_utc(ts, src)               → src-tz TIMESTAMP → UTC TIMESTAMP
+//   from_utc(ts, dst)             → UTC TIMESTAMP → dst-tz TIMESTAMP
+//
+//   seconds_between(a, b)         → integer seconds  (a - b)
+//   subseconds_between(a, b)      → fractional seconds (sub-ms precision)
+//   minutes_between(a, b)         → seconds_between / 60
+//   hours_between(a, b)           → seconds_between / 3600
+//   days_between(a, b)            → seconds_between / 86400
+//
+//   epoch(ts)                     → seconds since 1970-01-01 00:00:00 UTC
+//   from_epoch(secs)              → TIMESTAMP at the given epoch second
+//
+//   format_iso(ts)                → "2026-05-23T14:07:09.123Z"-style text
+//   parse_iso(s)                  → TIMESTAMP from an ISO-8601 string
+//
+//   add_days(ts, n)               → ts + n days
+//   add_seconds(ts, n)            → ts + n seconds
+//
+// All conversions go through PL/SQL's native arithmetic where possible; the
+// few cases that need SQL syntax (AT TIME ZONE, CAST AS TIMESTAMP) wrap in
+// sql!{ select ... from dual }.one() so the lowering is uniform.
+// ---------------------------------------------------------------------------
+
+// ---- core "now" / "today" --------------------------------------------------
+
+pub fn now() -> timestamp {
+    return systimestamp();
+}
+
+pub fn utc_now() -> timestamp {
+    let r: timestamp = sql! {
+        select cast(sys_extract_utc(systimestamp) as timestamp) from dual
+    }.one();
+    return r;
+}
+
+pub fn today() -> timestamp {
+    return cast_to_timestamp(trunc(sysdate()));
+}
+
+// Trivial wrapper so the surface above stays composable; pell has no
+// `cast(... as ...)` expression, so we route through sql!{}.
+fn cast_to_timestamp(d: date) -> timestamp {
+    let r: timestamp = sql! { select cast(:d as timestamp) from dual }.one();
+    return r;
+}
+
+// ---- timezone conversion ---------------------------------------------------
+
+// Re-project a naive TIMESTAMP from src_tz into dst_tz. The intermediate
+// TIMESTAMP WITH TIME ZONE is collapsed back to a naive TIMESTAMP at the
+// destination wall-clock.
+pub fn convert_tz(ts: timestamp, src_tz: text, dst_tz: text) -> timestamp {
+    let r: timestamp = sql! {
+        select cast(from_tz(:ts, :src_tz) at time zone :dst_tz as timestamp)
+        from dual
+    }.one();
+    return r;
+}
+
+pub fn to_utc(ts: timestamp, src_tz: text) -> timestamp {
+    return convert_tz(ts, src_tz, "UTC");
+}
+
+pub fn from_utc(ts: timestamp, dst_tz: text) -> timestamp {
+    return convert_tz(ts, "UTC", dst_tz);
+}
+
+// ---- subtraction → seconds / subseconds ------------------------------------
+
+// Integer seconds in (a - b). Negative when b is later.
+//
+// Oracle's TIMESTAMP arithmetic returns an INTERVAL DAY TO SECOND. We
+// decompose via EXTRACT (hidden behind pell's .day()/.hour()/.minute()/
+// .second() method aliases) and sum into a single NUMBER. The .second()
+// alias yields fractional seconds, so we TRUNC for the integer variant.
+pub fn seconds_between(a: timestamp, b: timestamp) -> number {
+    let d: interval = a - b;
+    let exact: number = d.day() * 86400 + d.hour() * 3600 + d.minute() * 60 + d.second();
+    return trunc(exact);
+}
+
+// Fractional seconds in (a - b). Preserves Oracle's sub-second precision
+// (up to 9 fractional digits depending on the underlying TIMESTAMP scale).
+pub fn subseconds_between(a: timestamp, b: timestamp) -> number {
+    let d: interval = a - b;
+    return d.day() * 86400 + d.hour() * 3600 + d.minute() * 60 + d.second();
+}
+
+pub fn minutes_between(a: timestamp, b: timestamp) -> number {
+    return seconds_between(a, b) / 60;
+}
+
+pub fn hours_between(a: timestamp, b: timestamp) -> number {
+    return seconds_between(a, b) / 3600;
+}
+
+pub fn days_between(a: timestamp, b: timestamp) -> number {
+    return seconds_between(a, b) / 86400;
+}
+
+// ---- epoch <-> timestamp ---------------------------------------------------
+
+// Seconds since the Unix epoch (1970-01-01T00:00:00Z), as a NUMBER. The
+// reference instant is constructed via FROM_TZ on a literal TIMESTAMP and
+// fed back through seconds_between() so the caller's TZ doesn't matter.
+pub fn epoch(ts: timestamp) -> number {
+    let origin: timestamp = sql! {
+        select cast(from_tz(timestamp '1970-01-01 00:00:00', 'UTC') as timestamp)
+        from dual
+    }.one();
+    return seconds_between(ts, origin);
+}
+
+pub fn from_epoch(secs: number) -> timestamp {
+    let r: timestamp = sql! {
+        select cast(from_tz(timestamp '1970-01-01 00:00:00', 'UTC')
+                    + numtodsinterval(:secs, 'SECOND') as timestamp)
+        from dual
+    }.one();
+    return r;
+}
+
+// ---- formatting / parsing --------------------------------------------------
+
+// Render a TIMESTAMP in ISO-8601 with millisecond precision and a 'Z'
+// suffix (treating the value as already-UTC). Use to_utc() first if the
+// source isn't UTC.
+pub fn format_iso(ts: timestamp) -> text {
+    return to_char(ts, "YYYY-MM-DD\"T\"HH24:MI:SS.FF3\"Z\"");
+}
+
+// Parse an ISO-8601 string into a TIMESTAMP. Accepts a 'Z' or numeric
+// offset suffix; the suffix is consumed by TO_TIMESTAMP_TZ and then CAST
+// down to a naive TIMESTAMP at the indicated instant.
+pub fn parse_iso(s: text) -> timestamp {
+    let r: timestamp = sql! {
+        select cast(to_timestamp_tz(:s, 'YYYY-MM-DD"T"HH24:MI:SS.FF TZH:TZM') as timestamp)
+        from dual
+    }.one();
+    return r;
+}
+
+// ---- arithmetic helpers ----------------------------------------------------
+
+// Add an integer or fractional number of days. Uses Oracle's native DATE+N
+// semantics via DATE-coercion, then casts back to TIMESTAMP.
+pub fn add_days(ts: timestamp, n: number) -> timestamp {
+    let r: timestamp = sql! {
+        select cast((cast(:ts as date) + :n) as timestamp) from dual
+    }.one();
+    return r;
+}
+
+// Add N seconds using NUMTODSINTERVAL — safe for sub-second N.
+pub fn add_seconds(ts: timestamp, n: number) -> timestamp {
+    return ts + numtodsinterval(n, "SECOND");
+}

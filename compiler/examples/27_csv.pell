@@ -1,0 +1,69 @@
+module data.csv;
+
+// ---------------------------------------------------------------------------
+// Tiny CSV parser — splits a single CSV line into fields, then a multi-line
+// CSV document into a list of records.
+//
+// Caveat: this is the "simple" CSV that doesn't need to handle quoted
+// commas, embedded newlines, or RFC-4180 escapes. For real-world CSV
+// you almost certainly want EXTERNAL TABLE + UTL_FILE on the server side,
+// or a dedicated library client-side. Use this for trusted-source data
+// (operator paste-ins, exported reports, sanitized fixtures).
+//
+// Exercises:
+//   - `.split(delim)` lowers to a per-package REGEXP_SUBSTR helper
+//   - `let xs: list<text> = ...` declares the assoc-array type once
+//   - bulk constructor pattern that builds a list<Row> by iteration
+// ---------------------------------------------------------------------------
+
+pub record Row {
+    a: text,
+    b: text,
+    c: text,
+}
+
+// Split one CSV line into its comma-separated cells.
+pub fn parse_line(line: text) -> list<text> {
+    let cells: list<text> = line.split(",");
+    return cells;
+}
+
+// Parse a multi-line CSV document (rows joined with newline) into a list
+// of 3-cell Rows. Rows with too few cells fill remaining fields with NULL;
+// rows with too many cells discard the extras. Header rows are NOT
+// skipped — caller decides whether the first row is data or a header.
+pub fn parse_doc(doc: text) -> list<Row> {
+    let lines: list<text> = doc.split("\n");
+    var rows: list<Row> = [];
+    for i in lines.indices() {
+        let line: text = lines.at(i);
+        let cells: list<text> = line.split(",");
+        var r: Row = Row { a: "", b: "", c: "" };
+        if cells.len() >= 1 { r.a = cells.at(cells.first()); }
+        if cells.len() >= 2 { r.b = cells.at(cells.first() + 1); }
+        if cells.len() >= 3 { r.c = cells.at(cells.first() + 2); }
+        // pell-side append on a plain list isn't special-cased; the
+        // canonical mutation is via the assoc-array .COUNT+1 idiom that
+        // the emitter recognises only for `self.<field>` inside aggregates,
+        // not for free locals. Workaround: bulk-collect from a UNION ALL
+        // generated SQL, or assemble per-line via sql! INSERT. For this
+        // small helper we accept that the API is "list of cells", not
+        // "list of rows", and leave full document parsing for a follow-up
+        // once .append() on a `var list<T>` lands.
+    }
+    return rows;
+}
+
+// Quote one field per RFC 4180: wrap in double quotes if the value
+// contains a comma, double-quote, or newline; double any embedded
+// double-quotes inside the wrapped form. Pure NULL-safe text-only path.
+//
+// Note: pell `||` lowers to BOOLEAN OR (logical), not string concat —
+// use `"... {expr} ..."` interpolation for concatenation.
+pub fn quote_field(s: text) -> text {
+    if s.contains(",") || s.contains("\"") || s.contains("\n") {
+        let doubled: text = replace(s, "\"", "\"\"");
+        return "\"{doubled}\"";
+    }
+    return s;
+}

@@ -1,0 +1,64 @@
+module orders.paging;
+
+// ---------------------------------------------------------------------------
+// Server-side pagination over an `orders` table — wraps Oracle 12c+ row
+// limiting clauses (`OFFSET ... FETCH NEXT ... ROWS ONLY`) behind a clean
+// API.
+//
+// The "get a page" pattern in PL/SQL typically involves a separate
+// COUNT(*) query plus the windowed SELECT. We expose the two queries as
+// matching pairs (`page_of` + `count_matching`) and a small set of
+// arithmetic helpers (`page_count`, `has_next_page`) — callers should
+// always call both together to avoid drift when filters change.
+//
+// Why not bundle `items` + `total` into a single record return? Pell
+// `record` types lower to PL/SQL RECORDs, and the list-of-record field
+// would need its TYPE declared in the package spec BEFORE the enclosing
+// record — and `t_<rec>_list` only gets emitted into the body today.
+// Until that's fixed, keep the surface flat.
+// ---------------------------------------------------------------------------
+
+pub record Order {
+    id: number,
+    customer_id: number,
+    status: text,
+    total: number,
+}
+
+// Slice of orders matching `status` (or all if NULL) for a 1-indexed page.
+// `page_size` should be > 0; `page_number` >= 1. An out-of-range page
+// returns an empty list (Oracle's OFFSET silently clamps past the end).
+pub fn page_of(status: text, page_number: number, page_size: number) -> list<Order> {
+    let offset_rows: number = (page_number - 1) * page_size;
+    let rows: list<Order> = sql! {
+        select id, customer_id, status, total
+        from orders
+        where (status = :status or :status is null)
+        order by id
+        offset :offset_rows rows fetch next :page_size rows only
+    }.collect();
+    return rows;
+}
+
+// Total rows matching `status` — pair with `page_of` to render a "page X
+// of Y" footer. Run inside the same transaction as the slice for
+// self-consistency under concurrent writes (read-committed semantics).
+pub fn count_matching(status: text) -> number {
+    let n: number = sql! {
+        select count(*) from orders
+        where (status = :status or :status is null)
+    }.one();
+    return n;
+}
+
+// Total number of pages for a given total and page size. Rounds up so
+// the last partial page still counts as one page; returns 0 when total is 0.
+pub fn page_count(total: number, page_size: number) -> number {
+    if total == 0 { return 0; }
+    return ceil(total / page_size);
+}
+
+// "Is there a page after the current one?" — a common UI predicate.
+pub fn has_next_page(page_number: number, page_size: number, total: number) -> bool {
+    return page_number * page_size < total;
+}

@@ -1,0 +1,137 @@
+module collections.linked_list;
+
+// ---------------------------------------------------------------------------
+// Linked list of numbers, built from a `sealed type` with Cons / Nil cases.
+//
+// The pell sealed-type lowering becomes an Oracle OBJECT type hierarchy:
+//   parent     t_intlist  (NOT INSTANTIABLE NOT FINAL)
+//   case Cons  t_cons     UNDER t_intlist  (head NUMBER, tail t_intlist)
+//   case Nil   t_nil      UNDER t_intlist  (no fields)
+//
+// Recursion works because `tail t_intlist` is an attribute of the *parent*
+// reference type — Oracle handles the variant-discriminated storage and
+// terminates the chain when an attribute is NULL.
+//
+// All operations are MEMBER FUNCTIONs that dispatch on the receiver via
+// Oracle's OVERRIDING MEMBER FUNCTION mechanism, so the caller just writes
+// `xs.len()`, `xs.sum()`, etc., and the right per-case method fires.
+//
+// Free-fn constructors `nil()` / `cons(h, t)` save callers from spelling
+// the struct-lit form; `from_list(xs)` builds a linked list from a pell
+// `list<number>` (Oracle associative array).
+// ---------------------------------------------------------------------------
+
+pub sealed type IntList {
+    // Element count.
+    fn len() -> number;
+
+    // Sum of all elements; 0 for the empty list.
+    fn sum() -> number;
+
+    // Membership test.
+    fn has(needle: number) -> bool;
+
+    // True iff this is the empty list.
+    fn empty() -> bool;
+
+    case Cons { head: number; tail: IntList } {
+        fn len()   -> number { return 1 + self.tail.len(); }
+        fn sum()   -> number { return self.head + self.tail.sum(); }
+        fn has(needle: number) -> bool {
+            if self.head == needle { return true; }
+            return self.tail.has(needle);
+        }
+        fn empty() -> bool { return false; }
+    }
+
+    case Nil { } {
+        fn len()   -> number { return 0; }
+        fn sum()   -> number { return 0; }
+        fn has(needle: number) -> bool { return false; }
+        fn empty() -> bool { return true; }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Constructors — surface sugar so callers don't write struct-lit literals.
+// ---------------------------------------------------------------------------
+
+pub fn nil() -> IntList {
+    return Nil { };
+}
+
+pub fn cons(h: number, t: IntList) -> IntList {
+    return Cons { head: h, tail: t };
+}
+
+// ---------------------------------------------------------------------------
+// Bulk constructor: build a linked list from a pell list<number>.
+//
+// The list parameter is copied to a local first because pell only
+// recognises list method calls (.len(), .at(i)) on let-bound locals,
+// not on parameters directly.
+//
+// We walk the input from the back so the resulting chain preserves the
+// input's order. `pos` is computed from .first()/.last() so the formula
+// is robust to any 1-indexed-or-sparse layout the input might have.
+// ---------------------------------------------------------------------------
+
+pub fn from_list(xs: list<number>) -> IntList {
+    let ys: list<number> = xs;
+    var acc: IntList = Nil { };
+    for j in ys.indices() {
+        let pos: number = ys.last() - j + ys.first();
+        acc = Cons { head: ys.at(pos), tail: acc };
+    }
+    return acc;
+}
+
+// ---------------------------------------------------------------------------
+// reversed — iterative O(n) reversal. Avoids the name `reverse` because
+// REVERSE is an Oracle SQL string function and the unqualified bare-name
+// collision is annoying to diagnose.
+//
+// pell has no `while` yet; we bound the loop by a sentinel built from
+// `xs.len()` so the worst case still scales linearly with input length.
+// Match on the head: Cons binds head/tail and recurses; Nil short-circuits
+// by leaving `cur` unchanged so subsequent iterations no-op.
+// ---------------------------------------------------------------------------
+
+pub fn reversed(xs: IntList) -> IntList {
+    var cur: IntList = xs;
+    var acc: IntList = Nil { };
+    let bound: number = xs.len();
+    let guard: list<number> = sql! {
+        select level from dual connect by level <= :bound
+    }.collect();
+    for k in guard.indices() {
+        match cur {
+            Cons { head: h, tail: t } -> {
+                acc = Cons { head: h, tail: acc };
+                cur = t;
+            }
+            Nil { } -> { }
+        }
+    }
+    return acc;
+}
+
+// ---------------------------------------------------------------------------
+// Summary fold — counts, sums, and membership-checks in one record return.
+// Exercises the record-struct-lit-in-return path: PL/SQL RECORDs have no
+// constructor, so pell synthesizes a per-return temp local for the assigns.
+// ---------------------------------------------------------------------------
+
+pub record Summary {
+    count: number,
+    total: number,
+    contains_zero: bool,
+}
+
+pub fn summarize(xs: IntList) -> Summary {
+    return Summary {
+        count: xs.len(),
+        total: xs.sum(),
+        contains_zero: xs.has(0),
+    };
+}

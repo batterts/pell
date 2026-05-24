@@ -1526,6 +1526,19 @@ class Emitter:
         # sql!{}.one() (no question mark) — still emit the select-into
         if isinstance(expr, A.Call):
             return self._emit_call_assignment(target, expr, indent)
+        # Record struct-lit: PL/SQL RECORD types have no constructor, so we
+        # field-by-field assign to the (already-declared) target. OBJECT-type
+        # struct-lits flow through _emit_expr → _emit_obj_constructor instead.
+        if isinstance(expr, A.StructLit) and expr.type_name not in self._type_names:
+            rec = self._lookup_record(expr.type_name)
+            if rec is not None:
+                provided = {f.name: f.value for f in expr.fields}
+                lines: list[str] = []
+                for f in rec.fields:
+                    if f.name in provided:
+                        val = self._emit_expr(provided[f.name])
+                        lines.append(f"{indent}{target}.{f.name.lower()} := {val};")
+                return lines
         return [f"{indent}{target} := {self._emit_expr(expr)};"]
 
     def _infer_decl_type(self, value: Optional[A.Expr]) -> Optional[str]:
@@ -2700,8 +2713,43 @@ class Emitter:
             return prefix + [f"{indent}RETURN;"]
         # `return Ok(x)` → RETURN x;
         if isinstance(s.value, A.OkExpr):
-            return prefix + [f"{indent}RETURN {self._emit_expr(s.value.inner)};"]
+            inner = s.value.inner
+            # `return Ok(Record { ... })` — same record-temp dance as below.
+            if isinstance(inner, A.StructLit) and inner.type_name not in self._type_names:
+                temp = self._record_return_temp(inner)
+                if temp is not None:
+                    temp_name, decl_type, assigns = temp
+                    self._decl(f"{temp_name} {decl_type};")
+                    return prefix + assigns + [f"{indent}RETURN {temp_name};"]
+            return prefix + [f"{indent}RETURN {self._emit_expr(inner)};"]
+        # `return Record { ... }` — RECORDs have no PL/SQL constructor, so
+        # declare a temp local, field-by-field assign, and return the temp.
+        if isinstance(s.value, A.StructLit) and s.value.type_name not in self._type_names:
+            temp = self._record_return_temp(s.value)
+            if temp is not None:
+                temp_name, decl_type, assigns = temp
+                self._decl(f"{temp_name} {decl_type};")
+                return prefix + assigns + [f"{indent}RETURN {temp_name};"]
         return prefix + [f"{indent}RETURN {self._emit_expr(s.value)};"]
+
+    def _record_return_temp(self, sl: A.StructLit) -> Optional[tuple[str, str, list[str]]]:
+        """Build (temp_name, decl_type, [assign_lines]) for a record StructLit
+        used in a return position. Returns None if `sl.type_name` is not a
+        known record (caller falls back to the default emit path).
+        """
+        rec = self._lookup_record(sl.type_name)
+        if rec is None:
+            return None
+        provided = {f.name: f.value for f in sl.fields}
+        self._sql_var_counter += 1
+        temp_name = f"l_ret_{self._sql_var_counter}"
+        decl_type = _record_type_name(sl.type_name)
+        lines: list[str] = []
+        for f in rec.fields:
+            if f.name in provided:
+                val = self._emit_expr(provided[f.name])
+                lines.append(f"    {temp_name}.{f.name.lower()} := {val};")
+        return temp_name, decl_type, lines
 
     def _emit_err_return(self, payload_expr: A.Expr, indent: str) -> list[str]:
         """Lower `return Err(<variant>)` to: set SYS_CONTEXT payload + RAISE.
@@ -2996,39 +3044,55 @@ class Emitter:
             bind_name: Optional[str] = None
             if pat.args and isinstance(pat.args[0], A.BindingPattern):
                 bind_name = pat.args[0].name
-            # Struct-form pattern (`Circle { radius }`) — bind each named field as a local.
-            field_binds: list[tuple[str, str]] = []  # (pell field name, local var name)
+            # Struct-form pattern. Two surface shapes:
+            #   `Circle { radius }`     — bind `radius` (field-name = local-name)
+            #   `Cons { head: h, tail: t }` — bind `h`, `t` (rename via inner pattern)
+            # Stored as triples: (pell-side bind name, PL/SQL local name, source field name).
+            field_binds: list[tuple[str, str, str]] = []
             if pat.fields:
                 for fp in pat.fields:
-                    field_binds.append((fp.name, local_name(fp.name)))
+                    bind_pell_name = fp.name  # shorthand
+                    if isinstance(fp.pattern, A.BindingPattern):
+                        bind_pell_name = fp.pattern.name
+                    elif isinstance(fp.pattern, A.WildcardPattern):
+                        continue  # `head: _` discards the field; no bind
+                    field_binds.append((bind_pell_name, local_name(bind_pell_name), fp.name))
             inner_indent = indent + "  "
             if bind_name is not None or field_binds:
                 out.append(f"{inner_indent}DECLARE")
                 if bind_name is not None:
                     out.append(f"{inner_indent}  {local_name(bind_name)} {case_pl};")
-                for pell_name, pl_name in field_binds:
+                for bind_pell, pl_name, src_field in field_binds:
                     # Field types come from the case (or its parent's fields).
-                    ftype = self._case_field_type(case, pell_name)
+                    ftype = self._case_field_type(case, src_field)
                     if ftype is None:
                         raise EmitError(
-                            f"case {case.name} has no field {pell_name!r}",
+                            f"case {case.name} has no field {src_field!r}",
                             arm.loc,
                         )
                     out.append(f"{inner_indent}  {pl_name} {ftype};")
                 out.append(f"{inner_indent}BEGIN")
                 if bind_name is not None:
                     out.append(f"{inner_indent}  {local_name(bind_name)} := TREAT(({scrut_code}) AS {case_pl});")
-                for pell_name, pl_name in field_binds:
+                for bind_pell, pl_name, src_field in field_binds:
                     out.append(
-                        f"{inner_indent}  {pl_name} := TREAT(({scrut_code}) AS {case_pl}).{pell_name.lower()};"
+                        f"{inner_indent}  {pl_name} := TREAT(({scrut_code}) AS {case_pl}).{src_field.lower()};"
                     )
-                # Inside the bound block, register the binding so identifier lookup works.
-                save_params = self._params
-                self._params = set(self._params) | ({bind_name} if bind_name else set()) | {n for n, _ in field_binds}
+                # Inside the bound block, register the binding in _local_types
+                # (not _params) so _lower_ident returns the `l_` prefix that
+                # matches our DECLARE above. Storing in _params would yield
+                # `p_<n>` references with no matching parameter.
+                save_local_types = dict(self._local_types)
+                if bind_name is not None:
+                    self._local_types[bind_name] = case_pl
+                for bind_pell, _, src_field in field_binds:
+                    ftype = self._case_field_type(case, src_field)
+                    if ftype is not None:
+                        self._local_types[bind_pell] = ftype
                 try:
                     self._emit_arm_body(arm.body, out, inner_indent + "  ")
                 finally:
-                    self._params = save_params
+                    self._local_types = save_local_types
                 out.append(f"{inner_indent}END;")
             else:
                 self._emit_arm_body(arm.body, out, inner_indent)
@@ -3037,6 +3101,10 @@ class Emitter:
 
     def _emit_arm_body(self, body, out: list[str], indent: str) -> None:
         if isinstance(body, list):
+            if not body:
+                # Oracle requires at least one statement per IF/ELSIF branch.
+                out.append(f"{indent}NULL;")
+                return
             for stmt in body:
                 out.extend(self._emit_stmt(stmt, indent))
         else:
@@ -4090,6 +4158,7 @@ class Emitter:
 
         - `self` inside a method body → yes (the enclosing type).
         - A parameter whose declared type is a known type → yes.
+        - A let-bound local whose declared PL/SQL type matches a known OBJECT type → yes.
         - A MemberAccess whose final field is declared as a known type → yes.
         Otherwise no (caller falls back to free-function style).
         """
@@ -4100,6 +4169,13 @@ class Emitter:
                 for p in self._current_fn.params:
                     if p.name == recv.name and isinstance(p.type_ref, A.NamedType):
                         return p.type_ref.name in self._type_names
+            # Let-bound locals: their stored PL/SQL type matches `t_<typename>`
+            # when the source-level type is one of our OBJECT types.
+            if recv.name in self._local_types:
+                lt = self._local_types[recv.name]
+                for t_name in self._type_names:
+                    if lt == _record_type_name(t_name):
+                        return True
         # MemberAccess chain (e.g., self.next.method()) — peek at the field's declared type.
         if isinstance(recv, A.MemberAccess) and self._in_method_type is not None:
             field_type = self._field_type_for_member(recv)
