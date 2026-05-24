@@ -93,10 +93,25 @@ go through unchanged.
 | `coalesce(a, b, c, ...)`      | first non-NULL                               |
 | `nullif(a, b)`                | NULL if a = b, else a                        |
 
-**Watch out**: `decode(...)`, `nvl2(...)`, `case ... when ...` are
-SQL-only. From PL/SQL you'd wrap in `select ... from dual` or use a
-pell `match` / `if`. See [PL/SQL-disallowed
-functions](#pl-sql-disallowed-functions) below.
+**Watch out**: `decode(...)` and `nvl2(...)` are SQL-only — from PL/SQL
+you'd wrap in `select ... from dual` or reach for `nvl` / `coalesce` /
+a pell `if`. See [PL/SQL-disallowed functions](#pl-sql-disallowed-functions)
+below.
+
+`CASE` works in both SQL and PL/SQL. PL/SQL has three forms:
+
+- **CASE expression** — `CASE x WHEN 1 THEN 'a' WHEN 2 THEN 'b' ELSE 'c' END`
+  is a value expression usable anywhere a value is expected, in both
+  SQL and PL/SQL.
+- **CASE statement** — `CASE x WHEN 1 THEN stmts; WHEN 2 THEN stmts; ELSE stmts; END CASE;`
+  is the PL/SQL flow-control form.
+- **Searched CASE statement** — `CASE WHEN cond1 THEN stmts; WHEN cond2 THEN stmts; END CASE;`
+  same as above but each branch has its own boolean condition.
+
+Pell doesn't surface CASE directly — use `match` (for sealed types
+and enum-style switching) or chained `if`/`else if` (for general
+flow). When you want the *expression* form inside a `sql!{}` block,
+just write it: `select case status when 'A' then 1 else 0 end from t`.
 
 ### Logging
 
