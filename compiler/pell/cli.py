@@ -202,6 +202,166 @@ def _dump_ast(node, depth: int = 0) -> None:
         print(f"{pad}{node!r}")
 
 
+def cmd_deploy(args: argparse.Namespace) -> int:
+    """Build every .pell in <input> and install the resulting .sql files
+    against PELL_DB_URL in the correct order:
+
+      1. pell_runtime.sql (if any module declares pell errors)
+      2. pell_re.sql      (if --with-re given, or any module uses re::)
+      3. each module .sql (in alphabetical order; cross-module deps are
+                           the user's problem — pell doesn't infer them)
+
+    Emits progress per file; on the first failure, reports the offending
+    statement and bails (unless --keep-going).
+    """
+    import re as _re_mod
+
+    project = Path(args.input).resolve()
+    inputs = _collect_inputs(args.input)
+    if not inputs:
+        print(f"pell: no .pell files found in {args.input!r}", file=sys.stderr)
+        return 2
+
+    # Build everything first to catch compile errors before connecting.
+    out_dir = Path(args.out_dir) if args.out_dir else (project / "built" if project.is_dir() else project.parent / "built")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"pell deploy: build → {out_dir}")
+    built_files: list[Path] = []
+    uses_re = False
+    has_errors = False
+    failures = 0
+    for src_path in inputs:
+        try:
+            src = src_path.read_text()
+            module = parse(src, str(src_path))
+            sql = emit(module, target=args.target, source_text=src,
+                       source_path=str(src_path), reproducible=args.reproducible)
+        except (LexError, ParseError, EmitError) as e:
+            print(f"  ✗ {src_path.name}: {e}", file=sys.stderr)
+            failures += 1
+            if not args.keep_going:
+                return 1
+            continue
+        if "pell_re." in sql:
+            uses_re = True
+        if "pell_runtime." in sql:
+            has_errors = True
+        out_path = out_dir / (src_path.stem + ".sql")
+        out_path.write_text(sql)
+        built_files.append(out_path)
+        print(f"  ✓ {src_path.name} → {out_path.name}")
+    if failures:
+        print(f"pell deploy: {failures} build error(s); aborting before install", file=sys.stderr)
+        return 1
+
+    if args.build_only:
+        return 0
+
+    # Generate pell_runtime.sql if any module declared errors.
+    runtime_sql = out_dir / "pell_runtime.sql"
+    if has_errors:
+        print(f"pell deploy: generating pell_runtime.sql ...")
+        runtime_args = argparse.Namespace(input=str(project), output=str(runtime_sql))
+        cmd_runtime(runtime_args)
+
+    # Locate pell_re.sql if regex is in use. Look first in the repo's
+    # runtime/ dir (canonical), then alongside the built files.
+    re_sql: Path | None = None
+    if uses_re or args.with_re:
+        for candidate in (Path(__file__).resolve().parents[2] / "runtime" / "pell_re.sql",
+                          out_dir / "pell_re.sql"):
+            if candidate.exists():
+                re_sql = candidate
+                break
+
+    # Install — connect via PELL_DB_URL / --connect, then apply each file.
+    try:
+        from . import driver
+    except ImportError as e:
+        print(f"pell: `pell deploy` needs the optional driver dependency; "
+              f"install with: pip install -e .[repl]\n  ({e})", file=sys.stderr)
+        return 2
+    try:
+        conn = driver.connect(args.connect)
+    except Exception as e:
+        print(f"pell: connection failed: {e}", file=sys.stderr)
+        return 1
+
+    install_order: list[Path] = []
+    if has_errors:
+        install_order.append(runtime_sql)
+    if re_sql is not None:
+        install_order.append(re_sql)
+    install_order.extend(sorted(built_files))
+
+    print(f"pell deploy: install {len(install_order)} file(s) → "
+          f"{(args.connect or '$PELL_DB_URL')}")
+    deploy_failures = 0
+    try:
+        for path in install_order:
+            try:
+                conn.execute_install(path.read_text())
+                print(f"  ✓ {path.name}")
+            except Exception as e:
+                deploy_failures += 1
+                print(f"  ✗ {path.name}: {e}", file=sys.stderr)
+                if not args.keep_going:
+                    return 1
+        conn.commit()
+    finally:
+        conn.close()
+
+    return 1 if deploy_failures else 0
+
+
+def cmd_sql(args: argparse.Namespace) -> int:
+    """Run a `.sql` file (typically a pell build output) against the
+    connected database. Splits on the SQL*Plus `/` terminator, executes
+    each statement in order, and prints any DBMS_OUTPUT a statement
+    produced. On any statement failure, prints the position + error
+    and stops.
+    """
+    try:
+        source = Path(args.input).read_text()
+    except OSError as e:
+        print(f"pell: {e}", file=sys.stderr)
+        return 1
+    try:
+        from . import driver
+    except ImportError as e:
+        print(f"pell: `pell sql` needs the optional driver dependency; "
+              f"install with: pip install -e .[repl]\n  ({e})", file=sys.stderr)
+        return 2
+    try:
+        conn = driver.connect(args.connect)
+    except Exception as e:
+        print(f"pell: connection failed: {e}", file=sys.stderr)
+        return 1
+    stmts = driver._split_script(source)
+    failures = 0
+    try:
+        for idx, stmt in enumerate(stmts, start=1):
+            head = stmt.lstrip().split(None, 1)[0] if stmt.strip() else "<empty>"
+            label = f"[{idx}/{len(stmts)}] {head[:60]}"
+            try:
+                with conn.raw.cursor() as cur:
+                    cur.execute(driver._strip_terminator(stmt))
+                    output = driver._drain_dbms_output(cur)
+                print(f"{label}  ok")
+                for ln in output:
+                    print(f"  {ln}")
+            except Exception as e:
+                failures += 1
+                print(f"{label}  FAIL", file=sys.stderr)
+                print(f"  {e}", file=sys.stderr)
+                if args.stop_on_error:
+                    break
+        conn.commit()
+    finally:
+        conn.close()
+    return 1 if failures else 0
+
+
 def cmd_repl(args: argparse.Namespace) -> int:
     try:
         from .repl import run_repl
@@ -322,6 +482,37 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("-c", "--connect", help="user/pass@host:port/service (or set PELL_DB_URL)")
     rp.add_argument("--target", choices=("23", "19c"), default="23")
     rp.set_defaults(func=cmd_repl)
+
+    dp = sub.add_parser(
+        "deploy",
+        help="build a .pell project and install every emitted .sql against PELL_DB_URL "
+             "(pell_runtime + pell_re + module spec/body) in the right order",
+    )
+    dp.add_argument("input", help="path to a .pell file or a directory of them")
+    dp.add_argument("-c", "--connect", help="user/pass@host:port/service (or set PELL_DB_URL)")
+    dp.add_argument("--target", choices=("23", "19c"), default="23")
+    dp.add_argument("--reproducible", action="store_true",
+                    help="omit volatile preamble fields so output is byte-stable")
+    dp.add_argument("--out-dir", "-d",
+                    help="where to write built .sql files (default: <input>/built)")
+    dp.add_argument("--with-re", action="store_true",
+                    help="install pell_re.sql even if no module references re::")
+    dp.add_argument("--build-only", action="store_true",
+                    help="run the build half; skip the install half")
+    dp.add_argument("--keep-going", action="store_true",
+                    help="don't stop on the first failure; collect them and exit non-zero at the end")
+    dp.set_defaults(func=cmd_deploy)
+
+    sq = sub.add_parser(
+        "sql",
+        help="run a .sql script against the connected database (pell build output, "
+             "deploy scripts, ad-hoc DDL/DML)",
+    )
+    sq.add_argument("input", help="path to a .sql file")
+    sq.add_argument("-c", "--connect", help="user/pass@host:port/service (or set PELL_DB_URL)")
+    sq.add_argument("--stop-on-error", action="store_true",
+                    help="stop at the first failed statement (default: continue, report at end)")
+    sq.set_defaults(func=cmd_sql)
 
     args = p.parse_args(argv)
     return args.func(args)
