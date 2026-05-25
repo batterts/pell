@@ -1,0 +1,127 @@
+<!-- ============================================================
+     Client-side syntax highlighting for ```pell blocks.
+     Rouge (Jekyll's server-side highlighter) doesn't know pell, so
+     fenced ```pell blocks would otherwise render as plaintext. We load
+     highlight.js, register a pell language definition, and target
+     ONLY `pre > code.language-pell` so Rouge's existing highlighting
+     for SQL etc. is untouched.
+     ============================================================ -->
+
+<link
+  rel="stylesheet"
+  href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"
+/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+<script>
+  // Pell language definition for highlight.js.
+  // Keyword list mirrors compiler/pell/lexer.py:KEYWORDS.
+  hljs.registerLanguage('pell', function (hljs) {
+    const KEYWORDS = {
+      keyword: [
+        'module', 'import', 'pub', 'fn', 'let', 'var', 'return', 'yield',
+        'if', 'else', 'for', 'forall', 'in', 'match', 'transaction',
+        'record', 'error', 'unsafe', 'finally', 'and', 'or', 'not',
+        'type', 'sealed', 'aggregate', 'case', 'self',
+        'seq', 'out', 'inout', 'enum',
+      ].join(' '),
+      literal: 'true false Some None Ok Err',
+      type: [
+        // Primitives + standard generic bases.
+        'number', 'int', 'text', 'bigtext', 'bool', 'date', 'timestamp',
+        'interval', 'bytes', 'json', 'Unit', 'Never',
+        'list', 'map', 'set', 'cursor', 'stream', 'Option', 'Result',
+        'rowtype',
+      ].join(' '),
+    };
+
+    // Annotation: @deterministic, @result_cache, @retry(...), etc.
+    const ANNOTATION = {
+      className: 'meta',
+      begin: /@[A-Za-z_][A-Za-z0-9_]*/,
+    };
+
+    // Macros: sql!{...} and jq!{...}.
+    const MACRO_NAME = {
+      className: 'built_in',
+      begin: /\b(sql|jq)!/,
+    };
+
+    // String literals with `{expr}` interpolation placeholders.
+    const STRING = {
+      className: 'string',
+      begin: '"',
+      end: '"',
+      contains: [
+        {
+          className: 'subst',
+          begin: /\{/,
+          end: /\}/,
+          keywords: KEYWORDS,
+        },
+        { begin: /\\./ },
+      ],
+    };
+
+    // Lifted from hljs.C_NUMBER_MODE but extended with pell's decimals.
+    const NUMBER = {
+      className: 'number',
+      begin: /\b\d+(\.\d+)?\b/,
+    };
+
+    // Function-definition heads — `fn name(`, `pub fn name(`, `fn new(`.
+    const FN_HEAD = {
+      className: 'function',
+      beginKeywords: 'fn',
+      end: /(?=\()/,
+      contains: [
+        {
+          className: 'title',
+          begin: /[A-Za-z_][A-Za-z0-9_]*/,
+        },
+      ],
+    };
+
+    return {
+      name: 'pell',
+      aliases: ['pell'],
+      keywords: KEYWORDS,
+      contains: [
+        hljs.C_LINE_COMMENT_MODE,
+        hljs.C_BLOCK_COMMENT_MODE,
+        ANNOTATION,
+        MACRO_NAME,
+        STRING,
+        NUMBER,
+        FN_HEAD,
+        // Type ascription after `:` or `->` — render as type
+        {
+          className: 'type',
+          begin: /[A-Z][A-Za-z0-9_]*/,
+        },
+        // `Result<T, E>` and similar generics — operators show through.
+        { begin: /::/, className: 'operator' },
+        { begin: /->|=>|\.\.|\?/, className: 'operator' },
+      ],
+    };
+  });
+
+  // Apply hljs only to pell blocks. Other languages stay Rouge-highlighted.
+  document.addEventListener('DOMContentLoaded', function () {
+    document
+      .querySelectorAll('pre > code.language-pell')
+      .forEach(function (el) {
+        hljs.highlightElement(el);
+      });
+  });
+</script>
+
+<style>
+  /* Match just-the-docs' code background so pell and SQL blocks share
+     the same outer appearance. The hljs `github-dark` theme paints the
+     inner code area; this only sets the outer <pre> background. */
+  pre > code.language-pell.hljs {
+    background: transparent;
+    padding: 0;
+  }
+</style>
