@@ -19,8 +19,25 @@ module re_demo;
 // Excluded (v0): backreferences, lookbehinds, /pattern/flags.
 // ---------------------------------------------------------------------------
 
+// Best-effort email shape check. NOT RFC-5322 — that grammar is
+// genuinely unparseable by a single regex — but rejects the most common
+// "looks wrong" inputs:
+//   - empty / missing `@`
+//   - two unanchored `@` (e.g. `foo@bar@baz` — the previous \w+@\w+\.\w+
+//     pattern passed because re::matches is unanchored and "x@gmail.com"
+//     was found as a substring)
+//   - missing TLD, single-char TLD, trailing dot, etc.
+//
+// Local part   `[A-Za-z0-9._%+-]+`   letters, digits, dot, _ % + -
+// `@`          exactly one
+// Domain       `[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*`  dot-separated labels
+// TLD          `\.[A-Za-z]{2,}`      at least two letters
+//
+// Anchored \A...\z so re::matches checks the whole string, not a
+// substring. For stricter validation, send a verification email — no
+// regex is a substitute for a round-trip.
 pub fn is_email(s: text) -> bool {
-    return re::matches(s, /\w+@\w+\.\w+/);
+    return re::matches(s, /\A[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}\z/);
 }
 
 pub fn first_number(s: text) -> text {
