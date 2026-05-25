@@ -1,4 +1,8 @@
-# Syntax grammar
+---
+title: Syntax grammar
+parent: Reference
+nav_order: 1
+---
 
 This is an informal BNF-ish grammar for pell. Tokens are spelled in
 double quotes; non-terminals are angle-bracketed; `[x]` is optional,

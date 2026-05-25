@@ -1,4 +1,8 @@
-# 14. pell exec and pell repl
+---
+title: pell exec and pell repl
+parent: Tutorial
+nav_order: 14
+---
 
 `pell build` compiles a `.pell` file to PL/SQL that you then install
 with SQL\*Plus or your tool of choice. For interactive use — try a

@@ -1,4 +1,8 @@
-# Types
+---
+title: Types
+parent: Reference
+nav_order: 2
+---
 
 ## Primitives
 

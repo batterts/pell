@@ -1,4 +1,8 @@
-# 6. Errors and @retry
+---
+title: Errors and @retry
+parent: Tutorial
+nav_order: 6
+---
 
 PL/SQL's error model — declarative exceptions, `SQLCODE`, `WHEN OTHERS`
 — is one of its worst ergonomics warts. pell layers a small typed

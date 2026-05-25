@@ -1,4 +1,8 @@
-# 8. Pipelined and parallel functions
+---
+title: Pipelined and parallel functions
+parent: Tutorial
+nav_order: 8
+---
 
 A pipelined function streams rows back to a SQL caller — you write a
 PL/SQL fn that yields rows one at a time, and `SELECT FROM TABLE(...)`

@@ -1,4 +1,8 @@
-# Parse a phone number into a typed record
+---
+title: Parse a phone number into a typed record
+parent: Cookbook
+nav_order: 2
+---
 
 ## Problem
 

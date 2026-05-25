@@ -1,4 +1,8 @@
-# Validate an email address
+---
+title: Validate an email address
+parent: Cookbook
+nav_order: 1
+---
 
 ## Problem
 

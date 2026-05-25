@@ -1,4 +1,8 @@
-# 5. Iteration: lists, for loops, FORALL
+---
+title: Iteration: lists, for loops, FORALL
+parent: Tutorial
+nav_order: 5
+---
 
 This chapter covers every way pell iterates: cursor for-loops,
 list-typed locals, range expressions, and the `forall` construct for

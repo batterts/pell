@@ -1,4 +1,8 @@
-# 1. Getting started
+---
+title: Getting started
+parent: Tutorial
+nav_order: 1
+---
 
 This chapter takes you from "I have nothing installed" to "I just
 compiled my first pell program and read the PL/SQL it produced." If

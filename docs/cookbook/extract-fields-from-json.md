@@ -1,4 +1,8 @@
-# Extract typed fields from a JSON document
+---
+title: Extract typed fields from a JSON document
+parent: Cookbook
+nav_order: 7
+---
 
 ## Problem
 

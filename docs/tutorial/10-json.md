@@ -1,4 +1,8 @@
-# 10. JSON
+---
+title: JSON
+parent: Tutorial
+nav_order: 10
+---
 
 Pell uses Oracle 23ai's native `JSON` datatype as a first-class
 value. The surface covers construction, path access, record

@@ -1,4 +1,8 @@
-# Annotations
+---
+title: Annotations
+parent: Reference
+nav_order: 3
+---
 
 Annotations attach behavior to items (fns, errors, types). They use
 `@name` or `@name(args, kwargs)` syntax. This page lists every

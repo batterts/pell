@@ -1,4 +1,8 @@
-# 9. Dynamic SQL: unsafe, exec_dyn, @touches, @binds
+---
+title: Dynamic SQL: unsafe, exec_dyn, @touches, @binds
+parent: Tutorial
+nav_order: 9
+---
 
 Sometimes the SQL you need to run can't be expressed at compile time:
 the table name comes from configuration, the column list is built up

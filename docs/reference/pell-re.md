@@ -1,4 +1,8 @@
-# pell_re — regex engine
+---
+title: pell_re — regex engine
+parent: Reference
+nav_order: 5
+---
 
 `pell_re` is a pure-PL/SQL regex engine. It's a Thompson-NFA matcher
 (linear-time, no catastrophic backtracking) with bytecode held in

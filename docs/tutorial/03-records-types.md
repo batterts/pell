@@ -1,4 +1,8 @@
-# 3. Records and types
+---
+title: Records and types
+parent: Tutorial
+nav_order: 3
+---
 
 This chapter covers pell's type system: primitive types, records,
 optional values, lists, and the type-spelling conventions used by the

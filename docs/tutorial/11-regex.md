@@ -1,4 +1,8 @@
-# 11. Regex with re:: and /pattern/
+---
+title: Regex with re:: and /pattern/
+parent: Tutorial
+nav_order: 11
+---
 
 Oracle's `regexp_*` functions are POSIX-flavored: no `\d`, no `\w`, no
 named groups, awkward capture handling. Pell ships `pell_re`, a pure

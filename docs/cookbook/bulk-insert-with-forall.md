@@ -1,4 +1,8 @@
-# Bulk-insert with FORALL
+---
+title: Bulk-insert with FORALL
+parent: Cookbook
+nav_order: 3
+---
 
 ## Problem
 

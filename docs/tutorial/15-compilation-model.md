@@ -1,4 +1,8 @@
-# 15. The compilation model
+---
+title: The compilation model
+parent: Tutorial
+nav_order: 15
+---
 
 This chapter zooms out to show how the pieces fit together: from
 `.pell` source through to the multi-file PL/SQL deployment, with notes

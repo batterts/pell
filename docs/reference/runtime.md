@@ -1,4 +1,8 @@
-# pell_runtime — errors and context
+---
+title: pell_runtime — errors and context
+parent: Reference
+nav_order: 6
+---
 
 `pell_runtime` is a package that pell generates from the union of
 every `error` declaration across your project. It contains:

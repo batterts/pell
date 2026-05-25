@@ -1,4 +1,8 @@
-# Upsert with MERGE
+---
+title: Upsert with MERGE
+parent: Cookbook
+nav_order: 6
+---
 
 ## Problem
 

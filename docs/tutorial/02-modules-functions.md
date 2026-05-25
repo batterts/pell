@@ -1,4 +1,8 @@
-# 2. Modules and functions
+---
+title: Modules and functions
+parent: Tutorial
+nav_order: 2
+---
 
 Every pell file declares a module, then a list of items. Functions are
 the most common item. This chapter covers the full surface of fn

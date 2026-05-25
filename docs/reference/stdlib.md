@@ -1,4 +1,8 @@
-# Standard library and method aliases
+---
+title: Standard library
+parent: Reference
+nav_order: 4
+---
 
 Pell exposes Oracle's PL/SQL builtins through two channels:
 

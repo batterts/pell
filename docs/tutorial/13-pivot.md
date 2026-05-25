@@ -1,4 +1,8 @@
-# 13. Pivot — typed and dynamic
+---
+title: Pivot — typed and dynamic
+parent: Tutorial
+nav_order: 13
+---
 
 Oracle's PIVOT clause widens rows into columns. Pell wraps it in two
 shapes: a `pivot::sum` builtin for the common case where the column

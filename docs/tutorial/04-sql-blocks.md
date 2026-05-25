@@ -1,4 +1,8 @@
-# 4. SQL blocks
+---
+title: SQL blocks
+parent: Tutorial
+nav_order: 4
+---
 
 The `sql!{}` macro is how pell programs talk to the database. Inside
 the braces you write Oracle SQL exactly as you would in any other

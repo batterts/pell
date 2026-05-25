@@ -1,4 +1,8 @@
-# Stream rows with a pipelined function
+---
+title: Stream rows with a pipelined function
+parent: Cookbook
+nav_order: 5
+---
 
 ## Problem
 

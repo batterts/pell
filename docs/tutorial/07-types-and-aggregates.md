@@ -1,4 +1,8 @@
-# 7. Types, sealed types, and aggregates
+---
+title: Types, sealed types, and aggregates
+parent: Tutorial
+nav_order: 7
+---
 
 pell has a small object-oriented surface for cases where records
 aren't expressive enough: user-defined `type`s with methods, sealed

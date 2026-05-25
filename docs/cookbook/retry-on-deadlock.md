@@ -1,4 +1,8 @@
-# Retry on deadlock
+---
+title: Retry on deadlock
+parent: Cookbook
+nav_order: 4
+---
 
 ## Problem
 
