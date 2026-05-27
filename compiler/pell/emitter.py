@@ -2396,15 +2396,22 @@ class Emitter:
         )
 
     def _lower_jq_block(self, jq: A.JqBlock, elem_type: Optional[A.TypeRef]) -> A.SqlBlock:
-        """Lower `jq!{ src | .path[] | select(...) | .field }` to a SqlBlock
-        backed by JSON_TABLE.
+        """Lower a `jq!{ ... }` macro to a SqlBlock.
 
-        The COLUMNS clause's shape is determined by `elem_type`, which the
-        surrounding let-binding pushes onto `_pending_jq_elem_type`:
-          - projection present + scalar elem_type (text/number/bool) →
-              single column with the inferred PL/SQL type
-          - no projection + NamedType referencing a record →
-              one column per field, with `PATH '$.<field>'`
+        Two modes:
+
+        1. **Array iteration** — path contains `[*]`. Lowers to a
+           JSON_TABLE-backed SELECT (existing behavior). Used with
+           `.collect()` / `.one()` / for-loops.
+
+        2. **Scalar field access** — path has NO `[*]`. Lowers to a
+           simple `SELECT JSON_VALUE(:src, 'path') FROM dual`. Used
+           for `jq!{ j | .name }.one()` or `jq!{ j | .address.city }.one()`.
+           This is the jq equivalent of `.name` on an object.
+
+        The COLUMNS clause (mode 1) or RETURNING clause (mode 2) is
+        shaped by `elem_type`, which the surrounding let-binding pushes
+        onto `_pending_jq_elem_type`.
         """
         if elem_type is None:
             raise EmitError(
@@ -2412,6 +2419,12 @@ class Emitter:
                 "with the element type (e.g. `let xs: list<text> = jq!{ ... }.collect();`).",
                 jq.loc,
             )
+
+        # -----------------------------------------------------------------
+        # Mode 2: scalar field access (no [*] in path)
+        # -----------------------------------------------------------------
+        if "[*]" not in jq.path:
+            return self._lower_jq_scalar(jq, elem_type)
 
         # Map each filter field to a column-alias inside JSON_TABLE so the
         # WHERE clause can compare against `jt.<alias>` instead of nested
@@ -2477,6 +2490,36 @@ class Emitter:
             is_dml=False,
             has_returning=False,
         )
+
+    def _lower_jq_scalar(self, jq: A.JqBlock, elem_type: A.TypeRef) -> A.SqlBlock:
+        """Lower `jq!{ src | .field.sub }` (no `[*]`) to a simple
+        `SELECT JSON_VALUE(:src, '$.field.sub' [RETURNING <type>]) FROM dual`.
+
+        This is the jq equivalent of `.field` on an object — no array
+        iteration, just path access.
+        """
+        elem_sql = self._lt(elem_type).upper()
+        # Build the RETURNING clause for non-text types so Oracle
+        # delivers the value in the target type directly.
+        if "NUMBER" in elem_sql or "PLS_INTEGER" in elem_sql:
+            returning = " RETURNING NUMBER"
+        elif "JSON" in elem_sql:
+            # Use JSON_QUERY for sub-document extraction
+            sql = f"SELECT JSON_QUERY(:{jq.source}, '{jq.path}') FROM dual"
+            return A.SqlBlock(loc=jq.loc, sql=sql, binds=[jq.source],
+                              is_dml=False, has_returning=False)
+        elif "DATE" in elem_sql and "TIMESTAMP" not in elem_sql:
+            returning = " RETURNING DATE"
+        elif "TIMESTAMP" in elem_sql:
+            returning = " RETURNING TIMESTAMP"
+        elif "BOOLEAN" in elem_sql:
+            returning = ""  # JSON_VALUE doesn't support RETURNING BOOLEAN; get as text
+        else:
+            returning = ""  # VARCHAR2 is the default
+
+        sql = f"SELECT JSON_VALUE(:{jq.source}, '{jq.path}'{returning}) FROM dual"
+        return A.SqlBlock(loc=jq.loc, sql=sql, binds=[jq.source],
+                          is_dml=False, has_returning=False)
 
     def _jq_filters_to_where(
         self,

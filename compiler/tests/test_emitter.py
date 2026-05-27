@@ -1961,3 +1961,56 @@ def test_to_text_on_json():
         pub fn f(j: json) -> text { return j.to_text(); }
     """)
     assert "JSON_SERIALIZE(p_j)" in sql
+
+
+# ---------------------------------------------------------------------------
+# jq!{} scalar field access (no [*] iterator)
+# ---------------------------------------------------------------------------
+
+
+def test_jq_scalar_field_access():
+    """jq!{ j | .name } without [] lowers to JSON_VALUE, not JSON_TABLE."""
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(j: json) -> text {
+            let name: text = jq!{ j | .name }.one();
+            return name;
+        }
+    """)
+    assert "JSON_VALUE(p_j, '$.name')" in sql
+    assert "JSON_TABLE" not in sql
+
+
+def test_jq_nested_scalar_field():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(j: json) -> text {
+            let city: text = jq!{ j | .address.city }.one();
+            return city;
+        }
+    """)
+    assert "JSON_VALUE(p_j, '$.address.city')" in sql
+
+
+def test_jq_scalar_number_returning():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(j: json) -> number {
+            let age: number = jq!{ j | .age }.one();
+            return age;
+        }
+    """)
+    assert "JSON_VALUE(p_j, '$.age' RETURNING NUMBER)" in sql
+
+
+def test_jq_array_iteration_still_works():
+    """Existing [*] array iteration is unaffected by the scalar path."""
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(j: json) -> list<text> {
+            let xs: list<text> = jq!{ j | .users[] | .name }.collect();
+            return xs;
+        }
+    """)
+    assert "JSON_TABLE(p_j, '$.users[*]'" in sql
+    assert "JSON_VALUE" not in sql or "PATH" in sql

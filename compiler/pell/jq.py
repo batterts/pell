@@ -182,10 +182,10 @@ def parse_jq(text: str) -> _Parsed:
             break
         raise JqParseError(f"unexpected token at {cur.text[cur.pos:cur.pos+20]!r}")
 
-    if not saw_iterator:
-        # Default to iterating the source array if no [] was seen
-        path = path + "[*]" if path == "$" else path + "[*]"
-        saw_iterator = True
+    # NOTE: we deliberately do NOT force [*] when no iterator was seen.
+    # If the user wrote `jq!{ j | .name }` (no []), that's a scalar
+    # field access — the emitter lowers it to JSON_VALUE instead of
+    # JSON_TABLE. Only explicit `[]` or `[*]` triggers the array path.
 
     return _Parsed(source=source, path=path, filters=filters, projection=projection)
 
