@@ -116,6 +116,9 @@ _METHOD_ALIASES: dict[str, tuple[int, str]] = {
     "minute":      (0, "EXTRACT(MINUTE FROM {recv})"),
     "second":      (0, "EXTRACT(SECOND FROM {recv})"),
     # Date arithmetic: omitted — `d + n` already works via BinOp.
+    # `.to_text()` is handled specially (not a fixed template) because
+    # the conversion depends on the receiver's inferred type — see
+    # _emit_call_expr's to_text handling below.
 }
 
 
@@ -494,7 +497,8 @@ class Emitter:
                 for f in rec.fields
             ]
             self._schema_types.append(
-                f"CREATE OR REPLACE TYPE {self._q(obj_name)} AS OBJECT (\n"
+                _safe_drop_type(self._q(obj_name))
+                + f"CREATE OR REPLACE TYPE {self._q(obj_name)} AS OBJECT (\n"
                 + ",\n".join(field_lines)
                 + "\n);\n/"
             )
@@ -504,7 +508,8 @@ class Emitter:
             nt_key = f"NT:{nt_name}"
             if nt_key not in self._obj_emitted:
                 self._schema_types.append(
-                    f"CREATE OR REPLACE TYPE {self._q(nt_name)} AS TABLE OF {obj_name};\n/"
+                    _safe_drop_type(self._q(nt_name))
+                    + f"CREATE OR REPLACE TYPE {self._q(nt_name)} AS TABLE OF {obj_name};\n/"
                 )
                 self._obj_emitted.add(nt_key)
 
@@ -1540,6 +1545,83 @@ class Emitter:
                         lines.append(f"{indent}{target}.{f.name.lower()} := {val};")
                 return lines
         return [f"{indent}{target} := {self._emit_expr(expr)};"]
+
+    # -- auto-stringify ---------------------------------------------------
+
+    def _infer_expr_type(self, e: A.Expr) -> Optional[str]:
+        """Best-effort: what PL/SQL type does expression `e` evaluate to?
+
+        Returns the PL/SQL spelling (e.g. "NUMBER", "VARCHAR2(4000)",
+        "JSON", "BOOLEAN", "DATE") or None when we can't tell.
+        Combines literal inference, local-type lookup, param-type lookup,
+        and call-type inference.
+        """
+        if isinstance(e, A.NumberLit):
+            return "NUMBER"
+        if isinstance(e, A.TextLit):
+            return "VARCHAR2(4000)"
+        if isinstance(e, A.BoolLit):
+            return "BOOLEAN"
+        if isinstance(e, A.StructLit):
+            return _record_type_name(e.type_name)
+        if isinstance(e, A.Ident):
+            # Check fn parameters first
+            if self._current_fn is not None:
+                for p in self._current_fn.params:
+                    if p.name == e.name:
+                        return self._lt(p.type_ref)
+            # Check declared locals
+            t = self._local_types.get(e.name)
+            if t:
+                return t
+            return None
+        if isinstance(e, A.Call):
+            return self._infer_call_type(e)
+        if isinstance(e, A.MemberAccess):
+            if isinstance(e.obj, A.Ident) and e.obj.name in self._seq_names:
+                return "NUMBER"
+            return None
+        if isinstance(e, A.BinOp):
+            if e.op in ("+", "-", "*", "/", "%"):
+                return "NUMBER"
+            if e.op in ("==", "!=", "<", "<=", ">", ">=", "&&", "||"):
+                return "BOOLEAN"
+        if isinstance(e, A.QuestionMark):
+            return self._infer_expr_type(e.inner)
+        if isinstance(e, A.OkExpr):
+            return self._infer_expr_type(e.inner)
+        return None
+
+    def _auto_stringify(self, expr_code: str, pl_type: Optional[str]) -> str:
+        """Wrap `expr_code` in the appropriate Oracle to-text conversion
+        based on `pl_type`. Returns `expr_code` unchanged if it's already
+        text-typed or the type is unknown.
+
+        Used by string interpolation (`"{x}"`) and by known text-only
+        call targets (`log::info`, `dbms_output::put_line`) so the user
+        can pass any typed expression and it Just Works.
+        """
+        if pl_type is None:
+            return expr_code
+        t = pl_type.upper()
+        if "VARCHAR" in t or "CLOB" in t or "CHAR" in t:
+            return expr_code
+        if "NUMBER" in t or "PLS_INTEGER" in t or "INTEGER" in t:
+            return f"TO_CHAR({expr_code})"
+        if t == "BOOLEAN":
+            return f"CASE WHEN {expr_code} THEN 'true' ELSE 'false' END"
+        if "JSON" in t:
+            return f"JSON_SERIALIZE({expr_code})"
+        if "TIMESTAMP" in t:
+            return f"TO_CHAR({expr_code}, 'YYYY-MM-DD HH24:MI:SS.FF')"
+        if "DATE" in t:
+            return f"TO_CHAR({expr_code}, 'YYYY-MM-DD HH24:MI:SS')"
+        if "RAW" in t:
+            return f"RAWTOHEX({expr_code})"
+        # Record types spelled as t_<name> — stringify field by field.
+        # For v0 just TO_CHAR the whole thing (Oracle errors on non-scalars;
+        # records need per-field handling which is a v2 feature).
+        return f"TO_CHAR({expr_code})"
 
     def _infer_decl_type(self, value: Optional[A.Expr]) -> Optional[str]:
         """Best-effort inference of PL/SQL declaration type from an init expression."""
@@ -3437,7 +3519,15 @@ class Emitter:
                     raise EmitError(
                         f"bad interpolation `{{{expr_src}}}`: {err}", e.loc
                     )
-                chunks.append(self._emit_expr(sub_expr))
+                code = self._emit_expr(sub_expr)
+                # Auto-stringify: the interpolation slot is a text
+                # context (will be || concatenated). Wrap non-text
+                # expressions so Oracle doesn't choke on JSON, BOOLEAN,
+                # etc. NUMBER works via Oracle's implicit || coercion
+                # but wrapping explicitly is harmless and consistent.
+                inferred = self._infer_expr_type(sub_expr)
+                code = self._auto_stringify(code, inferred)
+                chunks.append(code)
                 i = end + 1
                 continue
             buf.append(ch)
@@ -3450,7 +3540,27 @@ class Emitter:
             return chunks[0]
         return "(" + " || ".join(chunks) + ")"
 
+    # Known call targets that accept a single text argument. When the
+    # actual arg is non-text, the emitter auto-stringifies so the user
+    # can write `log::info(x)` or `dbms_output::put_line(j)` for any
+    # typed `x` without a manual TO_CHAR / JSON_SERIALIZE wrapper.
+    _TEXT_CONSUMING_CALLS = frozenset({
+        "log::info", "log::warn", "log::error", "log::debug", "log::trace",
+        "dbms_output::put_line",
+    })
+
     def _emit_call_expr(self, e: A.Call) -> str:
+        # Auto-stringify args for known text-only call targets.
+        if (isinstance(e.callee, A.Ident)
+                and e.callee.name in self._TEXT_CONSUMING_CALLS
+                and len(e.args) == 1):
+            arg = e.args[0]
+            code = self._emit_expr(arg)
+            inferred = self._infer_expr_type(arg)
+            code = self._auto_stringify(code, inferred)
+            fn_name = self._lower_ident(e.callee.name)
+            return f"{fn_name}({code})"
+
         # JSON helper namespace — `json::object`, `json::array`, `json::get_text`,
         # `json::get_number`, `json::get_json`, `json::has`, `json::parse`,
         # `json::stringify`, `json::from`. (`json::into::<T>(...)?` is handled
@@ -3526,6 +3636,13 @@ class Emitter:
             if self._receiver_is_object_typed(recv):
                 args_code = [self._emit_expr(a) for a in e.args]
                 return f"{self._emit_expr(recv)}.{method.lower()}({', '.join(args_code)})"
+            # .to_text() — type-aware auto-stringify. Uses the same
+            # conversion table as string interpolation and text-consuming
+            # call targets.
+            if method == "to_text" and len(e.args) == 0:
+                recv_code = self._emit_expr(recv)
+                inferred = self._infer_expr_type(recv)
+                return self._auto_stringify(recv_code, inferred)
             # Method-style aliases: .contains, .starts_with, .year, .add_days, …
             if method in _METHOD_ALIASES:
                 arity, template = _METHOD_ALIASES[method]
@@ -3585,7 +3702,8 @@ class Emitter:
         method_sigs = [self._method_signature(m, type_name) for m in td.methods]
         spec_lines = attr_lines + method_sigs
         spec = (
-            f"CREATE OR REPLACE TYPE {self._q(type_name)} AS OBJECT (\n"
+            _safe_drop_type(self._q(type_name))
+            + f"CREATE OR REPLACE TYPE {self._q(type_name)} AS OBJECT (\n"
             + ",\n".join(spec_lines)
             + "\n);\n/"
         )
@@ -3631,7 +3749,8 @@ class Emitter:
         if any_abstract:
             suffix = "NOT INSTANTIABLE " + suffix
         parent_spec = (
-            f"CREATE OR REPLACE TYPE {self._q(parent_name)} AS OBJECT (\n"
+            _safe_drop_type(self._q(parent_name))
+            + f"CREATE OR REPLACE TYPE {self._q(parent_name)} AS OBJECT (\n"
             + ",\n".join(spec_lines)
             + f"\n) {suffix};\n/"
         )
@@ -3669,7 +3788,8 @@ class Emitter:
                 # subtype that adds nothing). We use a single PLS-compatible value.
                 case_spec_lines = ["  dummy_ NUMBER"]
             case_spec = (
-                f"CREATE OR REPLACE TYPE {self._q(case_name)} UNDER {parent_name} (\n"
+                _safe_drop_type(self._q(case_name))
+                + f"CREATE OR REPLACE TYPE {self._q(case_name)} UNDER {parent_name} (\n"
                 + ",\n".join(case_spec_lines)
                 + "\n);\n/"
             )
@@ -3729,7 +3849,8 @@ class Emitter:
                 for p in ag.step_params
             )
             self._schema_types.append(
-                f"CREATE OR REPLACE TYPE {self._q(tuple_type_name)} AS OBJECT (\n{tuple_attrs}\n);\n/"
+                _safe_drop_type(self._q(tuple_type_name))
+                + f"CREATE OR REPLACE TYPE {self._q(tuple_type_name)} AS OBJECT (\n{tuple_attrs}\n);\n/"
             )
             # The iterate signature takes the tuple as its single input.
             tuple_param_name = "p_args"
@@ -3759,7 +3880,8 @@ class Emitter:
             f"  MEMBER FUNCTION ODCIAggregateTerminate(self IN OUT {type_name}, returnValue OUT {ret_sql_param}, flags IN NUMBER) RETURN NUMBER",
         ]
         spec = (
-            f"CREATE OR REPLACE TYPE {self._q(type_name)} AS OBJECT (\n"
+            _safe_drop_type(self._q(type_name))
+            + f"CREATE OR REPLACE TYPE {self._q(type_name)} AS OBJECT (\n"
             + ",\n".join(spec_lines)
             + "\n);\n/"
         )
@@ -3875,7 +3997,8 @@ class Emitter:
             key = f"NT:{nt_name}"
             if key not in self._obj_emitted:
                 self._schema_types.insert(0,
-                    f"CREATE OR REPLACE TYPE {self._q(nt_name)} AS TABLE OF {elem_sql};\n/"
+                    _safe_drop_type(self._q(nt_name))
+                    + f"CREATE OR REPLACE TYPE {self._q(nt_name)} AS TABLE OF {elem_sql};\n/"
                 )
                 self._obj_emitted.add(key)
             return nt_name
@@ -4305,6 +4428,25 @@ def _is_unit_like(t: A.TypeRef) -> bool:
     if isinstance(t, A.GenericType) and t.base == "Result" and t.params:
         return _is_unit_like(t.params[0])
     return False
+
+
+def _safe_drop_type(name: str) -> str:
+    """An idempotent guard to put before `CREATE OR REPLACE TYPE`.
+
+    Oracle blocks `CREATE OR REPLACE TYPE` when the target has
+    dependents (most commonly a TABLE OF / nested-table type that
+    references an OBJECT TYPE). Dropping the type with FORCE clears
+    the path; wrapping in a BEGIN/EXCEPTION block keeps the first
+    install idempotent (the DROP errors when the type doesn't exist
+    yet — we swallow that case).
+    """
+    return (
+        f"BEGIN\n"
+        f"  EXECUTE IMMEDIATE 'DROP TYPE {name} FORCE';\n"
+        f"EXCEPTION WHEN OTHERS THEN NULL;\n"
+        f"END;\n"
+        f"/\n"
+    )
 
 
 def _sql_string(s: str) -> str:

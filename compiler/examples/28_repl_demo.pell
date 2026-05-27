@@ -1,0 +1,65 @@
+module repl_demo;
+
+// ---------------------------------------------------------------------------
+// REPL demo — companion file for `pell repl`.
+//
+// In IntelliJ:
+//   - pell tool window → "Open REPL" toolbar button (or run `./pell repl` in
+//     a terminal). The REPL opens with a `[1]>` prompt.
+//   - At the prompt:  `\load compiler/examples/28_repl_demo.pell`
+//   - Then try the suggested cells at the bottom of this file.
+//
+// In a terminal directly:
+//   $ ./pell repl
+//   [1]> \load compiler/examples/28_repl_demo.pell
+//   [2]> let alice: Employee = Employee { id: 1, name: "Alice", level: 5 };
+//   [3]> dbms_output::put_line(greet(alice.name));
+//
+// What the REPL gives you:
+//   - Cells preserve session state — defs from cell 1 are visible in cell 2.
+//   - Output (dbms_output::put_line and friends) prints below the cell.
+//   - `\sql <stmt>` runs raw SQL. `\save <file>` dumps the session.
+//   - `\help` for the full command list.
+// ---------------------------------------------------------------------------
+
+pub record Employee {
+    id:    number,
+    name:  text,
+    level: number,
+}
+
+pub fn promote(e: Employee) -> Employee {
+    return Employee {
+        id:    e.id,
+        name:  e.name,
+        level: e.level + 1,
+    };
+}
+
+pub fn greet(name: text) -> text {
+    return "hello, {name}!";
+}
+
+// A tiny audit helper — useful when paired with a real schema in a `\sql` cell.
+pub fn audit_msg(action: text, target: text) -> text {
+    return "[{sysdate()}] action={action} target={target}";
+}
+
+// ---------------------------------------------------------------------------
+// Suggested REPL cells (paste one at a time):
+//
+//   [N]> let alice: Employee = Employee { id: 1, name: "Alice", level: 5 };
+//        dbms_output::put_line(greet(alice.name));
+//
+//   [N]> let promoted: Employee = promote(alice);
+//        dbms_output::put_line("{promoted.name} → level {promoted.level}");
+//
+//   [N]> let msg: text = audit_msg("promote", alice.name);
+//        dbms_output::put_line(msg);
+//
+//   [N]> \sql select count(*) from user_objects
+//
+//   [N]> \show          // print the anonymous block that would run next
+//
+//   [N]> \save my_session.pell
+// ---------------------------------------------------------------------------

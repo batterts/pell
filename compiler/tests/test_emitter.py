@@ -1874,3 +1874,90 @@ def test_regex_flags_not_yet_supported():
                 return re::matches(s, /foo/i);
             }
         """)
+
+
+# ---------------------------------------------------------------------------
+# Auto-stringify — non-text args in text-expecting positions
+# ---------------------------------------------------------------------------
+
+
+def test_auto_stringify_number_in_interpolation():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(n: number) -> text { return "val={n}"; }
+    """)
+    assert "TO_CHAR(p_n)" in sql
+
+
+def test_auto_stringify_json_in_interpolation():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(j: json) -> text { return "data={j}"; }
+    """)
+    assert "JSON_SERIALIZE(p_j)" in sql
+
+
+def test_auto_stringify_bool_in_interpolation():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(flag: bool) -> text { return "flag={flag}"; }
+    """)
+    assert "CASE WHEN p_flag THEN 'true' ELSE 'false' END" in sql
+
+
+def test_auto_stringify_date_in_interpolation():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(d: date) -> text { return "when={d}"; }
+    """)
+    assert "TO_CHAR(p_d, 'YYYY-MM-DD HH24:MI:SS')" in sql
+
+
+def test_auto_stringify_log_info_number():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(n: number) { log::info(n); }
+    """)
+    assert "log.info(TO_CHAR(p_n))" in sql
+
+
+def test_auto_stringify_log_info_json():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(j: json) { log::info(j); }
+    """)
+    assert "log.info(JSON_SERIALIZE(p_j))" in sql
+
+
+def test_auto_stringify_dbms_output_put_line_number():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(n: number) { dbms_output::put_line(n); }
+    """)
+    assert "dbms_output.put_line(TO_CHAR(p_n))" in sql
+
+
+def test_auto_stringify_text_passthrough():
+    """text args should NOT be wrapped."""
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(s: text) { log::info(s); }
+    """)
+    assert "log.info(p_s)" in sql
+    assert "TO_CHAR" not in sql
+
+
+def test_to_text_method_alias():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(n: number) -> text { return n.to_text(); }
+    """)
+    assert "TO_CHAR(p_n)" in sql
+
+
+def test_to_text_on_json():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(j: json) -> text { return j.to_text(); }
+    """)
+    assert "JSON_SERIALIZE(p_j)" in sql

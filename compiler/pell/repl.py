@@ -55,6 +55,15 @@ class Repl:
         self.conn: Optional[Connection] = conn
         self.target = target
         self.items: list[A.Item] = []
+        # Snapshots of variable values captured after each cell runs.
+        # Maps var_name → (pell_type_str, literal_value_str).
+        # Re-injected as `let x: type = <literal>;` at the top of
+        # every subsequent cell so variables persist with their actual
+        # computed values — no re-execution of the original expression.
+        self.var_snapshots: dict[str, tuple[str, str]] = {}
+        # Type annotations of variables, tracked so we can re-emit
+        # typed let stmts for snapshots.
+        self.var_types: dict[str, str] = {}
         self.cell_number = 0
         self.history = InMemoryHistory()
         self.session: PromptSession = PromptSession(history=self.history)
@@ -122,41 +131,183 @@ class Repl:
 
     # -- cell execution ----------------------------------------------------
 
+    _VAR_SENTINEL = "__PELL_REPL_VAR__"
+    _NULL_MARKER  = "__PELL_NULL__"
+
     def _run_cell(self, source: str) -> None:
         try:
             new_items, stmts = parse_cell(source, f"<cell {self.cell_number}>")
         except (LexError, ParseError) as e:
             print(f"  ! parse error: {e}", file=sys.stderr)
             return
-        # Merge new defs into the running session, replacing any prior def
-        # with the same name (so a user can iterate on a fn definition).
         for item in new_items:
             self._absorb(item)
         if not stmts:
-            # Pure-def cell — recompile to validate the new defs, then exit.
             try:
                 emit_anon_block(self.items, [], target=self.target)
             except EmitError as e:
                 print(f"  ! compile error: {e}", file=sys.stderr)
-                return
             return
         if self.conn is None:
             print("  ! no connection — use \\connect to attach to a database",
                   file=sys.stderr)
             return
+
+        # Build let-stmts that replay prior variable VALUES (not the
+        # original expressions). Each snapshot becomes
+        # `let x: type = <literal>;` so variables persist with their
+        # actual computed values from the last successful cell.
+        replay_stmts = self._snapshot_to_stmts()
+        full_stmts = replay_stmts + stmts
+
         try:
-            block = emit_anon_block(self.items, stmts, target=self.target,
+            block = emit_anon_block(self.items, full_stmts, target=self.target,
                                     source_path=f"<cell {self.cell_number}>")
         except EmitError as e:
             print(f"  ! compile error: {e}", file=sys.stderr)
             return
+
+        # Inject capture lines into the anonymous block so we can read
+        # back variable values after execution. We capture EVERY let in
+        # this cell + every previously-snapshotted variable.
+        cell_lets = [s for s in stmts if isinstance(s, A.LetStmt)]
+        all_var_names = list(self.var_snapshots.keys())
+        for s in cell_lets:
+            if s.name not in all_var_names:
+                all_var_names.append(s.name)
+            if s.type_annot:
+                from .emitter import lower_type
+                self.var_types[s.name] = lower_type(s.type_annot)
+
+        block = self._inject_capture_lines(block, all_var_names)
+
         try:
             output = self.conn.run_block(block)
         except Exception as e:
             print(f"  ! runtime error: {e}", file=sys.stderr)
             return
+
+        # Partition output: sentinel lines → snapshots, rest → user output
+        user_lines: list[str] = []
         for ln in output:
+            if ln.startswith(self._VAR_SENTINEL):
+                self._parse_snapshot(ln)
+            else:
+                user_lines.append(ln)
+        for ln in user_lines:
             print(ln)
+
+    def _inject_capture_lines(self, block: str, var_names: list[str]) -> str:
+        """Splice capture-via-DBMS_OUTPUT lines into the anonymous block
+        right before `END pell_anon_main;` so we can read variable
+        values back after execution."""
+        if not var_names:
+            return block
+        # Each variable emits one line: __PELL_REPL_VAR__<TAB>name<TAB>value
+        capture_lines: list[str] = []
+        for name in var_names:
+            local = f"l_{name}"
+            typ = self.var_types.get(name, "").upper()
+            # Type-aware serialization: JSON needs JSON_SERIALIZE,
+            # DATE/TIMESTAMP need explicit format masks (not NLS-dependent),
+            # RAW needs RAWTOHEX, everything else uses TO_CHAR.
+            if "JSON" in typ:
+                to_text = f"JSON_SERIALIZE({local})"
+            elif "TIMESTAMP" in typ:
+                to_text = f"TO_CHAR({local}, 'YYYY-MM-DD HH24:MI:SS.FF9')"
+            elif "DATE" in typ:
+                to_text = f"TO_CHAR({local}, 'YYYY-MM-DD HH24:MI:SS')"
+            elif "RAW" in typ:
+                to_text = f"RAWTOHEX({local})"
+            else:
+                to_text = f"TO_CHAR({local})"
+            capture_lines.append(
+                f"    dbms_output.put_line('{self._VAR_SENTINEL}' "
+                f"|| chr(9) || '{name}' "
+                f"|| chr(9) || NVL({to_text}, '{self._NULL_MARKER}'));"
+            )
+        inject = "\n".join(capture_lines) + "\n"
+        # Find the END pell_anon_main; and insert before it.
+        marker = "  END pell_anon_main;"
+        idx = block.rfind(marker)
+        if idx == -1:
+            return block  # can't find — emit without capture
+        return block[:idx] + inject + block[idx:]
+
+    def _parse_snapshot(self, line: str) -> None:
+        """Parse one `__PELL_REPL_VAR__\\tname\\tvalue` line and store
+        the snapshot."""
+        parts = line.split("\t", 2)  # split into at most 3 — value may contain tabs
+        if len(parts) < 3:
+            return
+        name = parts[1]
+        raw_value = parts[2]
+        if raw_value == self._NULL_MARKER:
+            # Variable is NULL — remove from snapshots so it doesn't
+            # inject a stale value later.
+            self.var_snapshots.pop(name, None)
+        else:
+            typ = self.var_types.get(name, "VARCHAR2(4000)")
+            self.var_snapshots[name] = (typ, raw_value)
+
+    def _snapshot_to_stmts(self) -> list[A.Stmt]:
+        """Build LetStmt nodes from the current snapshots. Each becomes
+        `let x: type = <literal>;` in the emitted block.
+
+        The reconstruction is type-aware:
+          NUMBER     → NumberLit("42")
+          BOOLEAN    → BoolLit(true/false)
+          JSON       → json::parse("<serialized>")
+          DATE       → sql!{select to_date('...','YYYY-MM-DD HH24:MI:SS') from dual}.one()
+          TIMESTAMP  → sql!{select to_timestamp('...','YYYY-MM-DD HH24:MI:SS.FF9') from dual}.one()
+          RAW        → sql!{select hextoraw('...') from dual}.one()
+          text (default) → TextLit("<value>")
+        """
+        loc = A.Loc("<repl-snapshot>", 0, 0)
+        stmts: list[A.Stmt] = []
+        for name, (typ, val) in self.var_snapshots.items():
+            typ_upper = typ.upper()
+            if "NUMBER" in typ_upper or "PLS_INTEGER" in typ_upper:
+                expr: A.Expr = A.NumberLit(loc=loc, value=val)
+                type_annot: A.TypeRef = A.PrimType(loc=loc, name="number")
+            elif "BOOLEAN" in typ_upper:
+                expr = A.BoolLit(loc=loc, value=(val.upper() in ("TRUE", "1")))
+                type_annot = A.PrimType(loc=loc, name="bool")
+            elif "JSON" in typ_upper:
+                expr = A.Call(
+                    loc=loc,
+                    callee=A.Ident(loc=loc, name="json::parse"),
+                    args=[A.TextLit(loc=loc, value=val, is_raw=True)],
+                )
+                type_annot = A.PrimType(loc=loc, name="json")
+            elif "DATE" in typ_upper and "TIMESTAMP" not in typ_upper:
+                # TO_DATE with the same fixed format we used for capture
+                expr = A.SqlBlock(
+                    loc=loc,
+                    sql=f"select to_date('{val}', 'YYYY-MM-DD HH24:MI:SS') from dual",
+                )
+                type_annot = A.PrimType(loc=loc, name="date")
+            elif "TIMESTAMP" in typ_upper:
+                expr = A.SqlBlock(
+                    loc=loc,
+                    sql=f"select to_timestamp('{val}', 'YYYY-MM-DD HH24:MI:SS.FF9') from dual",
+                )
+                type_annot = A.PrimType(loc=loc, name="timestamp")
+            elif "RAW" in typ_upper:
+                expr = A.SqlBlock(
+                    loc=loc,
+                    sql=f"select hextoraw('{val}') from dual",
+                )
+                type_annot = A.PrimType(loc=loc, name="bytes")
+            else:
+                # Default: text / varchar2 / clob
+                expr = A.TextLit(loc=loc, value=val, is_raw=True)
+                if "CLOB" in typ_upper:
+                    type_annot = A.PrimType(loc=loc, name="bigtext")
+                else:
+                    type_annot = A.PrimType(loc=loc, name="text")
+            stmts.append(A.LetStmt(loc=loc, name=name, type_annot=type_annot, value=expr))
+        return stmts
 
     def _absorb(self, item: A.Item) -> None:
         name = getattr(item, "name", None)
@@ -181,11 +332,14 @@ class Repl:
             return "quit"
         if cmd == "\\reset":
             self.items.clear()
-            print("  (session cleared)")
+            self.var_snapshots.clear()
+            self.var_types.clear()
+            print("  (session cleared — defs + variables)")
             return None
         if cmd == "\\show":
             try:
-                block = emit_anon_block(self.items, [], target=self.target)
+                replay = self._snapshot_to_stmts()
+                block = emit_anon_block(self.items, replay, target=self.target)
             except EmitError as e:
                 print(f"  ! {e}", file=sys.stderr)
                 return None
