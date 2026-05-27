@@ -31,3 +31,4 @@ you're working on.
 13. [Pivot — typed and dynamic](13-pivot.md)
 14. [`pell exec` and `pell repl`](14-exec-and-repl.md)
 15. [The compilation model](15-compilation-model.md)
+16. [REPL deep dive](16-repl-deep-dive.md) — variable persistence, auto-stringify, JSON/regex workflows, slash commands, debugging patterns
