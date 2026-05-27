@@ -40,8 +40,11 @@ slash commands:
   \\save <file>     dump current session defs to a .pell file
   \\load <file>     append a .pell file's defs into the session
   \\sql <stmt>      run one raw SQL statement and print results
-  \\reset           clear all accumulated defs
+  \\reset           clear all accumulated defs + variables
   \\show            print the anon block that would run on the next cell
+  \\vars            list all persisted variables with types and values
+  \\defs            list all accumulated definitions (fn, record, error, ...)
+  \\state           show both \\defs and \\vars at once
   \\connect <dsn>   reconnect to user/pass@host:port/service
   \\help            this message
   \\quit            exit
@@ -319,6 +322,76 @@ class Repl:
             ]
         self.items.append(item)
 
+    # -- state display -----------------------------------------------------
+
+    def _show_vars(self) -> None:
+        """Print all persisted variables with their types and current values."""
+        if not self.var_snapshots:
+            print("  (no variables)")
+            return
+        # Calculate column widths for alignment
+        rows: list[tuple[str, str, str]] = []
+        for name, (typ, val) in sorted(self.var_snapshots.items()):
+            # Truncate long values for display
+            display_val = val if len(val) <= 80 else val[:77] + "..."
+            rows.append((name, typ, display_val))
+        name_w = max(len(r[0]) for r in rows)
+        type_w = max(len(r[1]) for r in rows)
+        print(f"  {'Name':<{name_w}}  {'Type':<{type_w}}  Value")
+        print(f"  {'-' * name_w}  {'-' * type_w}  {'-' * 40}")
+        for name, typ, val in rows:
+            print(f"  {name:<{name_w}}  {typ:<{type_w}}  {val}")
+
+    @staticmethod
+    def _render_type_ref(t) -> str:
+        """Render a pell AST type reference as its surface name."""
+        if t is None:
+            return ""
+        if isinstance(t, A.PrimType):
+            return t.name
+        if isinstance(t, A.NamedType):
+            return t.name
+        if isinstance(t, A.GenericType):
+            inner = ", ".join(Repl._render_type_ref(p) for p in t.params)
+            return f"{t.base}<{inner}>"
+        if isinstance(t, A.OptionalType):
+            return f"Option<{Repl._render_type_ref(t.inner)}>"
+        return str(t)
+
+    def _show_defs(self) -> None:
+        """Print all accumulated definitions (fn, record, error, etc.)."""
+        if not self.items:
+            print("  (no definitions)")
+            return
+        for item in self.items:
+            kind = type(item).__name__
+            name = getattr(item, "name", "?")
+            detail = ""
+            if isinstance(item, A.FnDef):
+                params = ", ".join(
+                    f"{p.name}: {self._render_type_ref(p.type_ref)}"
+                    for p in item.params
+                ) if item.params else ""
+                ret = f" -> {self._render_type_ref(item.return_type)}" if item.return_type else ""
+                detail = f"({params}){ret}"
+                kind = "fn"
+            elif isinstance(item, A.RecordDef):
+                fields = ", ".join(
+                    f"{f.name}: {self._render_type_ref(f.type_ref)}" for f in item.fields
+                )
+                detail = f" {{ {fields} }}"
+                kind = "record"
+            elif isinstance(item, A.ErrorDef):
+                fields = ", ".join(
+                    f"{f.name}: {self._render_type_ref(f.type_ref)}" for f in item.fields
+                )
+                detail = f" {{ {fields} }}"
+                kind = "error"
+            elif hasattr(item, '__class__'):
+                kind = kind.replace("Def", "").lower()
+            vis = "pub " if item.is_pub else ""
+            print(f"  {vis}{kind} {name}{detail}")
+
     # -- slash commands ----------------------------------------------------
 
     def _handle_slash(self, line: str) -> Optional[str]:
@@ -335,6 +408,18 @@ class Repl:
             self.var_snapshots.clear()
             self.var_types.clear()
             print("  (session cleared — defs + variables)")
+            return None
+        if cmd == "\\vars":
+            self._show_vars()
+            return None
+        if cmd == "\\defs":
+            self._show_defs()
+            return None
+        if cmd == "\\state":
+            self._show_defs()
+            if self.items and self.var_snapshots:
+                print()
+            self._show_vars()
             return None
         if cmd == "\\show":
             try:
