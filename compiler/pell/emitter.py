@@ -1546,6 +1546,61 @@ class Emitter:
                 return lines
         return [f"{indent}{target} := {self._emit_expr(expr)};"]
 
+    def _suggest_record_def(self, sl: A.StructLit) -> str:
+        """Build a copy-pasteable `record Foo { ... }` definition by
+        inferring each field's pell-surface type from its value
+        expression. Used by the "unknown type in struct literal" error
+        so the user can fix the missing definition without leaving
+        the source line.
+
+        Fields whose value type can't be inferred fall back to `text`
+        with a comment marker, so the user knows where to look.
+        """
+        parts: list[str] = []
+        for fi in sl.fields:
+            pl_type = self._infer_expr_type(fi.value)
+            pell_type = self._pl_to_pell_type(pl_type, fi.value)
+            parts.append(f"{fi.name}: {pell_type}")
+        return f"record {sl.type_name} {{ {', '.join(parts)} }}"
+
+    @staticmethod
+    def _pl_to_pell_type(pl_type: Optional[str], value: A.Expr) -> str:
+        """Reverse-map a PL/SQL type spelling to its pell-surface name.
+
+        Falls back to a peek at the value AST for cases _infer_expr_type
+        returns None (e.g., ListLit, nested StructLit).
+        """
+        if pl_type:
+            t = pl_type.upper()
+            if "NUMBER" in t or "PLS_INTEGER" in t or "INTEGER" in t:
+                return "number"
+            if t == "BOOLEAN":
+                return "bool"
+            if "JSON" in t:
+                return "json"
+            if "TIMESTAMP" in t:
+                return "timestamp"
+            if "DATE" in t:
+                return "date"
+            if "RAW" in t:
+                return "bytes"
+            if "CLOB" in t:
+                return "bigtext"
+            if "VARCHAR" in t or "CHAR" in t:
+                return "text"
+            # t_<name> means it's a record type — use the bare name
+            if t.startswith("T_") and not t.endswith("_LIST"):
+                return t[2:].lower().title().replace("_", "")
+        # Couldn't infer from the type string — peek at the AST shape.
+        if isinstance(value, A.ListLit):
+            if value.elements:
+                inner = Emitter._pl_to_pell_type(None, value.elements[0])
+                return f"list<{inner}>"
+            return "list<text>"
+        if isinstance(value, A.StructLit):
+            return value.type_name
+        return "text  /* ??? — couldn't infer; please verify */"
+
     # -- auto-stringify ---------------------------------------------------
 
     def _infer_expr_type(self, e: A.Expr) -> Optional[str]:
@@ -3437,16 +3492,16 @@ class Emitter:
             # (_emit_assign_to does per-field copy). If we're here, the
             # type is neither a known record nor a known OBJECT type —
             # the user referenced an undefined type. Give them a clear
-            # error instead of emitting an unparseable comment that
-            # bubbles up to Oracle as PLS-00103.
+            # error with a *suggested* definition inferred from the
+            # struct's field values, so they can copy-paste the fix.
+            suggested = self._suggest_record_def(e)
             known_recs = ", ".join(r.name for r in self._records) or "(none)"
             known_types = ", ".join(self._type_names) or "(none)"
             raise EmitError(
                 f"unknown type `{e.type_name}` in struct literal "
-                f"`{e.type_name} {{ ... }}`. "
-                f"Define it with `record {e.type_name} {{ ... }}` (for a "
-                f"record) or `type {e.type_name} {{ ... }}` (for an OBJECT "
-                f"type). Known records: {known_recs}. Known types: {known_types}.",
+                f"`{e.type_name} {{ ... }}`.\n"
+                f"  did you mean: {suggested}\n"
+                f"  known records: {known_recs}; known types: {known_types}",
                 e.loc,
             )
         if isinstance(e, A.SqlBlock):

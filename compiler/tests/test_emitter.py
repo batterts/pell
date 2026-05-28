@@ -2036,4 +2036,19 @@ def test_undefined_record_type_raises_clear_error():
         """)
     msg = str(exc_info.value)
     assert "unknown type `Employee`" in msg
-    assert "record Employee" in msg  # tells them how to fix it
+    # Suggested record def with field types inferred from values:
+    assert "record Employee { id: number, name: text, level: number }" in msg
+
+
+def test_undefined_record_type_suggestion_handles_bool_and_json():
+    """The suggestion infers bool, json, and other non-trivial types."""
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError) as exc_info:
+        compile_to_sql("""
+            module m;
+            pub fn f() {
+                let c: Config = Config { enabled: true, count: 3 };
+            }
+        """)
+    msg = str(exc_info.value)
+    assert "record Config { enabled: bool, count: number }" in msg
