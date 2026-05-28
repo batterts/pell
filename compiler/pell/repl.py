@@ -174,13 +174,15 @@ class Repl:
             return
 
         # Inject capture lines into the anonymous block so we can read
-        # back variable values after execution. We capture EVERY let in
-        # this cell + every previously-snapshotted variable.
+        # back variable values after execution. We capture EVERY base
+        # variable from this cell + every base from prior snapshots.
+        # The capture function expands record types into per-field
+        # capture lines itself, so we ONLY pass base names (no dotted
+        # keys) to avoid double-capture.
         cell_lets = [s for s in stmts if isinstance(s, A.LetStmt)]
-        all_var_names = list(self.var_snapshots.keys())
-        # Also include record-field snapshot base names
-        for k in list(self.var_snapshots.keys()):
-            base = k.split(".")[0]
+        all_var_names: list[str] = []
+        for k in self.var_snapshots.keys():
+            base = k.split(".", 1)[0]
             if base not in all_var_names:
                 all_var_names.append(base)
         for s in cell_lets:
@@ -189,7 +191,6 @@ class Repl:
             if s.type_annot:
                 from .emitter import lower_type
                 self.var_types[s.name] = lower_type(s.type_annot)
-                # Track pell record name for StructLit replay
                 if isinstance(s.type_annot, A.NamedType):
                     self._var_record_names[s.name] = s.type_annot.name
 
