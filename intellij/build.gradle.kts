@@ -1,6 +1,11 @@
 // pell-intellij — IntelliJ plugin that registers a `.pell` file type and
-// wires up the pell-lsp server (via LSP4IJ) so diagnostics/hover/completion/
-// document-symbols all work in IntelliJ-family IDEs (IDEA, DataGrip, etc.).
+// adds a green-arrow gutter icon + run configurations for `pell build`,
+// `pell exec`, `pell parse`, `pell tokens`.
+//
+// LSP wiring (syntax highlight / diagnostics / hover) is handled by
+// LSP4IJ's user-defined-server settings — the `pell-intellij` skill
+// configures that side. This plugin focuses on the file type +
+// run-configuration ergonomics that need real IntelliJ-platform code.
 //
 // Build with:
 //     ./gradlew buildPlugin
@@ -9,12 +14,12 @@
 
 plugins {
     java
-    id("org.jetbrains.kotlin.jvm") version "1.9.25"
+    id("org.jetbrains.kotlin.jvm") version "2.0.21"
     id("org.jetbrains.intellij.platform") version "2.2.1"
 }
 
 group = "dev.pell"
-version = "0.0.1"
+version = "0.3.0"
 
 repositories {
     mavenCentral()
@@ -24,10 +29,11 @@ repositories {
 dependencies {
     intellijPlatform {
         intellijIdeaCommunity("2024.3")
-        // LSP4IJ — the open-source LSP-to-IntelliJ-platform bridge.
-        // Available on the JetBrains Marketplace; we depend on it at runtime.
-        plugin("com.redhat.devtools.lsp4ij:0.10.0")
-
+        // Terminal plugin — needed so we can open `./pell repl` inside
+        // IntelliJ's terminal tool window (the REPL needs a real TTY,
+        // which the Run console doesn't have). The Terminal plugin is
+        // bundled with every IntelliJ-family IDE.
+        bundledPlugin("org.jetbrains.plugins.terminal")
         instrumentationTools()
         pluginVerifier()
         zipSigner()
@@ -37,11 +43,24 @@ dependencies {
 intellijPlatform {
     pluginConfiguration {
         ideaVersion {
-            sinceBuild = "243"   // IntelliJ 2024.3+
+            sinceBuild = "243"      // IntelliJ 2024.3+
+            untilBuild = provider { null }   // no upper bound — works on 2024.3, 2025.x, 2026.x, ...
+        }
+    }
+    // Suppress the "until-build is missing" warning that fires when we
+    // intentionally don't bound the upper range.
+    pluginVerification {
+        ides {
+            recommended()
         }
     }
 }
 
 kotlin {
-    jvmToolchain(17)
+    jvmToolchain(21)
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
 }

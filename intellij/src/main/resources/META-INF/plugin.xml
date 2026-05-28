@@ -2,24 +2,158 @@
     <id>dev.pell.intellij</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.0.1</version>
+    <version>0.3.0</version>
 
     <description><![CDATA[
         IntelliJ support for the <b>pell</b> language — a statically-typed
         surface language that compiles to Oracle PL/SQL 23.
         <br><br>
-        Wraps the <code>pell-lsp</code> server via LSP4IJ to provide:
+        <b>What this plugin gives you:</b>
         <ul>
-          <li>Real-time diagnostics from the pell parser</li>
-          <li>Hover info for fns, records, and errors</li>
-          <li>Document symbols (outline view)</li>
-          <li>Basic completion (keywords, methods, annotations)</li>
-          <li>Go-to-definition within a file</li>
+          <li><b>Run-line markers</b> — green-arrow gutter icon on every
+              <code>.pell</code> file with a popup menu for
+              <code>exec</code> / <code>exec --dry-run</code> /
+              <code>build</code> / <code>build → file</code> /
+              <code>parse</code> / <code>tokens</code>, plus
+              <code>Open pell REPL (load this file)</code>.</li>
+          <li><b>Run on Oracle</b> for plain <code>.sql</code> files —
+              same gutter pattern, runs the SQL against
+              <code>$PELL_DB_URL</code> via the pell driver. No
+              IntelliJ Ultimate Database plugin required.</li>
+          <li><b>Tool window</b> ("pell" tab on the right strip) — module
+              tree with build/deploy state per row, toolbar with
+              Build/Deploy/Run SQL/Open REPL buttons, streaming log
+              panel.</li>
+          <li><b>New Project wizard</b> — File → New → Project → pell
+              scaffolds <code>src/hello.pell</code>, <code>tests/</code>,
+              <code>built/</code>, a portable <code>./pell</code> shim,
+              and a one-click "Deploy all" run configuration.</li>
+          <li><b>Diagnostics + hover + completion</b> via LSP4IJ when
+              pell-lsp is configured (see the
+              <code>pell-intellij</code> Claude Code skill or the
+              repo's <code>lsp/INSTALL.md</code>).</li>
+        </ul>
+
+        <br>
+        <b>What's new in 0.2.0:</b>
+        <ul>
+          <li>Tool window ("pell" right-strip tab) with module tree,
+              build/deploy state per row, log panel, and a toolbar
+              wired to <code>pell build</code> / <code>pell deploy</code>
+              / <code>pell sql</code> / <code>pell repl</code>.</li>
+          <li>"Open pell REPL" gutter action — launches the REPL in a
+              terminal tab and auto-<code>\\load</code>s the current
+              file's defs into the session.</li>
+          <li>"Run SQL on PELL_DB_URL" gutter action on every
+              <code>.sql</code> file — Community-edition users no
+              longer need the Ultimate Database plugin to run
+              pell-built SQL.</li>
+          <li>New Project wizard ("pell" entry under File → New →
+              Project) with a configurable Pell home and a fully
+              scaffolded starter project.</li>
+        </ul>
+
+        <br>
+        <b>0.1.0 (initial release):</b>
+        <ul>
+          <li>Run-configuration type "pell" with the gutter-icon
+              multi-action popup (build / exec / parse / tokens).</li>
+          <li>Compile-on-save flows wired through the pell CLI.</li>
+          <li><code>.pell</code> file type + LSP4IJ-backed diagnostics.</li>
         </ul>
     ]]></description>
 
+    <change-notes><![CDATA[
+        <h3>0.3.0</h3>
+        <ul>
+          <li><b>Side-by-side pell ↔ PL/SQL split editor.</b>
+              Opening any <code>.pell</code> file now shows the source
+              on the left and a live PL/SQL preview on the right
+              (Markdown-style). Recompiles debounced (~400ms) as you
+              type. Toggle text-only / split / preview-only via the
+              icons in the editor's top-right corner — same UI as the
+              Markdown plugin. Preview gets SQL syntax highlighting
+              when available. Compile errors render in the preview
+              pane with header + stderr.</li>
+        </ul>
+        <h3>0.2.4</h3>
+        <ul>
+          <li><b>Build / install pell_runtime from the tool window.</b>
+              Two new toolbar buttons:
+              <ul>
+                <li><b>Build pell_runtime.sql</b> — aggregates every
+                    pell <code>error</code> declared in the project
+                    into <code>built/pell_runtime.sql</code>.</li>
+                <li><b>Install pell_runtime on PELL_DB_URL</b> — same
+                    build, then installs the generated SQL against
+                    the connected database. Fires the install only if
+                    the build half exited 0.</li>
+              </ul>
+              Previously this only happened as a side-effect of
+              <code>Deploy all</code> when at least one module
+              referenced <code>pell_runtime.&lt;exception&gt;</code>.
+              Standalone access makes the workflow explicit.</li>
+        </ul>
+        <h3>0.2.3</h3>
+        <ul>
+          <li>Tool window now falls back to <code>project.basePath</code>
+              when the project has no modules / no content roots. Fixes
+              the empty-tree case for brand-new IDEA projects created
+              via the New Project wizard, where IDEA doesn't auto-create
+              a module — the previous code iterated zero roots and
+              found zero files even though the scaffold was on disk.</li>
+        </ul>
+        <h3>0.2.2</h3>
+        <ul>
+          <li>Tool window auto-refreshes when <code>.pell</code> or
+              <code>.sql</code> files appear or disappear under the
+              project's content roots. Fixes the empty-tree case in
+              brand-new projects: the wizard's scaffold writes files
+              <i>after</i> the tool window's initial scan, so the
+              tree used to be empty until the user clicked Refresh.
+              Now the VFS subscription catches the post-startup
+              writes and the tree populates without a click.</li>
+        </ul>
+        <h3>0.2.1</h3>
+        <ul>
+          <li><b>New Project entry now actually shows up in IntelliJ IDEA.</b>
+              0.2.0 used <code>&lt;directoryProjectGenerator&gt;</code>
+              which only surfaces in PyCharm / WebStorm / RubyMine /
+              DataGrip. IDEA's Generators list reads from
+              <code>&lt;moduleBuilder&gt;</code> with a
+              <code>GeneratorNewProjectWizardBuilderAdapter</code>
+              (same surface Maven Archetype uses). Now registered both
+              ways so the "pell" entry appears in every JetBrains IDE.</li>
+        </ul>
+        <h3>0.2.0</h3>
+        <ul>
+          <li><b>Tool window</b>: new "pell" tab on the right strip with a
+              module tree (per-row build/deploy state), toolbar (Build,
+              Build all, Run SQL, Deploy all, Open REPL, Open source,
+              Open built SQL), and a streaming log panel.</li>
+          <li><b>Open pell REPL</b> gutter action — opens IntelliJ's
+              terminal and auto-<code>\\load</code>s the current
+              <code>.pell</code> file into a fresh session.</li>
+          <li><b>Run SQL gutter</b> on <code>.sql</code> files — uses
+              the pell driver instead of Ultimate's Database plugin.</li>
+          <li><b>New Project wizard</b>: File → New → Project → pell
+              scaffolds a complete starter project with the
+              <code>./pell</code> wrapper, <code>src/</code>,
+              <code>built/</code>, and a Deploy all run config.</li>
+          <li>Build-arg ordering fixed for <code>pell build -o</code>
+              (file before flag, matches the CLI).</li>
+        </ul>
+        <h3>0.1.0</h3>
+        <ul>
+          <li>Initial run-configuration type and gutter-icon popup
+              (exec / build / parse / tokens).</li>
+          <li><code>.pell</code> file-type registration.</li>
+          <li>LSP4IJ wiring for diagnostics / hover / outline.</li>
+        </ul>
+    ]]></change-notes>
+
     <depends>com.intellij.modules.platform</depends>
-    <depends>com.redhat.devtools.lsp4ij</depends>
+    <depends>org.jetbrains.plugins.terminal</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <!-- Register the .pell file type -->
@@ -34,17 +168,56 @@
         <lang.parserDefinition
             language="pell"
             implementationClass="dev.pell.intellij.PellParserDefinition" />
+
+        <!-- Run-configuration support — surfaces "pell" in the
+             Run/Debug "+" menu and powers the gutter run icon. -->
+        <configurationType
+            implementation="dev.pell.intellij.run.PellRunConfigurationType" />
+        <runConfigurationProducer
+            implementation="dev.pell.intellij.run.PellRunConfigurationProducer" />
+        <runLineMarkerContributor
+            language="pell"
+            implementationClass="dev.pell.intellij.run.PellRunLineMarkerContributor" />
+
+        <!-- Run-on-Oracle gutter icon for plain `.sql` files. Registered
+             for both TEXT (Community fallback) and SQL (Ultimate's
+             Database plugin owns the language there). The contributor
+             gates internally on file extension. -->
+        <runLineMarkerContributor
+            language="TEXT"
+            implementationClass="dev.pell.intellij.run.PellSqlRunLineMarkerContributor" />
+        <runLineMarkerContributor
+            language="SQL"
+            implementationClass="dev.pell.intellij.run.PellSqlRunLineMarkerContributor" />
+
+        <!-- Side-by-side pell ↔ PL/SQL split editor. Opens .pell files
+             in a Markdown-style editor with the source on the left
+             and a live PL/SQL preview on the right. Recompiles
+             debounced (~400ms) as the user types. -->
+        <fileEditorProvider
+            implementation="dev.pell.intellij.preview.PellSplitEditorProvider" />
+
+        <!-- Side-panel tool window (icon strip, "pell" tab). Shows
+             module tree + status + build/deploy log. -->
+        <toolWindow
+            id="pell"
+            secondary="false"
+            anchor="right"
+            icon="AllIcons.Actions.Compile"
+            factoryClass="dev.pell.intellij.toolwindow.PellToolWindowFactory" />
+
+        <!-- New Project wizard. Two registrations because different
+             IntelliJ-family IDEs surface different surfaces:
+               - <moduleBuilder> with a GeneratorNewProjectWizardBuilderAdapter
+                 → IntelliJ IDEA's "Generators" section (Maven Archetype,
+                   Spring Boot, ...). Same surface Maven Archetype uses.
+               - <directoryProjectGenerator> → PyCharm / WebStorm /
+                   RubyMine / DataGrip — their wizard reads from this EP.
+             Same scaffolding logic; both paths land in PellProjectScaffold. -->
+        <moduleBuilder
+            builderClass="dev.pell.intellij.newproject.PellNewProjectWizard$PellNewProjectWizardBuilder" />
+        <directoryProjectGenerator
+            implementation="dev.pell.intellij.newproject.PellDirectoryProjectGenerator" />
     </extensions>
 
-    <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">
-        <!-- Wire pell-lsp as a server. The path is taken from the plugin's
-             config UI; users set it once after install. -->
-        <server
-            id="pell-lsp"
-            name="pell"
-            factoryClass="dev.pell.intellij.PellLanguageServerFactory" />
-        <languageMapping
-            serverId="pell-lsp"
-            language="pell" />
-    </extensions>
 </idea-plugin>
