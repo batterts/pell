@@ -1540,7 +1540,8 @@ class Emitter:
         if (isinstance(s.value, A.Call)
                 and isinstance(s.value.callee, A.Ident)
                 and "::" in s.value.callee.name):
-            pkg = s.value.callee.name.split("::", 1)[0]
+            segs = s.value.callee.name.split("::")
+            pkg = ".".join(segs[:-1])
             if s.value.callee.name in self._project_signatures:
                 foreign_type = f"{pkg}.{list_type}"
                 self._decl(f"{nm} {foreign_type};")
@@ -1596,7 +1597,8 @@ class Emitter:
         DECLARE so the iteration index is local.
         """
         assert isinstance(call.callee, A.Ident)
-        pkg = call.callee.name.split("::", 1)[0]
+        segs = call.callee.name.split("::")
+        pkg = ".".join(segs[:-1])
         foreign_type = f"{pkg}.{list_type}"
         tmp = f"l_pell_listadapter_{self._sql_var_counter}"
         self._sql_var_counter += 1
@@ -1891,7 +1893,12 @@ class Emitter:
                 and "::" in call.callee.name
                 and call.callee.name in self._project_signatures):
             ret = self._project_signatures[call.callee.name]
-            pkg = call.callee.name.split("::", 1)[0]
+            # Package is everything except the last segment; pell's `::`
+            # lowers to PL/SQL `.` so `pell_test::hello::fn` →
+            # `pell_test.hello.fn` and the foreign type lives at
+            # `pell_test.hello.t_<elem>_list`.
+            segs = call.callee.name.split("::")
+            pkg = ".".join(segs[:-1])
             if (isinstance(ret, A.GenericType) and ret.base == "list"
                     and len(ret.params) == 1):
                 elem = _render_type(ret.params[0])

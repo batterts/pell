@@ -103,11 +103,19 @@ class Repl:
                 except Exception:
                     continue
                 # Module name as the user spells it in `module foo;`
-                # — that's the prefix users use in `foo::fn(...)` calls.
-                pkg = mod.name.replace(".", "::") if "." in mod.name else mod.name
+                # — for dotted names like `pell_test.hello`, register
+                # BOTH the fully-qualified form (`pell_test::hello::fn`)
+                # AND the short name (`hello::fn`). The short form lets
+                # callers connected to that schema use the natural
+                # un-prefixed call; the long form covers cross-schema
+                # access from another schema.
+                fq_pkg = mod.name.replace(".", "::")
+                short_pkg = mod.name.split(".")[-1] if "." in mod.name else mod.name
                 for item in mod.items:
                     if isinstance(item, A.FnDef) and item.is_pub and item.return_type is not None:
-                        self._project_signatures[f"{pkg}::{item.name}"] = item.return_type
+                        self._project_signatures[f"{fq_pkg}::{item.name}"] = item.return_type
+                        if short_pkg != fq_pkg:
+                            self._project_signatures[f"{short_pkg}::{item.name}"] = item.return_type
 
     # -- main loop ---------------------------------------------------------
 
