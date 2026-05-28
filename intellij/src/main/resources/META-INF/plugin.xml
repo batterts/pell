@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.3.1</version>
+    <version>0.3.2</version>
 
     <description><![CDATA[
         IntelliJ support for the <b>pell</b> language — a statically-typed
@@ -64,6 +64,15 @@
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.3.2</h3>
+        <ul>
+          <li><b>Preview no longer flickers while you type.</b> When
+              the source has incomplete syntax (mid-typing
+              <code>pub fn foo(</code>), the PL/SQL preview now stays
+              frozen on the last successful compile. A red banner
+              above the preview surfaces the compile error — no more
+              blanking out and re-rendering on every keystroke.</li>
+        </ul>
         <h3>0.3.1</h3>
         <ul>
           <li>Plugin ID renamed from <code>dev.pell.intellij</code> to

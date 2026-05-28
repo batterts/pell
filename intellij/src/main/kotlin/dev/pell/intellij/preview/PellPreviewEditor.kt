@@ -13,8 +13,14 @@ import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.testFramework.LightVirtualFile
 import com.intellij.ui.JBColor
+import com.intellij.util.ui.JBUI
+import java.awt.BorderLayout
+import java.awt.Color
 import java.beans.PropertyChangeListener
 import javax.swing.JComponent
+import javax.swing.JLabel
+import javax.swing.JPanel
+import javax.swing.SwingConstants
 
 /**
  * The right-hand "preview" pane in the split editor. Owns a read-only
@@ -33,6 +39,25 @@ class PellPreviewEditor(
     private val editorFactory = EditorFactory.getInstance()
     private val document: Document = editorFactory.createDocument("// (compiling…)\n")
     private val viewer: EditorEx = editorFactory.createViewer(document, project) as EditorEx
+    // Set true once we've shown a successfully-compiled SQL at least
+    // once. Until then, compile errors render in the document body
+    // (no good content to fall back to); after, they surface only as
+    // a header banner — the body keeps the last good SQL visible.
+    private var hasGoodCompile: Boolean = false
+
+    // Status banner above the viewer, used when the most recent compile
+    // failed AND we have a prior good compile to keep showing. Removed
+    // when a fresh compile succeeds.
+    private val errorBanner: JLabel = JLabel("", SwingConstants.LEFT).apply {
+        foreground = JBColor.RED
+        background = JBColor(Color(0xFFEEEE), Color(0x5A3030))
+        isOpaque = true
+        border = JBUI.Borders.empty(4, 8)
+    }
+    private val errorBannerPanel: JPanel = JPanel(BorderLayout()).apply {
+        add(errorBanner, BorderLayout.CENTER)
+        isVisible = false
+    }
 
     init {
         viewer.isViewer = true
@@ -53,18 +78,38 @@ class PellPreviewEditor(
         } catch (_: Throwable) {
             // No SQL highlighter available — plain text is fine.
         }
+        // Attach the error banner as the editor's permanent header so
+        // we can toggle visibility without re-laying-out the editor.
+        viewer.headerComponent = errorBannerPanel
     }
 
-    /** Replace the preview contents with successfully-compiled PL/SQL. */
+    /** Replace the preview contents with successfully-compiled PL/SQL.
+     *  Clears the error banner — the new content IS the latest truth. */
     fun setSql(sql: String) {
         com.intellij.openapi.application.ApplicationManager.getApplication().runWriteAction {
             document.setText(sql.ifEmpty { "// (no output)\n" })
         }
-        viewer.backgroundColor = JBColor.namedColor("EditorPane.background", JBColor.WHITE)
+        hasGoodCompile = true
+        errorBannerPanel.isVisible = false
     }
 
-    /** Show a compile error in the preview pane (header + stderr). */
+    /** Surface a compile error WITHOUT clobbering the last successful
+     *  preview. While the source has invalid syntax (mid-typing
+     *  `pub fn foo(`), the SQL body stays frozen on the last good
+     *  compile and a red banner above shows the error. Lets the user
+     *  read the previous PL/SQL while they're still typing — no flicker.
+     *
+     *  Falls back to rendering the error in the document body only
+     *  when there's no prior successful compile yet. */
     fun setError(message: String) {
+        if (hasGoodCompile) {
+            errorBanner.text = "<html>⚠ <b>compile error</b> — preview frozen at last good compile" +
+                "<br/><span style='color:#888'>" + escapeHtml(firstLineOf(message)) + "</span></html>"
+            errorBannerPanel.isVisible = true
+            return
+        }
+        // First compile failed — render the error in the body so the
+        // user has something to look at.
         val text = buildString {
             append("-- =============================================================\n")
             append("--  pell compile error\n")
@@ -76,6 +121,12 @@ class PellPreviewEditor(
             document.setText(text)
         }
     }
+
+    private fun firstLineOf(s: String): String =
+        s.lineSequence().firstOrNull { it.isNotBlank() }?.trim()?.take(200) ?: ""
+
+    private fun escapeHtml(s: String): String =
+        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     // -- FileEditor interface ------------------------------------------------
 
