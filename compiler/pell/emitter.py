@@ -2039,9 +2039,11 @@ class Emitter:
 
     def _maybe_emit_json_chain(self, target: str, expr: A.Expr,
                                indent: str) -> Optional[list[str]]:
-        """If `expr` is a json dot-chain whose base is json-typed, emit a
-        `SELECT JSON_TRANSFORM(base, ops...) INTO target FROM dual;`
-        statement. Returns None otherwise.
+        """If `expr` is a json dot-chain whose base is json-typed, emit
+        PL/SQL-native JSON_OBJECT_T mutation calls.
+
+        Uses Oracle's JSON_ELEMENT_T DOM API instead of SQL-only
+        JSON_TRANSFORM — no `SELECT ... FROM dual` wrapper needed.
         """
         if not isinstance(expr, A.Call):
             return None
@@ -2052,30 +2054,15 @@ class Emitter:
         if not self._is_json_typed(base):
             return None
         base_sql = self._emit_expr(base)
-        op_sqls = self._emit_json_chain_ops(ops)
-        if not op_sqls:
-            return None
-        return [
-            f"{indent}SELECT JSON_TRANSFORM({base_sql},",
-            *(f"{indent}  {op_sql}{',' if i < len(op_sqls) - 1 else ''}"
-              for i, op_sql in enumerate(op_sqls)),
-            f"{indent}) INTO {target} FROM dual;",
-        ]
 
-    def _emit_json_chain_ops(
-        self, ops: list[tuple[str, list[A.Expr], A.Loc]],
-    ) -> list[str]:
-        """Render the chain ops as JSON_TRANSFORM operation strings.
+        # Declare a temporary JSON_OBJECT_T to perform the mutations in
+        # place, then convert back to the target's JSON type.
+        tmp = f"l_pell_jobj_{self._sql_var_counter}"
+        self._sql_var_counter += 1
+        self._decl(f"{tmp} JSON_OBJECT_T;")
 
-        SET ops with multi-level paths get expanded with auto-vivify SETs
-        first — Oracle's JSON_TRANSFORM doesn't create intermediate object
-        nodes automatically, so for `.set("a.b.c", v)` we emit:
-            SET '$.a'     = JSON_OBJECT() CREATE ON MISSING,
-            SET '$.a.b'   = JSON_OBJECT() CREATE ON MISSING,
-            SET '$.a.b.c' = v CREATE ON MISSING
-        """
-        op_sqls: list[str] = []
-        seen_vivified: set[str] = set()
+        lines = [f"{indent}{tmp} := JSON_OBJECT_T({base_sql});"]
+
         for method, args, loc in ops:
             if method == "set":
                 if len(args) != 2:
@@ -2084,25 +2071,16 @@ class Emitter:
                         loc,
                     )
                 path_text = self._json_chain_path_text(args[0], loc)
-                # Auto-vivify intermediate object parents (only for dotted
-                # paths, not for array indices like `xs[0]`).
-                if "." in path_text and "[" not in path_text:
-                    parts = path_text.split(".")
-                    accum: list[str] = []
-                    for p in parts[:-1]:
-                        accum.append(p)
-                        prefix = ".".join(accum)
-                        if prefix in seen_vivified:
-                            continue
-                        seen_vivified.add(prefix)
-                        op_sqls.append(
-                            f"SET {_sql_string('$.' + prefix)} = "
-                            f"JSON_OBJECT(RETURNING JSON) CREATE ON MISSING"
-                        )
                 val_sql = self._emit_expr(args[1])
-                op_sqls.append(
-                    f"SET {_sql_string('$.' + path_text)} = {val_sql} CREATE ON MISSING"
-                )
+                if "." in path_text and "[" not in path_text:
+                    # Nested path: auto-vivify intermediate objects
+                    lines.extend(self._emit_json_obj_nested_put(
+                        tmp, path_text, val_sql, indent,
+                    ))
+                else:
+                    lines.append(
+                        f"{indent}{tmp}.put({_sql_string(path_text)}, {val_sql});"
+                    )
             elif method == "remove":
                 if len(args) != 1:
                     raise EmitError(
@@ -2110,7 +2088,9 @@ class Emitter:
                         loc,
                     )
                 path_text = self._json_chain_path_text(args[0], loc)
-                op_sqls.append(f"REMOVE {_sql_string('$.' + path_text)}")
+                lines.append(
+                    f"{indent}{tmp}.remove({_sql_string(path_text)});"
+                )
             elif method == "append":
                 if len(args) != 2:
                     raise EmitError(
@@ -2119,10 +2099,61 @@ class Emitter:
                     )
                 path_text = self._json_chain_path_text(args[0], loc)
                 val_sql = self._emit_expr(args[1])
-                op_sqls.append(
-                    f"APPEND {_sql_string('$.' + path_text)} = {val_sql}"
-                )
-        return op_sqls
+                # Get or create the array, then append to it.
+                arr_tmp = f"l_pell_jarr_{self._sql_var_counter}"
+                self._sql_var_counter += 1
+                self._decl(f"{arr_tmp} JSON_ARRAY_T;")
+                lines.extend([
+                    f"{indent}IF {tmp}.has({_sql_string(path_text)}) THEN",
+                    f"{indent}  {arr_tmp} := {tmp}.get_array({_sql_string(path_text)});",
+                    f"{indent}ELSE",
+                    f"{indent}  {arr_tmp} := JSON_ARRAY_T();",
+                    f"{indent}END IF;",
+                    f"{indent}{arr_tmp}.append({val_sql});",
+                    f"{indent}{tmp}.put({_sql_string(path_text)}, {arr_tmp});",
+                ])
+
+        # Convert back to JSON type (23ai) or VARCHAR2 (19c).
+        to_json = f"{tmp}.to_json()" if self.target == "23" else f"{tmp}.to_string()"
+        lines.append(f"{indent}{target} := {to_json};")
+        return lines
+
+    def _emit_json_obj_nested_put(
+        self, obj_var: str, path: str, val_sql: str, indent: str,
+    ) -> list[str]:
+        """Emit auto-vivifying `.put()` calls for a dotted path like
+        `"user.address.city"`.
+
+        For each intermediate segment, checks `.has()` and creates an
+        empty `JSON_OBJECT_T()` if missing, then navigates via
+        `.get_object()`. The final segment does the actual `.put()`.
+
+        Example for path "a.b.c" with value v:
+            IF NOT obj.has('a') THEN obj.put('a', JSON_OBJECT_T()); END IF;
+            IF NOT obj.get_object('a').has('b') THEN
+              obj.get_object('a').put('b', JSON_OBJECT_T());
+            END IF;
+            obj.get_object('a').get_object('b').put('c', v);
+        """
+        parts = path.split(".")
+        lines: list[str] = []
+        for i in range(len(parts) - 1):
+            # Build the accessor chain to reach the parent at depth i
+            parent = obj_var
+            for j in range(i):
+                parent = f"{parent}.get_object({_sql_string(parts[j])})"
+            key = _sql_string(parts[i])
+            lines.extend([
+                f"{indent}IF NOT {parent}.has({key}) THEN",
+                f"{indent}  {parent}.put({key}, JSON_OBJECT_T());",
+                f"{indent}END IF;",
+            ])
+        # Final put at the deepest level
+        parent = obj_var
+        for j in range(len(parts) - 1):
+            parent = f"{parent}.get_object({_sql_string(parts[j])})"
+        lines.append(f"{indent}{parent}.put({_sql_string(parts[-1])}, {val_sql});")
+        return lines
 
     def _json_chain_path_text(self, expr: A.Expr, loc: A.Loc) -> str:
         """Path arg must be a string literal — JSON_TRANSFORM path expressions

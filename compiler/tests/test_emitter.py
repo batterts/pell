@@ -884,7 +884,8 @@ def test_pipelined_parallel_order_and_cluster_conflict_errors():
         """)
 
 
-def test_json_chain_simple_set_collapses_to_single_transform():
+def test_json_chain_simple_set_uses_json_object_t():
+    """Dot-chain .set() lowers to JSON_OBJECT_T.put() — no SELECT FROM dual."""
     sql = compile_to_sql("""
         module m;
         pub fn build() -> json {
@@ -894,10 +895,12 @@ def test_json_chain_simple_set_collapses_to_single_transform():
             return j;
         }
     """)
-    assert "SELECT JSON_TRANSFORM(JSON_OBJECT(" in sql
-    assert "SET '$.name' = 'Alice' CREATE ON MISSING" in sql
-    assert "SET '$.age' = 30 CREATE ON MISSING" in sql
-    assert ") INTO l_j FROM dual;" in sql
+    assert "JSON_OBJECT_T" in sql
+    assert ".put('name', 'Alice')" in sql
+    assert ".put('age', 30)" in sql
+    assert ".to_json()" in sql
+    assert "JSON_TRANSFORM" not in sql  # no SQL wrapper
+    assert "FROM dual" not in sql
 
 
 def test_json_chain_autovivifies_intermediate_paths():
@@ -910,16 +913,17 @@ def test_json_chain_autovivifies_intermediate_paths():
             return j;
         }
     """)
-    # `user` and `user.address` get auto-create SETs:
-    assert "SET '$.user' = JSON_OBJECT(RETURNING JSON) CREATE ON MISSING" in sql
-    assert "SET '$.user.address' = JSON_OBJECT(RETURNING JSON) CREATE ON MISSING" in sql
-    # leaf SETs:
-    assert "SET '$.user.name' = 'Bob'" in sql
-    assert "SET '$.user.address.city' = 'NYC'" in sql
+    # Intermediate auto-vivify via has() + put():
+    assert ".has('user')" in sql
+    assert ".put('user', JSON_OBJECT_T())" in sql
+    assert ".has('address')" in sql
+    # leaf puts:
+    assert ".put('name', 'Bob')" in sql
+    assert ".put('city', 'NYC')" in sql
 
 
 def test_json_chain_dedupes_intermediate_creates():
-    """Two SETs with the same prefix share one autovivify SET."""
+    """Two SETs with the same prefix both check .has() — idempotent."""
     sql = compile_to_sql("""
         module m;
         pub fn f() -> json {
@@ -929,7 +933,8 @@ def test_json_chain_dedupes_intermediate_creates():
             return j;
         }
     """)
-    assert sql.count("SET '$.u' = JSON_OBJECT(RETURNING JSON) CREATE ON MISSING") == 1
+    assert ".put('a', 1)" in sql
+    assert ".put('b', 2)" in sql
 
 
 def test_json_chain_remove_and_append():
@@ -940,8 +945,10 @@ def test_json_chain_remove_and_append():
             return r;
         }
     """)
-    assert "REMOVE '$.draft'" in sql
-    assert "APPEND '$.history' = 'edited'" in sql
+    assert ".remove('draft')" in sql
+    assert "JSON_ARRAY_T" in sql
+    assert ".append('edited')" in sql
+    assert ".put('history'," in sql
 
 
 def test_json_chain_on_non_json_falls_through():
@@ -956,7 +963,7 @@ def test_json_chain_on_non_json_falls_through():
         pub fn f(c: Counter) { c.set(5); }
     """)
     assert "p_c.set(5)" in sql       # dispatch hit the user's method
-    assert "JSON_TRANSFORM" not in sql
+    assert "JSON_OBJECT_T" not in sql
 
 
 def test_json_chain_runtime_path_errors():
