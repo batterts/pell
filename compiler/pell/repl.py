@@ -208,6 +208,24 @@ class Repl:
         from .emitter import lower_type
         return lower_type(ret)
 
+    def _warn_ephemeral_lets(self, cell_lets: "list[A.LetStmt]") -> None:
+        """For lets whose type can't round-trip through capture (lists,
+        cursors, OBJECT types), print a one-line note so the user knows
+        the variable is single-cell only — and won't be confused by an
+        opaque PL/SQL error in the next cell.
+        """
+        for s in cell_lets:
+            typ = self.var_types.get(s.name, "").upper()
+            if not typ:
+                continue
+            if (typ.startswith("T_") and typ.endswith("_LIST")) or "SYS_REFCURSOR" in typ:
+                surface = "list" if "_LIST" in typ else "cursor"
+                print(
+                    f"  (note: `{s.name}` is a {surface} — won't persist to next cell yet, "
+                    f"declare in the same cell as you use it)",
+                    file=sys.stderr,
+                )
+
     _ORA_LINE_RE = __import__("re").compile(r"line (\d+), column (\d+)")
 
     def _print_runtime_error(self, err_msg: str, block: str) -> None:
@@ -291,10 +309,6 @@ class Repl:
                 if isinstance(s.type_annot, A.NamedType):
                     self._var_record_names[s.name] = s.type_annot.name
             else:
-                # No annotation — infer from the registry when the RHS
-                # is a known cross-package call, so capture knows
-                # whether the var is a scalar (serializable) or a
-                # collection (skip).
                 inferred = self._infer_from_registry(s.value)
                 if inferred is not None:
                     self.var_types[s.name] = inferred
@@ -306,6 +320,12 @@ class Repl:
         except Exception as e:
             self._print_runtime_error(str(e), block)
             return
+
+        # After a successful run, warn about cell-lets whose type
+        # can't be carried into the next cell. Saves the user from
+        # the confusing "identifier L_FOO must be declared" error
+        # on the next cell.
+        self._warn_ephemeral_lets(cell_lets)
 
         # Partition output: sentinel lines → snapshots, rest → user output
         user_lines: list[str] = []
