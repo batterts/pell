@@ -383,6 +383,13 @@ class Emitter:
         # otherwise lower to T_USER_LIST and accidentally match the
         # T_*_LIST suffix) doesn't get confused with a `list<user>`.
         self._list_locals: dict[str, str] = {}
+        # Cross-package fn signatures registered by the REPL (or by any
+        # caller wiring up sibling .pell files). Keyed by "<pkg>::<fn>".
+        # Used by `_infer_call_type` for cross-module return-type
+        # inference and by `_emit_let` to declare locals with the
+        # FOREIGN collection type (avoids the PLS-00382 nominal-type
+        # clash on cross-package list returns).
+        self._project_signatures: dict[str, A.TypeRef] = {}
         # convenience wrapper that threads self.target through type lowering
         self._lt = lambda t, *, param=False, sql_context=False: lower_type(
             t, param=param, target=self.target, sql_context=sql_context
@@ -1521,7 +1528,37 @@ class Emitter:
         assert isinstance(s.type_annot, A.GenericType)
         elem_t = s.type_annot.params[0]
         elem_sql = self._lt(elem_t)
-        list_type = f"t_{_safe(_render_type(elem_t))}_list"
+        elem_name = _render_type(elem_t)
+        list_type = f"t_{_safe(elem_name)}_list"
+        # Cross-module call returning `list<T>` — the foreign return
+        # type is `<pkg>.t_<elem>_list`, which is a nominally-different
+        # type from our local `t_<elem>_list` even though the shapes
+        # match. If we have a registered signature for this fn, declare
+        # the local with the FOREIGN type directly so the assignment
+        # is type-identical (no adapter loop needed). Otherwise fall
+        # back to the element-copy adapter.
+        if (isinstance(s.value, A.Call)
+                and isinstance(s.value.callee, A.Ident)
+                and "::" in s.value.callee.name):
+            pkg = s.value.callee.name.split("::", 1)[0]
+            if s.value.callee.name in self._project_signatures:
+                foreign_type = f"{pkg}.{list_type}"
+                self._decl(f"{nm} {foreign_type};")
+                self._local_types[s.name] = foreign_type
+                self._list_locals[s.name] = elem_name
+                call_code = self._emit_expr(s.value)
+                return [f"{indent}{nm} := {call_code};"]
+            # No signature known — adapt by copying elements.
+            if list_type not in self._list_types_emitted:
+                self._list_type_decls.append(
+                    f"  TYPE {list_type} IS TABLE OF {elem_sql} INDEX BY PLS_INTEGER;"
+                )
+                self._list_types_emitted.add(list_type)
+            self._decl(f"{nm} {list_type};")
+            self._local_types[s.name] = list_type
+            self._list_locals[s.name] = elem_name
+            return self._emit_cross_pkg_list_adapter(nm, s.value, list_type, indent)
+        # Same-module / literal RHS — declare local type and assign directly.
         if list_type not in self._list_types_emitted:
             self._list_type_decls.append(
                 f"  TYPE {list_type} IS TABLE OF {elem_sql} INDEX BY PLS_INTEGER;"
@@ -1529,10 +1566,7 @@ class Emitter:
             self._list_types_emitted.add(list_type)
         self._decl(f"{nm} {list_type};")
         self._local_types[s.name] = list_type
-        # Store the pell-surface element name (e.g. "text", "number")
-        # so auto-stringify can pick the right helper without inferring
-        # from the PL/SQL spelling.
-        self._list_locals[s.name] = _render_type(elem_t)
+        self._list_locals[s.name] = elem_name
         if s.value is None:
             return []
         prev_jq = self._pending_jq_elem_type
@@ -1541,6 +1575,45 @@ class Emitter:
             return self._emit_assign_to(nm, s.value, indent)
         finally:
             self._pending_jq_elem_type = prev_jq
+
+    def _emit_cross_pkg_list_adapter(
+        self, target: str, call: A.Call, list_type: str, indent: str,
+    ) -> list[str]:
+        """Copy a foreign-package `list<T>` return into the local list.
+
+        For `let xs: list<text> = hello::user_tables();`, emits:
+
+            l_pell_listadapter_0 hello.t_text_list;
+            l_pell_listadapter_0 := hello.user_tables();
+            i := l_pell_listadapter_0.FIRST;
+            WHILE i IS NOT NULL LOOP
+              l_xs(i) := l_pell_listadapter_0(i);
+              i := l_pell_listadapter_0.NEXT(i);
+            END LOOP;
+
+        Walks via FIRST / NEXT so sparse associative arrays are
+        handled correctly. The whole thing is wrapped in a nested
+        DECLARE so the iteration index is local.
+        """
+        assert isinstance(call.callee, A.Ident)
+        pkg = call.callee.name.split("::", 1)[0]
+        foreign_type = f"{pkg}.{list_type}"
+        tmp = f"l_pell_listadapter_{self._sql_var_counter}"
+        self._sql_var_counter += 1
+        self._decl(f"{tmp} {foreign_type};")
+        call_code = self._emit_expr(call)
+        return [
+            f"{indent}{tmp} := {call_code};",
+            f"{indent}DECLARE",
+            f"{indent}  l_i PLS_INTEGER;",
+            f"{indent}BEGIN",
+            f"{indent}  l_i := {tmp}.FIRST;",
+            f"{indent}  WHILE l_i IS NOT NULL LOOP",
+            f"{indent}    {target}(l_i) := {tmp}(l_i);",
+            f"{indent}    l_i := {tmp}.NEXT(l_i);",
+            f"{indent}  END LOOP;",
+            f"{indent}END;",
+        ]
 
     def _emit_list_let(self, s: A.LetStmt, nm: str, indent: str) -> list[str]:
         """Lower `let xs: list<T> = [v1, v2, ...];` to:
@@ -1808,6 +1881,22 @@ class Emitter:
         return None
 
     def _infer_call_type(self, call: A.Call) -> Optional[str]:
+        # Cross-package call into a fn we have a registered signature
+        # for. Returns the foreign collection type for list returns
+        # (e.g. "hello.t_text_list") so the local can be declared with
+        # the foreign type and the assignment is type-identical — no
+        # PLS-00382 nominal clash. For scalar returns, returns the
+        # standard lowered type.
+        if (isinstance(call.callee, A.Ident)
+                and "::" in call.callee.name
+                and call.callee.name in self._project_signatures):
+            ret = self._project_signatures[call.callee.name]
+            pkg = call.callee.name.split("::", 1)[0]
+            if (isinstance(ret, A.GenericType) and ret.base == "list"
+                    and len(ret.params) == 1):
+                elem = _render_type(ret.params[0])
+                return f"{pkg}.t_{_safe(elem)}_list"
+            return self._lt(ret)
         # json::* helpers — type by name (no fallthrough to free-fn lookup).
         if isinstance(call.callee, A.Ident) and call.callee.name.startswith("json::"):
             n = call.callee.name[len("json::"):]
@@ -4757,6 +4846,7 @@ def emit_anon_block(
     target: str = "23",
     *,
     source_path: Optional[str] = None,
+    project_signatures: Optional[dict[str, "A.TypeRef"]] = None,
 ) -> str:
     """Emit a cell (items + top-level statements) as a self-contained
     anonymous PL/SQL block. Used by `pell exec` and the REPL.
@@ -4764,6 +4854,11 @@ def emit_anon_block(
     `record` and `fn` items are nested as DECLARE-local types and
     subprograms. `type` / `sealed` / `aggregate` items require schema-level
     OBJECT TYPE and raise EmitError — use `pell build` for those.
+
+    `project_signatures` is an optional `<pkg>::<fn>` → return-type map
+    of pub fns from sibling .pell files in the same project. Lets the
+    emitter infer types of cross-package calls without the user
+    annotating the let.
     """
     loc = A.Loc(file=source_path or "<cell>", line=1, col=1)
     if stmts:
@@ -4786,6 +4881,9 @@ def emit_anon_block(
         name="_pell_anon",
         items=list(items) + [main_fn],
     )
-    return Emitter(
+    emitter = Emitter(
         module, target=target, source_path=source_path, reproducible=True,
-    ).emit_anon()
+    )
+    if project_signatures:
+        emitter._project_signatures = dict(project_signatures)
+    return emitter.emit_anon()

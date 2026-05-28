@@ -70,9 +70,44 @@ class Repl:
         # Pell record names for record-typed variables, so we can build
         # StructLit replay nodes: e.g. "alice" → "Employee"
         self._var_record_names: dict[str, str] = {}
+        # Cross-package signature registry: "<pkg>::<fn>" → return TypeRef.
+        # Built by walking the current project for .pell files and
+        # parsing their pub fn signatures. Lets the emitter infer the
+        # return type of `hello::user_tables()` without you having to
+        # annotate the let, AND lets it declare the local with the
+        # foreign collection type (avoids the PLS-00382 nominal type
+        # clash on cross-package list returns).
+        self._project_signatures: dict[str, A.TypeRef] = {}
+        self._scan_project_signatures()
         self.cell_number = 0
         self.history = InMemoryHistory()
         self.session: PromptSession = PromptSession(history=self.history)
+
+    def _scan_project_signatures(self) -> None:
+        """Walk the current working directory for *.pell files and
+        register every pub fn's signature. Best-effort: parse errors
+        on a single file don't stop the scan."""
+        from pathlib import Path
+        for root in (Path.cwd(),):
+            if not root.is_dir():
+                continue
+            for path in root.rglob("*.pell"):
+                # Skip the noisy dirs
+                if any(p in ("built", "out", ".git", "node_modules", "expected")
+                       for p in path.parts):
+                    continue
+                try:
+                    src = path.read_text(encoding="utf-8")
+                    from .parser import parse
+                    mod = parse(src, str(path))
+                except Exception:
+                    continue
+                # Module name as the user spells it in `module foo;`
+                # — that's the prefix users use in `foo::fn(...)` calls.
+                pkg = mod.name.replace(".", "::") if "." in mod.name else mod.name
+                for item in mod.items:
+                    if isinstance(item, A.FnDef) and item.is_pub and item.return_type is not None:
+                        self._project_signatures[f"{pkg}::{item.name}"] = item.return_type
 
     # -- main loop ---------------------------------------------------------
 
@@ -150,7 +185,8 @@ class Repl:
             self._absorb(item)
         if not stmts:
             try:
-                emit_anon_block(self.items, [], target=self.target)
+                emit_anon_block(self.items, [], target=self.target,
+                                project_signatures=self._project_signatures)
             except EmitError as e:
                 print(f"  ! compile error: {e}", file=sys.stderr)
             return
@@ -168,7 +204,8 @@ class Repl:
 
         try:
             block = emit_anon_block(self.items, full_stmts, target=self.target,
-                                    source_path=f"<cell {self.cell_number}>")
+                                    source_path=f"<cell {self.cell_number}>",
+                                    project_signatures=self._project_signatures)
         except EmitError as e:
             print(f"  ! compile error: {e}", file=sys.stderr)
             return
@@ -530,7 +567,8 @@ class Repl:
         if cmd == "\\show":
             try:
                 replay = self._snapshot_to_stmts()
-                block = emit_anon_block(self.items, replay, target=self.target)
+                block = emit_anon_block(self.items, replay, target=self.target,
+                                        project_signatures=self._project_signatures)
             except EmitError as e:
                 print(f"  ! {e}", file=sys.stderr)
                 return None
@@ -568,7 +606,8 @@ class Repl:
         # parser-friendly textual form is non-trivial; for now, just dump
         # the running anon block (the user can edit by hand).
         try:
-            block = emit_anon_block(self.items, [], target=self.target)
+            block = emit_anon_block(self.items, [], target=self.target,
+                                project_signatures=self._project_signatures)
         except EmitError as e:
             print(f"  ! {e}", file=sys.stderr)
             return
