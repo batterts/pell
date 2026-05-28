@@ -370,12 +370,12 @@ class Emitter:
         # private helper `pell_is_panic(p_code NUMBER) RETURN BOOLEAN` so the
         # retry handler can decide whether to re-raise without retry.
         self._needs_panic_helper: bool = False
-        # Element type names (e.g. "text", "number") for which auto-
-        # stringify needs to emit a list-to-text helper. Each entry
-        # produces a `pell_list_to_text_<elem>(xs) RETURN VARCHAR2`
-        # function in the package body — joins elements with ", "
-        # and wraps in `[...]`. Populated by `_auto_stringify`.
-        self._needs_list_to_text: set[str] = set()
+        # List-to-text helper requests. Each entry is (pkg, elem) where
+        # `pkg` is `None` for the local `t_<elem>_list` type, or the
+        # foreign package name (e.g. "hello") for `<pkg>.t_<elem>_list`.
+        # Generates one helper per distinct (pkg, elem) combo so the
+        # signature matches the list value being passed in.
+        self._needs_list_to_text: set[tuple[Optional[str], str]] = set()
         # Structural list-type tracking: maps local/param name → the
         # element type's pell-surface name ("text", "number", etc.).
         # Auto-stringify checks this dict BEFORE string-pattern matching
@@ -484,9 +484,9 @@ class Emitter:
         if self._needs_panic_helper:
             out.append("")
             out.append(self._panic_helper_source())
-        for elem in sorted(self._needs_list_to_text):
+        for pkg, elem in sorted(self._needs_list_to_text, key=lambda x: (x[0] or "", x[1])):
             out.append("")
-            out.append(self._list_to_text_helper_source(elem))
+            out.append(self._list_to_text_helper_source(pkg, elem))
         for chunk in fn_bodies:
             out.append("")
             out.append(chunk)
@@ -788,9 +788,9 @@ class Emitter:
         if self._needs_panic_helper:
             out.append("")
             out.append(self._panic_helper_source())
-        for elem in sorted(self._needs_list_to_text):
+        for pkg, elem in sorted(self._needs_list_to_text, key=lambda x: (x[0] or "", x[1])):
             out.append("")
-            out.append(self._list_to_text_helper_source(elem))
+            out.append(self._list_to_text_helper_source(pkg, elem))
         for adapter in sorted(self._needs_re_adapter):
             out.append("")
             out.append(self._re_adapter_source(adapter))
@@ -852,16 +852,20 @@ class Emitter:
             f"  END pell_re_{op};"
         )
 
-    def _list_to_text_helper_source(self, elem: str) -> str:
+    def _list_to_text_helper_source(self, pkg: Optional[str], elem: str) -> str:
         """A package-private helper that joins a list<T> into a single
-        VARCHAR2 like `[a, b, c]`. One overload per element type.
+        VARCHAR2 like `[a, b, c]`. One overload per (pkg, elem) combo —
+        the param type matches what the caller is passing in (local
+        `t_<elem>_list` or foreign `<pkg>.t_<elem>_list`).
 
         Elements are individually run through the matching to-text
         conversion so the formatting matches what `p()` / `print()`
         do for scalars (TO_CHAR with explicit format mask for dates,
         JSON_SERIALIZE for json, etc.).
         """
-        list_type = f"t_{elem}_list"
+        list_type = f"{pkg}.t_{elem}_list" if pkg else f"t_{elem}_list"
+        fn_name = (f"pell_list_to_text_{pkg}_{elem}" if pkg
+                   else f"pell_list_to_text_{elem}")
         # Per-element conversion to text. Inlined into the loop body
         # using `p_xs(l_i)` as the element reference.
         elem_table = {
@@ -880,7 +884,7 @@ class Emitter:
         # already returns text, so just leave it bare.
         wrapped = to_text if is_bool else f"NVL({to_text}, 'NULL')"
         return (
-            f"  FUNCTION pell_list_to_text_{elem}(p_xs IN {list_type}) RETURN VARCHAR2 IS\n"
+            f"  FUNCTION {fn_name}(p_xs IN {list_type}) RETURN VARCHAR2 IS\n"
             f"    l_buf VARCHAR2(32767);\n"
             f"    l_i PLS_INTEGER;\n"
             f"  BEGIN\n"
@@ -893,7 +897,7 @@ class Emitter:
             f"      l_i := p_xs.NEXT(l_i);\n"
             f"    END LOOP;\n"
             f"    RETURN l_buf || ']';\n"
-            f"  END pell_list_to_text_{elem};"
+            f"  END {fn_name};"
         )
 
     def _split_helper_source(self) -> str:
@@ -1501,6 +1505,22 @@ class Emitter:
             and s.type_annot.base == "list"
         ):
             return self._emit_list_let_from_expr(s, nm, indent)
+        # No annotation but the RHS is a known cross-pkg list call —
+        # route through the list-let path so the foreign type gets
+        # declared AND _list_locals gets registered (so auto-stringify
+        # and for-loop-over-list both find this var structurally).
+        if (s.type_annot is None
+                and isinstance(s.value, A.Call)
+                and isinstance(s.value.callee, A.Ident)
+                and s.value.callee.name in self._project_signatures):
+            sig = self._project_signatures[s.value.callee.name]
+            if (isinstance(sig, A.GenericType) and sig.base == "list"
+                    and len(sig.params) == 1):
+                # Synthesize the annotation in-place so the list-let path
+                # has the elem type. (Doesn't mutate the user's source —
+                # this LetStmt is a copy at this point.)
+                s.type_annot = sig
+                return self._emit_list_let_from_expr(s, nm, indent)
         # generic type lookup if we can do it cheaply
         if ty is None:
             ty = self._infer_decl_type(s.value)
@@ -1783,11 +1803,16 @@ class Emitter:
         if isinstance(e, A.Ident):
             # Structural list check first — if this Ident is known to be
             # a list<T>, return a sentinel that auto-stringify can
-            # disambiguate without string parsing. (Otherwise a user-
-            # defined record like `User_List` would get confused with a
-            # list type via the T_*_LIST suffix.)
+            # disambiguate without string parsing. Format:
+            #   __PELL_LIST__<elem>           for local t_<elem>_list
+            #   __PELL_LIST__<pkg>::<elem>    for foreign <pkg>.t_<elem>_list
             if e.name in self._list_locals:
-                return f"{_LIST_SENTINEL}{self._list_locals[e.name]}"
+                elem = self._list_locals[e.name]
+                pl_type = self._local_types.get(e.name, "")
+                if "." in pl_type and not pl_type.startswith("PLS_"):
+                    pkg = pl_type.split(".", 1)[0]
+                    return f"{_LIST_SENTINEL}{pkg}::{elem}"
+                return f"{_LIST_SENTINEL}{elem}"
             # Check fn parameters first
             if self._current_fn is not None:
                 for p in self._current_fn.params:
@@ -1831,9 +1856,15 @@ class Emitter:
         # element name. Checked FIRST so it can't be confused with
         # any PL/SQL type spelling.
         if pl_type.startswith(_LIST_SENTINEL):
-            elem = pl_type[len(_LIST_SENTINEL):]
-            self._needs_list_to_text.add(elem)
-            return f"pell_list_to_text_{elem}({expr_code})"
+            rest = pl_type[len(_LIST_SENTINEL):]
+            if "::" in rest:
+                pkg, elem = rest.split("::", 1)
+            else:
+                pkg, elem = None, rest
+            self._needs_list_to_text.add((pkg, elem))
+            helper = (f"pell_list_to_text_{pkg}_{elem}" if pkg
+                      else f"pell_list_to_text_{elem}")
+            return f"{helper}({expr_code})"
         t = pl_type.upper()
         if "VARCHAR" in t or "CLOB" in t or "CHAR" in t:
             return expr_code
@@ -3285,7 +3316,8 @@ class Emitter:
         # for x in <list-typed local>: iterate via assoc-array FOR loop
         if isinstance(s.iterable, A.Ident) and s.iterable.name in self._list_locals:
             list_local = local_name(s.iterable.name)
-            elem_t = self._list_locals[s.iterable.name]
+            elem_pell = self._list_locals[s.iterable.name]  # pell-surface, e.g. "text"
+            elem_sql = self._lt(A.PrimType(loc=s.iterable.loc, name=elem_pell))
             # Use an integer loop variable and bind the loop name to list_local(i)
             idx = f"i_{s.var_name}"
             out = [f"{indent}FOR {idx} IN {list_local}.FIRST .. {list_local}.LAST LOOP"]
@@ -3293,7 +3325,7 @@ class Emitter:
             # by introducing a per-iteration local. Cheapest: declare it once at
             # the function level and reassign each iteration.
             shadow = local_name(s.var_name) + "_iter"
-            self._decl(f"{shadow} {elem_t};")
+            self._decl(f"{shadow} {elem_sql};")
             out.append(f"{indent}  {shadow} := {list_local}({idx});")
             # Push a shadow scope: references to `var_name` inside the body
             # resolve to `shadow` (via _loop_vars + a dedicated map).
@@ -3323,7 +3355,12 @@ class Emitter:
             self._loop_vars.pop()
             out.append(f"{indent}END LOOP;")
             return out
-        return [f"{indent}-- TODO: for x in non-sql, non-range iterable"]
+        raise EmitError(
+            f"unsupported `for` iterable: {type(s.iterable).__name__}. "
+            f"Use `for i in 1..=10`, `for row in sql!{{...}}`, or "
+            f"`for x in <list-typed-variable>`.",
+            s.loc,
+        )
 
     def _emit_forall(self, s: A.ForallStmt, indent: str) -> list[str]:
         """Lower `forall n in nums { sql!{...:n...} }` to PL/SQL FORALL.

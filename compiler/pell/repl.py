@@ -51,6 +51,43 @@ slash commands:
 """
 
 
+def scan_project_signatures(root: Optional[Path] = None) -> dict[str, A.TypeRef]:
+    """Walk `root` (default: cwd) for *.pell files and build a
+    `<pkg>::<fn>` → return-type map of pub fn signatures.
+
+    For dotted modules like `pell_test.hello`, registers both the
+    fully-qualified form (`pell_test::hello::fn`) AND the short form
+    (`hello::fn`) — the short form lets callers connected to that
+    schema use the natural un-prefixed call.
+
+    Shared by the REPL and `pell exec` so both can do cross-package
+    type inference. Best-effort: parse errors on individual files
+    don't stop the scan.
+    """
+    sigs: dict[str, A.TypeRef] = {}
+    base = root or Path.cwd()
+    if not base.is_dir():
+        return sigs
+    for path in base.rglob("*.pell"):
+        if any(p in ("built", "out", ".git", "node_modules", "expected")
+               for p in path.parts):
+            continue
+        try:
+            src = path.read_text(encoding="utf-8")
+            from .parser import parse
+            mod = parse(src, str(path))
+        except Exception:
+            continue
+        fq_pkg = mod.name.replace(".", "::")
+        short_pkg = mod.name.split(".")[-1] if "." in mod.name else mod.name
+        for item in mod.items:
+            if isinstance(item, A.FnDef) and item.is_pub and item.return_type is not None:
+                sigs[f"{fq_pkg}::{item.name}"] = item.return_type
+                if short_pkg != fq_pkg:
+                    sigs[f"{short_pkg}::{item.name}"] = item.return_type
+    return sigs
+
+
 class Repl:
     """The notebook-style REPL state machine."""
 
@@ -84,38 +121,8 @@ class Repl:
         self.session: PromptSession = PromptSession(history=self.history)
 
     def _scan_project_signatures(self) -> None:
-        """Walk the current working directory for *.pell files and
-        register every pub fn's signature. Best-effort: parse errors
-        on a single file don't stop the scan."""
-        from pathlib import Path
-        for root in (Path.cwd(),):
-            if not root.is_dir():
-                continue
-            for path in root.rglob("*.pell"):
-                # Skip the noisy dirs
-                if any(p in ("built", "out", ".git", "node_modules", "expected")
-                       for p in path.parts):
-                    continue
-                try:
-                    src = path.read_text(encoding="utf-8")
-                    from .parser import parse
-                    mod = parse(src, str(path))
-                except Exception:
-                    continue
-                # Module name as the user spells it in `module foo;`
-                # — for dotted names like `pell_test.hello`, register
-                # BOTH the fully-qualified form (`pell_test::hello::fn`)
-                # AND the short name (`hello::fn`). The short form lets
-                # callers connected to that schema use the natural
-                # un-prefixed call; the long form covers cross-schema
-                # access from another schema.
-                fq_pkg = mod.name.replace(".", "::")
-                short_pkg = mod.name.split(".")[-1] if "." in mod.name else mod.name
-                for item in mod.items:
-                    if isinstance(item, A.FnDef) and item.is_pub and item.return_type is not None:
-                        self._project_signatures[f"{fq_pkg}::{item.name}"] = item.return_type
-                        if short_pkg != fq_pkg:
-                            self._project_signatures[f"{short_pkg}::{item.name}"] = item.return_type
+        """Populate the project signature registry from the cwd."""
+        self._project_signatures = scan_project_signatures()
 
     # -- main loop ---------------------------------------------------------
 

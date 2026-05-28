@@ -406,8 +406,17 @@ def cmd_exec(args: argparse.Namespace) -> int:
         return 1
     if not items and not stmts:
         return 0
+    # Scan the cwd for sibling .pell files so cross-package call
+    # inference works the same way it does in the REPL.
     try:
-        block = emit_anon_block(items, stmts, target=args.target, source_path=source_path)
+        from .repl import scan_project_signatures
+        project_signatures = scan_project_signatures()
+    except Exception:
+        project_signatures = {}
+    try:
+        block = emit_anon_block(items, stmts, target=args.target,
+                                source_path=source_path,
+                                project_signatures=project_signatures)
     except EmitError as e:
         print(f"pell: {e}", file=sys.stderr)
         return 1
