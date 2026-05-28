@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.3.2</version>
+    <version>0.3.3</version>
 
     <description><![CDATA[
         IntelliJ support for the <b>pell</b> language — a statically-typed
@@ -64,6 +64,35 @@
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.3.3</h3>
+        <ul>
+          <li>Clears all Marketplace verifier warnings: replaces three
+              deprecated / internal API usages with their stable
+              successors.
+              <ul>
+                <li><code>TerminalToolWindowManager.createLocalShellWidget(...)</code>
+                    → <code>createShellWidget(cwd, name, focus, defer)</code>
+                    + <code>TerminalWidget.sendCommandToExecute(...)</code></li>
+                <li><code>StartupManager.runAfterOpened(...)</code>
+                    (internal) → scaffold directly in
+                    <code>generateProject</code></li>
+                <li><code>ProjectGeneratorPeer.getComponent()</code>
+                    override (deprecated) removed; settings go through
+                    <code>buildUI(SettingsStep)</code> only</li>
+                <li><code>DirectoryProjectGenerator.getLogo()</code>
+                    → <code>getIcon()</code></li>
+                <li><code>SyntaxHighlighterFactory.LANGUAGE_FACTORY.forLanguage(...)</code>
+                    → <code>SyntaxHighlighterFactory.getSyntaxHighlighter(lang, ...)</code></li>
+                <li><code>LightVirtualFile</code> from <code>testFramework</code>
+                    (internal) — no longer needed; SQL highlighter built
+                    directly via the language-aware factory</li>
+                <li><code>PsiAwareTextEditorProvider()</code> ctor
+                    (internal) → <code>TextEditorProvider.getInstance()</code></li>
+              </ul>
+              No user-visible behavior change — same UI, same flows,
+              but the binary is now forward-compatible with 2025.x and
+              2026.x EAPs without verifier warnings.</li>
+        </ul>
         <h3>0.3.2</h3>
         <ul>
           <li><b>Preview no longer flickers while you type.</b> When

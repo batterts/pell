@@ -4,7 +4,7 @@ import com.intellij.openapi.fileEditor.FileEditor
 import com.intellij.openapi.fileEditor.FileEditorPolicy
 import com.intellij.openapi.fileEditor.FileEditorProvider
 import com.intellij.openapi.fileEditor.TextEditor
-import com.intellij.openapi.fileEditor.impl.text.PsiAwareTextEditorProvider
+import com.intellij.openapi.fileEditor.impl.text.TextEditorProvider
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
@@ -22,13 +22,14 @@ import com.intellij.openapi.vfs.VirtualFile
  */
 class PellSplitEditorProvider : FileEditorProvider, DumbAware {
 
-    private val textProvider = PsiAwareTextEditorProvider()
-
     override fun accept(project: Project, file: VirtualFile): Boolean =
         file.extension?.lowercase() == "pell"
 
     override fun createEditor(project: Project, file: VirtualFile): FileEditor {
-        val textEditor = textProvider.createEditor(project, file) as TextEditor
+        // Use the default TextEditorProvider — it's the PSI-aware one
+        // for files with a registered language. Instantiating
+        // PsiAwareTextEditorProvider directly is flagged as internal.
+        val textEditor = TextEditorProvider.getInstance().createEditor(project, file) as TextEditor
         val preview = PellPreviewEditor(project, file)
         return PellSplitEditor(project, file, textEditor, preview)
     }

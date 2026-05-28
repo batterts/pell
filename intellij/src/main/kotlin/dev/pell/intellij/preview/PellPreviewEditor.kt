@@ -1,17 +1,18 @@
 package dev.pell.intellij.preview
 
+import com.intellij.lang.Language
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.EditorFactory
+import com.intellij.openapi.editor.colors.EditorColorsManager
 import com.intellij.openapi.editor.ex.EditorEx
-import com.intellij.openapi.editor.highlighter.EditorHighlighterFactory
+import com.intellij.openapi.editor.ex.util.LexerEditorHighlighter
 import com.intellij.openapi.fileEditor.FileEditor
 import com.intellij.openapi.fileEditor.FileEditorLocation
 import com.intellij.openapi.fileEditor.FileEditorState
-import com.intellij.openapi.fileTypes.FileTypeManager
+import com.intellij.openapi.fileTypes.SyntaxHighlighterFactory
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.testFramework.LightVirtualFile
 import com.intellij.ui.JBColor
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
@@ -69,12 +70,19 @@ class PellPreviewEditor(
         // Try to wire up SQL syntax highlighting via IntelliJ's
         // registered SQL file type. Falls back to plain text on
         // Community editions where the SQL highlighter isn't bundled.
+        // SQL syntax highlighting via the public SyntaxHighlighterFactory
+        // API. Avoids creating a LightVirtualFile (testFramework /
+        // internal-tagged) just to get a file-typed highlighter.
         try {
-            val sqlType = FileTypeManager.getInstance().getFileTypeByExtension("sql")
-            val tmpVf = LightVirtualFile("preview.sql", sqlType, "")
-            val highlighter = EditorHighlighterFactory.getInstance()
-                .createEditorHighlighter(project, tmpVf)
-            viewer.highlighter = highlighter
+            val sqlLang = Language.findLanguageByID("SQL")
+            if (sqlLang != null) {
+                val sh = SyntaxHighlighterFactory.getSyntaxHighlighter(sqlLang, project, null)
+                if (sh != null) {
+                    viewer.highlighter = LexerEditorHighlighter(
+                        sh, EditorColorsManager.getInstance().globalScheme,
+                    )
+                }
+            }
         } catch (_: Throwable) {
             // No SQL highlighter available — plain text is fine.
         }

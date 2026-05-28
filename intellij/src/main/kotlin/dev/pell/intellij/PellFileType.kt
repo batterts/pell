@@ -3,11 +3,10 @@ package dev.pell.intellij
 import com.intellij.openapi.fileTypes.LanguageFileType
 import javax.swing.Icon
 
-/** File type for `.pell` files. */
+/** File type for `.pell` files. The Kotlin `object` declaration
+ *  exposes itself as the `INSTANCE` field via JvmStatic, which
+ *  plugin.xml references with `fieldName="INSTANCE"`. */
 object PellFileType : LanguageFileType(PellLanguage) {
-    @JvmField
-    val INSTANCE: PellFileType = this
-
     override fun getName(): String = "pell"
     override fun getDescription(): String = "pell language source"
     override fun getDefaultExtension(): String = "pell"

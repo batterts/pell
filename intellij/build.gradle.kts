@@ -19,7 +19,7 @@ plugins {
 }
 
 group = "dev.pell"
-version = "0.3.2"
+version = "0.3.3"
 
 repositories {
     mavenCentral()
@@ -51,7 +51,11 @@ intellijPlatform {
     // intentionally don't bound the upper range.
     pluginVerification {
         ides {
-            recommended()
+            // Pin to the IDE we develop against — `recommended()` requests
+            // versions that may not be in the local cache. We can still
+            // ship to newer IDEs (untilBuild is unbounded); the
+            // Marketplace's own verifier runs against the full matrix.
+            ide("IC", "2024.3")
         }
     }
 }
