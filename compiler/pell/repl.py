@@ -316,7 +316,12 @@ class Repl:
             self.var_snapshots[name] = (typ, raw_value)
 
     def _scalar_val_to_expr(self, typ: str, val: str) -> A.Expr:
-        """Build an AST expression node from a captured scalar value."""
+        """Build an AST expression node from a captured scalar value.
+
+        Date / timestamp / bytes use Oracle's TO_DATE / TO_TIMESTAMP /
+        HEXTORAW built-ins which are PL/SQL-callable directly — no
+        SELECT FROM dual wrapper needed.
+        """
         loc = A.Loc("<repl-snapshot>", 0, 0)
         t = typ.upper()
         if "NUMBER" in t or "PLS_INTEGER" in t or "INTEGER" in t:
@@ -330,21 +335,22 @@ class Repl:
                 args=[A.TextLit(loc=loc, value=val, is_raw=True)],
             )
         if "DATE" in t and "TIMESTAMP" not in t:
-            return A.SqlBlock(
-                loc=loc,
-                sql=f"select to_date('{val}', 'YYYY-MM-DD HH24:MI:SS') from dual",
-            )
+            return self._builtin_call(loc, "to_date", val, "YYYY-MM-DD HH24:MI:SS")
         if "TIMESTAMP" in t:
-            return A.SqlBlock(
-                loc=loc,
-                sql=f"select to_timestamp('{val}', 'YYYY-MM-DD HH24:MI:SS.FF9') from dual",
-            )
+            return self._builtin_call(loc, "to_timestamp", val, "YYYY-MM-DD HH24:MI:SS.FF9")
         if "RAW" in t:
-            return A.SqlBlock(
-                loc=loc,
-                sql=f"select hextoraw('{val}') from dual",
-            )
+            return self._builtin_call(loc, "hextoraw", val)
         return A.TextLit(loc=loc, value=val, is_raw=True)
+
+    @staticmethod
+    def _builtin_call(loc: A.Loc, fn: str, *text_args: str) -> A.Expr:
+        """Build `fn('arg1', 'arg2', ...)` — emits as a direct PL/SQL
+        function call (TO_DATE, TO_TIMESTAMP, HEXTORAW, etc.)."""
+        return A.Call(
+            loc=loc,
+            callee=A.Ident(loc=loc, name=fn),
+            args=[A.TextLit(loc=loc, value=a, is_raw=True) for a in text_args],
+        )
 
     @staticmethod
     def _scalar_type_annot(typ: str) -> A.TypeRef:
