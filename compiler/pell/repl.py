@@ -67,6 +67,9 @@ class Repl:
         # Type annotations of variables, tracked so we can re-emit
         # typed let stmts for snapshots.
         self.var_types: dict[str, str] = {}
+        # Pell record names for record-typed variables, so we can build
+        # StructLit replay nodes: e.g. "alice" → "Employee"
+        self._var_record_names: dict[str, str] = {}
         self.cell_number = 0
         self.history = InMemoryHistory()
         self.session: PromptSession = PromptSession(history=self.history)
@@ -175,12 +178,20 @@ class Repl:
         # this cell + every previously-snapshotted variable.
         cell_lets = [s for s in stmts if isinstance(s, A.LetStmt)]
         all_var_names = list(self.var_snapshots.keys())
+        # Also include record-field snapshot base names
+        for k in list(self.var_snapshots.keys()):
+            base = k.split(".")[0]
+            if base not in all_var_names:
+                all_var_names.append(base)
         for s in cell_lets:
             if s.name not in all_var_names:
                 all_var_names.append(s.name)
             if s.type_annot:
                 from .emitter import lower_type
                 self.var_types[s.name] = lower_type(s.type_annot)
+                # Track pell record name for StructLit replay
+                if isinstance(s.type_annot, A.NamedType):
+                    self._var_record_names[s.name] = s.type_annot.name
 
         block = self._inject_capture_lines(block, all_var_names)
 
@@ -211,24 +222,38 @@ class Repl:
         for name in var_names:
             local = f"l_{name}"
             typ = self.var_types.get(name, "").upper()
-            # Type-aware serialization: JSON needs JSON_SERIALIZE,
-            # DATE/TIMESTAMP need explicit format masks (not NLS-dependent),
-            # RAW needs RAWTOHEX, everything else uses TO_CHAR.
-            if "JSON" in typ:
-                to_text = f"JSON_SERIALIZE({local})"
-            elif "TIMESTAMP" in typ:
-                to_text = f"TO_CHAR({local}, 'YYYY-MM-DD HH24:MI:SS.FF9')"
-            elif "DATE" in typ:
-                to_text = f"TO_CHAR({local}, 'YYYY-MM-DD HH24:MI:SS')"
-            elif "RAW" in typ:
-                to_text = f"RAWTOHEX({local})"
-            else:
-                to_text = f"TO_CHAR({local})"
+
+            # Record types (T_<NAME>) — capture each field individually.
+            # Look up the RecordDef from the accumulated items so we
+            # know the field names and types.
+            if typ.startswith("T_") and not typ.endswith("_LIST"):
+                rec = self._find_record_for_type(typ)
+                if rec is not None:
+                    for f in rec.fields:
+                        from .emitter import lower_type
+                        field_typ = lower_type(f.type_ref).upper()
+                        field_local = f"{local}.{f.name.lower()}"
+                        to_text = self._scalar_to_text(field_local, field_typ)
+                        capture_lines.append(
+                            f"    dbms_output.put_line('{self._VAR_SENTINEL}' "
+                            f"|| chr(9) || '{name}.{f.name}' "
+                            f"|| chr(9) || NVL({to_text}, '{self._NULL_MARKER}'));"
+                        )
+                continue
+
+            # Skip non-serializable types we can't handle yet (lists,
+            # cursors, OBJECT TYPEs).
+            if typ.startswith("T_") or typ.startswith("SYS_REFCURSOR"):
+                continue
+
+            to_text = self._scalar_to_text(local, typ)
             capture_lines.append(
                 f"    dbms_output.put_line('{self._VAR_SENTINEL}' "
                 f"|| chr(9) || '{name}' "
                 f"|| chr(9) || NVL({to_text}, '{self._NULL_MARKER}'));"
             )
+        if not capture_lines:
+            return block
         inject = "\n".join(capture_lines) + "\n"
         # Find the END pell_anon_main; and insert before it.
         marker = "  END pell_anon_main;"
@@ -237,79 +262,152 @@ class Repl:
             return block  # can't find — emit without capture
         return block[:idx] + inject + block[idx:]
 
+    @staticmethod
+    def _scalar_to_text(local_expr: str, typ: str) -> str:
+        """Return the PL/SQL expression that serializes `local_expr`
+        (a PL/SQL local or field reference) to text, based on its type."""
+        if "JSON" in typ:
+            return f"JSON_SERIALIZE({local_expr})"
+        if "TIMESTAMP" in typ:
+            return f"TO_CHAR({local_expr}, 'YYYY-MM-DD HH24:MI:SS.FF9')"
+        if "DATE" in typ:
+            return f"TO_CHAR({local_expr}, 'YYYY-MM-DD HH24:MI:SS')"
+        if "RAW" in typ:
+            return f"RAWTOHEX({local_expr})"
+        return f"TO_CHAR({local_expr})"
+
+    def _find_record_for_type(self, pl_type: str) -> Optional[A.RecordDef]:
+        """Find the RecordDef whose lowered PL/SQL type name matches
+        `pl_type`. E.g. `T_EMPLOYEE` matches RecordDef(name='Employee').
+        """
+        from .emitter import _record_type_name
+        for item in self.items:
+            if isinstance(item, A.RecordDef):
+                if _record_type_name(item.name).upper() == pl_type:
+                    return item
+        return None
+
     def _parse_snapshot(self, line: str) -> None:
         """Parse one `__PELL_REPL_VAR__\\tname\\tvalue` line and store
-        the snapshot."""
-        parts = line.split("\t", 2)  # split into at most 3 — value may contain tabs
+        the snapshot. `name` may be a dotted record field like `alice.id`."""
+        parts = line.split("\t", 2)
         if len(parts) < 3:
             return
         name = parts[1]
         raw_value = parts[2]
         if raw_value == self._NULL_MARKER:
-            # Variable is NULL — remove from snapshots so it doesn't
-            # inject a stale value later.
             self.var_snapshots.pop(name, None)
         else:
-            typ = self.var_types.get(name, "VARCHAR2(4000)")
+            # For dotted names (record fields), look up the field type
+            # from the RecordDef. For scalars, use var_types.
+            if "." in name:
+                base, field = name.split(".", 1)
+                base_typ = self.var_types.get(base, "").upper()
+                rec = self._find_record_for_type(base_typ)
+                if rec is not None:
+                    from .emitter import lower_type
+                    fdef = next((f for f in rec.fields if f.name == field), None)
+                    typ = lower_type(fdef.type_ref) if fdef else "VARCHAR2(4000)"
+                else:
+                    typ = "VARCHAR2(4000)"
+            else:
+                typ = self.var_types.get(name, "VARCHAR2(4000)")
             self.var_snapshots[name] = (typ, raw_value)
 
-    def _snapshot_to_stmts(self) -> list[A.Stmt]:
-        """Build LetStmt nodes from the current snapshots. Each becomes
-        `let x: type = <literal>;` in the emitted block.
+    def _scalar_val_to_expr(self, typ: str, val: str) -> A.Expr:
+        """Build an AST expression node from a captured scalar value."""
+        loc = A.Loc("<repl-snapshot>", 0, 0)
+        t = typ.upper()
+        if "NUMBER" in t or "PLS_INTEGER" in t or "INTEGER" in t:
+            return A.NumberLit(loc=loc, value=val)
+        if t == "BOOLEAN":
+            return A.BoolLit(loc=loc, value=(val.upper() in ("TRUE", "1")))
+        if "JSON" in t:
+            return A.Call(
+                loc=loc,
+                callee=A.Ident(loc=loc, name="json::parse"),
+                args=[A.TextLit(loc=loc, value=val, is_raw=True)],
+            )
+        if "DATE" in t and "TIMESTAMP" not in t:
+            return A.SqlBlock(
+                loc=loc,
+                sql=f"select to_date('{val}', 'YYYY-MM-DD HH24:MI:SS') from dual",
+            )
+        if "TIMESTAMP" in t:
+            return A.SqlBlock(
+                loc=loc,
+                sql=f"select to_timestamp('{val}', 'YYYY-MM-DD HH24:MI:SS.FF9') from dual",
+            )
+        if "RAW" in t:
+            return A.SqlBlock(
+                loc=loc,
+                sql=f"select hextoraw('{val}') from dual",
+            )
+        return A.TextLit(loc=loc, value=val, is_raw=True)
 
-        The reconstruction is type-aware:
-          NUMBER     → NumberLit("42")
-          BOOLEAN    → BoolLit(true/false)
-          JSON       → json::parse("<serialized>")
-          DATE       → sql!{select to_date('...','YYYY-MM-DD HH24:MI:SS') from dual}.one()
-          TIMESTAMP  → sql!{select to_timestamp('...','YYYY-MM-DD HH24:MI:SS.FF9') from dual}.one()
-          RAW        → sql!{select hextoraw('...') from dual}.one()
-          text (default) → TextLit("<value>")
+    @staticmethod
+    def _scalar_type_annot(typ: str) -> A.TypeRef:
+        """Build a pell TypeRef for a PL/SQL type string."""
+        loc = A.Loc("<repl-snapshot>", 0, 0)
+        t = typ.upper()
+        if "NUMBER" in t or "PLS_INTEGER" in t:
+            return A.PrimType(loc=loc, name="number")
+        if t == "BOOLEAN":
+            return A.PrimType(loc=loc, name="bool")
+        if "JSON" in t:
+            return A.PrimType(loc=loc, name="json")
+        if "TIMESTAMP" in t:
+            return A.PrimType(loc=loc, name="timestamp")
+        if "DATE" in t:
+            return A.PrimType(loc=loc, name="date")
+        if "RAW" in t:
+            return A.PrimType(loc=loc, name="bytes")
+        if "CLOB" in t:
+            return A.PrimType(loc=loc, name="bigtext")
+        return A.PrimType(loc=loc, name="text")
+
+    def _snapshot_to_stmts(self) -> list[A.Stmt]:
+        """Build LetStmt nodes from the current snapshots.
+
+        Scalar snapshots (keys without dots) become typed literal lets.
+        Record-field snapshots (keys like `alice.id`, `alice.name`) are
+        grouped by base name and become a single StructLit let:
+            let alice: Employee = Employee { id: 1, name: "Alice", level: 5 };
         """
         loc = A.Loc("<repl-snapshot>", 0, 0)
         stmts: list[A.Stmt] = []
-        for name, (typ, val) in self.var_snapshots.items():
-            typ_upper = typ.upper()
-            if "NUMBER" in typ_upper or "PLS_INTEGER" in typ_upper:
-                expr: A.Expr = A.NumberLit(loc=loc, value=val)
-                type_annot: A.TypeRef = A.PrimType(loc=loc, name="number")
-            elif "BOOLEAN" in typ_upper:
-                expr = A.BoolLit(loc=loc, value=(val.upper() in ("TRUE", "1")))
-                type_annot = A.PrimType(loc=loc, name="bool")
-            elif "JSON" in typ_upper:
-                expr = A.Call(
-                    loc=loc,
-                    callee=A.Ident(loc=loc, name="json::parse"),
-                    args=[A.TextLit(loc=loc, value=val, is_raw=True)],
-                )
-                type_annot = A.PrimType(loc=loc, name="json")
-            elif "DATE" in typ_upper and "TIMESTAMP" not in typ_upper:
-                # TO_DATE with the same fixed format we used for capture
-                expr = A.SqlBlock(
-                    loc=loc,
-                    sql=f"select to_date('{val}', 'YYYY-MM-DD HH24:MI:SS') from dual",
-                )
-                type_annot = A.PrimType(loc=loc, name="date")
-            elif "TIMESTAMP" in typ_upper:
-                expr = A.SqlBlock(
-                    loc=loc,
-                    sql=f"select to_timestamp('{val}', 'YYYY-MM-DD HH24:MI:SS.FF9') from dual",
-                )
-                type_annot = A.PrimType(loc=loc, name="timestamp")
-            elif "RAW" in typ_upper:
-                expr = A.SqlBlock(
-                    loc=loc,
-                    sql=f"select hextoraw('{val}') from dual",
-                )
-                type_annot = A.PrimType(loc=loc, name="bytes")
+        # Partition snapshots into scalars and record-field groups.
+        scalars: dict[str, tuple[str, str]] = {}
+        record_fields: dict[str, dict[str, tuple[str, str]]] = {}  # base → {field → (typ, val)}
+        for key, (typ, val) in self.var_snapshots.items():
+            if "." in key:
+                base, field = key.split(".", 1)
+                record_fields.setdefault(base, {})[field] = (typ, val)
             else:
-                # Default: text / varchar2 / clob
-                expr = A.TextLit(loc=loc, value=val, is_raw=True)
-                if "CLOB" in typ_upper:
-                    type_annot = A.PrimType(loc=loc, name="bigtext")
-                else:
-                    type_annot = A.PrimType(loc=loc, name="text")
+                scalars[key] = (typ, val)
+
+        # Scalars — each becomes `let x: type = <literal>;`
+        for name, (typ, val) in scalars.items():
+            expr = self._scalar_val_to_expr(typ, val)
+            type_annot = self._scalar_type_annot(typ)
             stmts.append(A.LetStmt(loc=loc, name=name, type_annot=type_annot, value=expr))
+
+        # Records — each group becomes `let alice: Employee = Employee { ... };`
+        for base, fields in record_fields.items():
+            rec_name = self._var_record_names.get(base)
+            if rec_name is None:
+                continue  # can't reconstruct without the pell record name
+            field_inits: list[A.FieldInit] = []
+            for fname, (ftyp, fval) in fields.items():
+                field_inits.append(A.FieldInit(
+                    loc=loc,
+                    name=fname,
+                    value=self._scalar_val_to_expr(ftyp, fval),
+                ))
+            expr = A.StructLit(loc=loc, type_name=rec_name, fields=field_inits)
+            type_annot = A.NamedType(loc=loc, name=rec_name)
+            stmts.append(A.LetStmt(loc=loc, name=base, type_annot=type_annot, value=expr))
+
         return stmts
 
     def _absorb(self, item: A.Item) -> None:
@@ -407,6 +505,7 @@ class Repl:
             self.items.clear()
             self.var_snapshots.clear()
             self.var_types.clear()
+            self._var_record_names.clear()
             print("  (session cleared — defs + variables)")
             return None
         if cmd == "\\vars":
@@ -475,6 +574,10 @@ class Repl:
         except OSError as e:
             print(f"  ! {e}", file=sys.stderr)
             return
+        # Strip the `module <name>;` header if present — parse_cell
+        # doesn't accept it (cells are module-less snippets).
+        import re as _re
+        src = _re.sub(r'(?m)^\s*module\s+[\w.]+\s*;\s*\n?', '', src, count=1)
         try:
             new_items, stmts = parse_cell(src, path)
         except (LexError, ParseError) as e:
