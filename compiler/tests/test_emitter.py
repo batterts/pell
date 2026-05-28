@@ -2021,3 +2021,19 @@ def test_jq_array_iteration_still_works():
     """)
     assert "JSON_TABLE(p_j, '$.users[*]'" in sql
     assert "JSON_VALUE" not in sql or "PATH" in sql
+
+
+def test_undefined_record_type_raises_clear_error():
+    """StructLit referencing an unknown type → clear EmitError, not
+    silent fall-through to a TODO comment that crashes Oracle."""
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError) as exc_info:
+        compile_to_sql("""
+            module m;
+            pub fn f() {
+                let alice: Employee = Employee { id: 1, name: "Alice", level: 5 };
+            }
+        """)
+    msg = str(exc_info.value)
+    assert "unknown type `Employee`" in msg
+    assert "record Employee" in msg  # tells them how to fix it

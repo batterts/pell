@@ -3433,10 +3433,31 @@ class Emitter:
             # A StructLit on a known `type` lowers to its OBJECT constructor.
             if e.type_name in self._type_names:
                 return self._emit_obj_constructor(e)
-            return "/* TODO: struct lit in expr position */"
+            # Record-typed StructLits are handled at assign-time
+            # (_emit_assign_to does per-field copy). If we're here, the
+            # type is neither a known record nor a known OBJECT type —
+            # the user referenced an undefined type. Give them a clear
+            # error instead of emitting an unparseable comment that
+            # bubbles up to Oracle as PLS-00103.
+            known_recs = ", ".join(r.name for r in self._records) or "(none)"
+            known_types = ", ".join(self._type_names) or "(none)"
+            raise EmitError(
+                f"unknown type `{e.type_name}` in struct literal "
+                f"`{e.type_name} {{ ... }}`. "
+                f"Define it with `record {e.type_name} {{ ... }}` (for a "
+                f"record) or `type {e.type_name} {{ ... }}` (for an OBJECT "
+                f"type). Known records: {known_recs}. Known types: {known_types}.",
+                e.loc,
+            )
         if isinstance(e, A.SqlBlock):
-            return "/* TODO: bare sql block in expr position */"
-        return f"/* TODO: {type(e).__name__} */"
+            # TODO #1: bare sql block in expression position. The
+            # proper fix is to synthesize a temp local, emit SELECT
+            # INTO temp before the containing statement, and substitute
+            # temp here. For now: emit a clear comment that at least
+            # tells the user what went wrong (PL/SQL will still fail
+            # but with line/col pointing here).
+            return "/* TODO: bare sql block in expr position — see github issue */"
+        return f"/* TODO: {type(e).__name__} — emitter unhandled */"
 
     def _emit_binop(self, e: A.BinOp) -> str:
         op_map = {
