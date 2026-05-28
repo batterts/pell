@@ -3699,7 +3699,33 @@ class Emitter:
         "dbms_output::put_line",
     })
 
+    # Compile-time aliases for `dbms_output.put_line`. Less typing in
+    # the REPL and casual code; the emitter rewrites the call to
+    # `dbms_output.put_line(<auto-stringified arg>)`. No PL/SQL
+    # package is required at runtime.
+    _PRINT_ALIASES: dict[str, str] = {
+        "p":            "dbms_output.put_line",
+        "print":        "dbms_output.put_line",
+        "println":      "dbms_output.put_line",
+        "std::p":       "dbms_output.put_line",
+        "std::print":   "dbms_output.put_line",
+        "std::println": "dbms_output.put_line",
+    }
+
     def _emit_call_expr(self, e: A.Call) -> str:
+        # Print aliases — rewrite to dbms_output.put_line, auto-stringify
+        # the single argument so any type prints with the same format as
+        # the auto-stringify table (TO_CHAR with explicit masks for
+        # dates/timestamps, JSON_SERIALIZE for json, etc.).
+        if (isinstance(e.callee, A.Ident)
+                and e.callee.name in self._PRINT_ALIASES
+                and len(e.args) == 1):
+            arg = e.args[0]
+            code = self._emit_expr(arg)
+            inferred = self._infer_expr_type(arg)
+            code = self._auto_stringify(code, inferred)
+            return f"{self._PRINT_ALIASES[e.callee.name]}({code})"
+
         # Auto-stringify args for known text-only call targets.
         if (isinstance(e.callee, A.Ident)
                 and e.callee.name in self._TEXT_CONSUMING_CALLS

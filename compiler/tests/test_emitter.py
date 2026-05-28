@@ -2052,3 +2052,40 @@ def test_undefined_record_type_suggestion_handles_bool_and_json():
         """)
     msg = str(exc_info.value)
     assert "record Config { enabled: bool, count: number }" in msg
+
+
+# ---------------------------------------------------------------------------
+# Print aliases — p() / print() / println() / std::print() etc.
+# ---------------------------------------------------------------------------
+
+
+def test_p_alias_lowers_to_put_line():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(n: number) { p(n); }
+    """)
+    assert "dbms_output.put_line(TO_CHAR(p_n))" in sql
+
+
+def test_print_alias_with_date():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(d: date) { print(d); }
+    """)
+    assert "dbms_output.put_line(TO_CHAR(p_d, 'YYYY-MM-DD HH24:MI:SS'))" in sql
+
+
+def test_println_alias_with_json():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(j: json) { println(j); }
+    """)
+    assert "dbms_output.put_line(JSON_SERIALIZE(p_j))" in sql
+
+
+def test_std_print_alias():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f() { std::print("hello"); }
+    """)
+    assert "dbms_output.put_line('hello')" in sql
