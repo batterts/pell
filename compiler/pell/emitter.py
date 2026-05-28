@@ -361,6 +361,12 @@ class Emitter:
         # private helper `pell_is_panic(p_code NUMBER) RETURN BOOLEAN` so the
         # retry handler can decide whether to re-raise without retry.
         self._needs_panic_helper: bool = False
+        # Element type names (e.g. "text", "number") for which auto-
+        # stringify needs to emit a list-to-text helper. Each entry
+        # produces a `pell_list_to_text_<elem>(xs) RETURN VARCHAR2`
+        # function in the package body — joins elements with ", "
+        # and wraps in `[...]`. Populated by `_auto_stringify`.
+        self._needs_list_to_text: set[str] = set()
         # convenience wrapper that threads self.target through type lowering
         self._lt = lambda t, *, param=False, sql_context=False: lower_type(
             t, param=param, target=self.target, sql_context=sql_context
@@ -455,6 +461,9 @@ class Emitter:
         if self._needs_panic_helper:
             out.append("")
             out.append(self._panic_helper_source())
+        for elem in sorted(self._needs_list_to_text):
+            out.append("")
+            out.append(self._list_to_text_helper_source(elem))
         for chunk in fn_bodies:
             out.append("")
             out.append(chunk)
@@ -756,6 +765,9 @@ class Emitter:
         if self._needs_panic_helper:
             out.append("")
             out.append(self._panic_helper_source())
+        for elem in sorted(self._needs_list_to_text):
+            out.append("")
+            out.append(self._list_to_text_helper_source(elem))
         for adapter in sorted(self._needs_re_adapter):
             out.append("")
             out.append(self._re_adapter_source(adapter))
@@ -815,6 +827,50 @@ class Emitter:
             f"    END LOOP;\n"
             f"    RETURN out;\n"
             f"  END pell_re_{op};"
+        )
+
+    def _list_to_text_helper_source(self, elem: str) -> str:
+        """A package-private helper that joins a list<T> into a single
+        VARCHAR2 like `[a, b, c]`. One overload per element type.
+
+        Elements are individually run through the matching to-text
+        conversion so the formatting matches what `p()` / `print()`
+        do for scalars (TO_CHAR with explicit format mask for dates,
+        JSON_SERIALIZE for json, etc.).
+        """
+        list_type = f"t_{elem}_list"
+        # Per-element conversion to text. Inlined into the loop body
+        # using `p_xs(l_i)` as the element reference.
+        elem_table = {
+            "text":      ("p_xs(l_i)", False),
+            "number":    ("TO_CHAR(p_xs(l_i))", False),
+            "date":      ("TO_CHAR(p_xs(l_i), 'YYYY-MM-DD HH24:MI:SS')", False),
+            "timestamp": ("TO_CHAR(p_xs(l_i), 'YYYY-MM-DD HH24:MI:SS.FF')", False),
+            "bool":      ("CASE WHEN p_xs(l_i) THEN 'true' ELSE 'false' END", True),
+            "json":      ("JSON_SERIALIZE(p_xs(l_i))", False),
+            "bytes":     ("RAWTOHEX(p_xs(l_i))", False),
+        }
+        to_text, is_bool = elem_table.get(elem, ("TO_CHAR(p_xs(l_i))", False))
+        # BOOLEAN can't be wrapped in NVL — NVL needs the same type
+        # for both args, and there's no NULL→text path. For booleans,
+        # we use COALESCE with a string fallback. Actually the CASE
+        # already returns text, so just leave it bare.
+        wrapped = to_text if is_bool else f"NVL({to_text}, 'NULL')"
+        return (
+            f"  FUNCTION pell_list_to_text_{elem}(p_xs IN {list_type}) RETURN VARCHAR2 IS\n"
+            f"    l_buf VARCHAR2(32767);\n"
+            f"    l_i PLS_INTEGER;\n"
+            f"  BEGIN\n"
+            f"    IF p_xs.COUNT = 0 THEN RETURN '[]'; END IF;\n"
+            f"    l_buf := '[';\n"
+            f"    l_i := p_xs.FIRST;\n"
+            f"    WHILE l_i IS NOT NULL LOOP\n"
+            f"      IF l_i != p_xs.FIRST THEN l_buf := l_buf || ', '; END IF;\n"
+            f"      l_buf := l_buf || {wrapped};\n"
+            f"      l_i := p_xs.NEXT(l_i);\n"
+            f"    END LOOP;\n"
+            f"    RETURN l_buf || ']';\n"
+            f"  END pell_list_to_text_{elem};"
         )
 
     def _split_helper_source(self) -> str:
@@ -1659,6 +1715,13 @@ class Emitter:
         if pl_type is None:
             return expr_code
         t = pl_type.upper()
+        # List types (T_<elem>_LIST) — check FIRST, before scalar names,
+        # because patterns like `T_NUMBER_LIST` contain "NUMBER" and
+        # would otherwise be misclassified as scalar NUMBER.
+        if t.startswith("T_") and t.endswith("_LIST"):
+            elem = t[2:-5].lower()  # T_TEXT_LIST → text, T_NUMBER_LIST → number
+            self._needs_list_to_text.add(elem)
+            return f"pell_list_to_text_{elem}({expr_code})"
         if "VARCHAR" in t or "CLOB" in t or "CHAR" in t:
             return expr_code
         if "NUMBER" in t or "PLS_INTEGER" in t or "INTEGER" in t:

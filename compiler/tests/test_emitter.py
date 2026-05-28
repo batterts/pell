@@ -2089,3 +2089,47 @@ def test_std_print_alias():
         pub fn f() { std::print("hello"); }
     """)
     assert "dbms_output.put_line('hello')" in sql
+
+
+# ---------------------------------------------------------------------------
+# Auto-stringify for list<T> in text-expecting positions
+# ---------------------------------------------------------------------------
+
+
+def test_list_text_in_interpolation_emits_helper():
+    """`"{xs}"` where xs is list<text> emits a pell_list_to_text_text helper
+    and calls it inline. No raw TO_CHAR on the collection."""
+    sql = compile_to_sql("""
+        module m;
+        pub fn f() -> text {
+            let xs: list<text> = sql!{ select dummy from dual }.collect();
+            return "got {xs}";
+        }
+    """)
+    assert "FUNCTION pell_list_to_text_text" in sql
+    assert "pell_list_to_text_text(l_xs)" in sql
+    assert "TO_CHAR(l_xs)" not in sql  # the broken old behavior
+
+
+def test_list_number_uses_to_char_per_element():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f() -> text {
+            let ns: list<number> = sql!{ select 1 as n from dual }.collect();
+            return "got {ns}";
+        }
+    """)
+    assert "FUNCTION pell_list_to_text_number" in sql
+    assert "TO_CHAR(p_xs(l_i))" in sql
+    assert "pell_list_to_text_number(l_ns)" in sql
+
+
+def test_list_in_print_alias_works():
+    sql = compile_to_sql("""
+        module m;
+        pub fn f() {
+            let xs: list<text> = sql!{ select dummy from dual }.collect();
+            p(xs);
+        }
+    """)
+    assert "dbms_output.put_line(pell_list_to_text_text(l_xs))" in sql
