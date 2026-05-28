@@ -1,8 +1,8 @@
 <idea-plugin>
-    <id>dev.pell.intellij</id>
+    <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.3.0</version>
+    <version>0.3.1</version>
 
     <description><![CDATA[
         IntelliJ support for the <b>pell</b> language — a statically-typed
@@ -64,6 +64,15 @@
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.3.1</h3>
+        <ul>
+          <li>Plugin ID renamed from <code>dev.pell.intellij</code> to
+              <code>dev.pell</code>. JetBrains Marketplace rejects IDs
+              containing the word "intellij" — required for the first
+              public submission. If you installed 0.3.0 manually,
+              uninstall it before installing 0.3.1 (different ID
+              means the IDE treats them as separate plugins).</li>
+        </ul>
         <h3>0.3.0</h3>
         <ul>
           <li><b>Side-by-side pell ↔ PL/SQL split editor.</b>
