@@ -191,6 +191,15 @@ def lower_type(
     return ""
 
 
+# Sentinel prefix used by _infer_expr_type to mark list types, so
+# _auto_stringify can route them to the list-to-text helper without
+# matching on `T_*_LIST` substrings (which could collide with a
+# user-defined record named e.g. `User_List`). The full sentinel value
+# is "__PELL_LIST__<elem>" where <elem> is the pell-surface element
+# type name ("text", "number", etc.).
+_LIST_SENTINEL = "__PELL_LIST__"
+
+
 def _render_type(t: A.TypeRef) -> str:
     if isinstance(t, A.PrimType):
         return t.name
@@ -367,6 +376,13 @@ class Emitter:
         # function in the package body — joins elements with ", "
         # and wraps in `[...]`. Populated by `_auto_stringify`.
         self._needs_list_to_text: set[str] = set()
+        # Structural list-type tracking: maps local/param name → the
+        # element type's pell-surface name ("text", "number", etc.).
+        # Auto-stringify checks this dict BEFORE string-pattern matching
+        # so a user-defined record named e.g. `User_List` (which would
+        # otherwise lower to T_USER_LIST and accidentally match the
+        # T_*_LIST suffix) doesn't get confused with a `list<user>`.
+        self._list_locals: dict[str, str] = {}
         # convenience wrapper that threads self.target through type lowering
         self._lt = lambda t, *, param=False, sql_context=False: lower_type(
             t, param=param, target=self.target, sql_context=sql_context
@@ -1259,6 +1275,14 @@ class Emitter:
             elem = self._cursor_element_type(p.type_ref)
             if elem is not None:
                 self._cursor_params[p.name] = elem
+            # Track list-typed params structurally — record the element's
+            # pell-surface name so auto-stringify can find a matching
+            # `pell_list_to_text_<elem>` helper without string parsing.
+            if (isinstance(p.type_ref, A.GenericType)
+                    and p.type_ref.base == "list"
+                    and p.type_ref.params
+                    and isinstance(p.type_ref.params[0], A.PrimType)):
+                self._list_locals[p.name] = p.type_ref.params[0].name
 
         self._check_annotation_conflicts(fn)
 
@@ -1505,7 +1529,10 @@ class Emitter:
             self._list_types_emitted.add(list_type)
         self._decl(f"{nm} {list_type};")
         self._local_types[s.name] = list_type
-        self._list_locals[s.name] = elem_sql
+        # Store the pell-surface element name (e.g. "text", "number")
+        # so auto-stringify can pick the right helper without inferring
+        # from the PL/SQL spelling.
+        self._list_locals[s.name] = _render_type(elem_t)
         if s.value is None:
             return []
         prev_jq = self._pending_jq_elem_type
@@ -1540,7 +1567,10 @@ class Emitter:
             self._list_types_emitted.add(list_type)
         self._decl(f"{nm} {list_type};")
         self._local_types[s.name] = list_type
-        self._list_locals[s.name] = elem_sql
+        # Store the pell-surface element name (e.g. "text", "number")
+        # so auto-stringify can pick the right helper without inferring
+        # from the PL/SQL spelling.
+        self._list_locals[s.name] = _render_type(elem_t)
         lines: list[str] = []
         for i, el in enumerate(s.value.elements, start=1):
             lines.append(f"{indent}{nm}({i}) := {self._emit_expr(el)};")
@@ -1676,6 +1706,13 @@ class Emitter:
         if isinstance(e, A.StructLit):
             return _record_type_name(e.type_name)
         if isinstance(e, A.Ident):
+            # Structural list check first — if this Ident is known to be
+            # a list<T>, return a sentinel that auto-stringify can
+            # disambiguate without string parsing. (Otherwise a user-
+            # defined record like `User_List` would get confused with a
+            # list type via the T_*_LIST suffix.)
+            if e.name in self._list_locals:
+                return f"{_LIST_SENTINEL}{self._list_locals[e.name]}"
             # Check fn parameters first
             if self._current_fn is not None:
                 for p in self._current_fn.params:
@@ -1714,14 +1751,15 @@ class Emitter:
         """
         if pl_type is None:
             return expr_code
-        t = pl_type.upper()
-        # List types (T_<elem>_LIST) — check FIRST, before scalar names,
-        # because patterns like `T_NUMBER_LIST` contain "NUMBER" and
-        # would otherwise be misclassified as scalar NUMBER.
-        if t.startswith("T_") and t.endswith("_LIST"):
-            elem = t[2:-5].lower()  # T_TEXT_LIST → text, T_NUMBER_LIST → number
+        # Structural list-type tag from _infer_expr_type. Format:
+        # "__PELL_LIST__<elem>" where <elem> is the pell-surface
+        # element name. Checked FIRST so it can't be confused with
+        # any PL/SQL type spelling.
+        if pl_type.startswith(_LIST_SENTINEL):
+            elem = pl_type[len(_LIST_SENTINEL):]
             self._needs_list_to_text.add(elem)
             return f"pell_list_to_text_{elem}({expr_code})"
+        t = pl_type.upper()
         if "VARCHAR" in t or "CLOB" in t or "CHAR" in t:
             return expr_code
         if "NUMBER" in t or "PLS_INTEGER" in t or "INTEGER" in t:

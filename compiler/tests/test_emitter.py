@@ -2133,3 +2133,22 @@ def test_list_in_print_alias_works():
         }
     """)
     assert "dbms_output.put_line(pell_list_to_text_text(l_xs))" in sql
+
+
+def test_record_named_like_list_does_not_call_list_helper():
+    """A user-defined record whose lowered PL/SQL name ends in `_list`
+    (e.g. `User_List` → `t_user_list`) must NOT be misidentified as a
+    list<T>. The structural sentinel from _infer_expr_type protects
+    against this."""
+    sql = compile_to_sql("""
+        module m;
+        pub record User_List { id: number, name: text }
+        pub fn f() -> text {
+            let u: User_List = User_List { id: 1, name: "shaun" };
+            return "user: {u.name}";
+        }
+    """)
+    # Record renders correctly:
+    assert "t_user_list IS RECORD" in sql
+    # NO list helper got triggered:
+    assert "pell_list_to_text" not in sql
