@@ -183,6 +183,58 @@ class Repl:
     _VAR_SENTINEL = "__PELL_REPL_VAR__"
     _NULL_MARKER  = "__PELL_NULL__"
 
+    def _infer_from_registry(self, value: "Optional[A.Expr]") -> Optional[str]:
+        """If `value` is a known cross-package call, return its
+        PL/SQL return type. Used by capture to know when a var is
+        a collection (skip) vs. scalar (serialize)."""
+        if value is None:
+            return None
+        if not isinstance(value, A.Call):
+            return None
+        if not (isinstance(value.callee, A.Ident) and "::" in value.callee.name):
+            return None
+        ret = self._project_signatures.get(value.callee.name)
+        if ret is None:
+            return None
+        # For list returns, return the foreign type spelling. The
+        # capture code checks for "T_" prefix to skip — but foreign
+        # types like "hello.t_text_list" don't start with T_. Synthesize
+        # the canonical form for the capture skip check.
+        if (isinstance(ret, A.GenericType) and ret.base == "list"
+                and len(ret.params) == 1):
+            from .emitter import _render_type
+            elem = _render_type(ret.params[0])
+            return f"T_{elem.upper()}_LIST"
+        from .emitter import lower_type
+        return lower_type(ret)
+
+    _ORA_LINE_RE = __import__("re").compile(r"line (\d+), column (\d+)")
+
+    def _print_runtime_error(self, err_msg: str, block: str) -> None:
+        """Print a runtime error with the offending line from the
+        emitted block, annotated with a caret pointing at the column.
+
+        Oracle's `line N, column M` references the position inside the
+        anonymous block we sent — but the user can't see that block,
+        so the line/col is meaningless without context. This pulls the
+        line out and prints it inline."""
+        print(f"  ! runtime error: {err_msg}", file=sys.stderr)
+        # Parse the first line/col reference from the error.
+        m = self._ORA_LINE_RE.search(err_msg)
+        if m is None:
+            return
+        line_no = int(m.group(1))
+        col_no = int(m.group(2))
+        lines = block.splitlines()
+        if line_no <= 0 or line_no > len(lines):
+            return
+        # Show a 1-line window with a caret. Could expand to a 3-line
+        # window if we ever want more context.
+        offending = lines[line_no - 1]
+        print(f"\n  in the emitted block:", file=sys.stderr)
+        print(f"  {line_no:4} | {offending}", file=sys.stderr)
+        print(f"  {'':4} | {' ' * max(0, col_no - 1)}^", file=sys.stderr)
+
     def _run_cell(self, source: str) -> None:
         try:
             new_items, stmts = parse_cell(source, f"<cell {self.cell_number}>")
@@ -238,13 +290,21 @@ class Repl:
                 self.var_types[s.name] = lower_type(s.type_annot)
                 if isinstance(s.type_annot, A.NamedType):
                     self._var_record_names[s.name] = s.type_annot.name
+            else:
+                # No annotation — infer from the registry when the RHS
+                # is a known cross-package call, so capture knows
+                # whether the var is a scalar (serializable) or a
+                # collection (skip).
+                inferred = self._infer_from_registry(s.value)
+                if inferred is not None:
+                    self.var_types[s.name] = inferred
 
         block = self._inject_capture_lines(block, all_var_names)
 
         try:
             output = self.conn.run_block(block)
         except Exception as e:
-            print(f"  ! runtime error: {e}", file=sys.stderr)
+            self._print_runtime_error(str(e), block)
             return
 
         # Partition output: sentinel lines → snapshots, rest → user output
