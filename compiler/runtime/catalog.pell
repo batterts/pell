@@ -1,0 +1,307 @@
+module catalog;
+
+// ---------------------------------------------------------------------------
+// catalog — Oracle data dictionary, made fluent.
+//
+// Naming convention:
+//   list_*       returns list<text>   — quick listings of object names
+//   list_*_info  returns list<record> — same but with status / DDL time
+//   *_of(name)   returns list<record> — detail about a named object
+//   *_for(name)  returns list<record> — same shape, when "about" reads better
+//
+// We avoid bare plurals like `tables`, `views`, `columns`, `types` because
+// PL/SQL reserves those identifiers.
+//
+// Conventions:
+//   - Name args are case-insensitive (UPPER()'d in queries).
+//   - Always queries USER_* views (current schema only).
+//
+// Quick listings:
+//   list_tables()          list_views()        list_packages()
+//   list_functions()       list_procedures()   list_sequences()
+//   list_types()           list_triggers()
+//
+// State:
+//   list_invalid()         list_invalid_info() — INVALID objects
+//   list_objects_info()    — every object with status + DDL time
+//
+// Detail about a table:
+//   columns_of("t")        constraints_of("t")
+//   indexes_of("t")        foreign_keys_of("t")
+//
+// Source code (one row per line):
+//   source_of("name")      spec_of("pkg")       body_of("pkg")
+//
+// Errors:
+//   errors_for("pkg")      — current compile errors
+//
+// Dependencies:
+//   depends_on("x")        — what x references
+//   dependents_of("x")     — what references x
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Records
+// ---------------------------------------------------------------------------
+
+pub record ObjectInfo {
+    name:          text,
+    object_type:   text,
+    status:        text,
+    last_ddl_time: date,
+}
+
+pub record ColumnInfo {
+    name:        text,
+    data_type:   text,
+    nullable:    text,
+    column_id:   number,
+    data_length: number,
+}
+
+pub record ConstraintInfo {
+    name:             text,
+    constraint_type:  text,
+    column_name:      text,
+    search_condition: text,
+    r_constraint:     text,
+}
+
+pub record IndexInfo {
+    name:        text,
+    uniqueness:  text,
+    column_name: text,
+}
+
+pub record ForeignKeyInfo {
+    name:          text,
+    column_name:   text,
+    r_table:       text,
+    r_column_name: text,
+    delete_rule:   text,
+}
+
+pub record ErrorInfo {
+    name:     text,
+    line:     number,
+    position: number,
+    message:  text,
+}
+
+// ---------------------------------------------------------------------------
+// Quick listings — list<text>
+// ---------------------------------------------------------------------------
+
+pub fn list_tables() -> list<text> {
+    return sql! {
+        select table_name from user_tables order by 1
+    }.collect();
+}
+
+pub fn list_views() -> list<text> {
+    return sql! {
+        select view_name from user_views order by 1
+    }.collect();
+}
+
+pub fn list_packages() -> list<text> {
+    return sql! {
+        select distinct object_name from user_objects
+         where object_type = 'PACKAGE'
+         order by 1
+    }.collect();
+}
+
+pub fn list_functions() -> list<text> {
+    return sql! {
+        select object_name from user_objects
+         where object_type = 'FUNCTION'
+         order by 1
+    }.collect();
+}
+
+pub fn list_procedures() -> list<text> {
+    return sql! {
+        select object_name from user_objects
+         where object_type = 'PROCEDURE'
+         order by 1
+    }.collect();
+}
+
+pub fn list_sequences() -> list<text> {
+    return sql! {
+        select sequence_name from user_sequences order by 1
+    }.collect();
+}
+
+pub fn list_types() -> list<text> {
+    return sql! {
+        select type_name from user_types order by 1
+    }.collect();
+}
+
+pub fn list_triggers() -> list<text> {
+    return sql! {
+        select trigger_name from user_triggers order by 1
+    }.collect();
+}
+
+pub fn list_invalid() -> list<text> {
+    return sql! {
+        select object_name from user_objects
+         where status = 'INVALID'
+         order by object_type, object_name
+    }.collect();
+}
+
+// ---------------------------------------------------------------------------
+// Detail listings — list<record>
+// ---------------------------------------------------------------------------
+
+pub fn list_objects_info() -> list<ObjectInfo> {
+    return sql! {
+        select object_name as name,
+               object_type,
+               status,
+               last_ddl_time
+          from user_objects
+         order by object_type, object_name
+    }.collect();
+}
+
+pub fn list_invalid_info() -> list<ObjectInfo> {
+    return sql! {
+        select object_name as name,
+               object_type,
+               status,
+               last_ddl_time
+          from user_objects
+         where status = 'INVALID'
+         order by object_type, object_name
+    }.collect();
+}
+
+pub fn columns_of(table: text) -> list<ColumnInfo> {
+    return sql! {
+        select column_name as name,
+               data_type,
+               nullable,
+               column_id,
+               data_length
+          from user_tab_columns
+         where table_name = upper(:table)
+         order by column_id
+    }.collect();
+}
+
+pub fn constraints_of(table: text) -> list<ConstraintInfo> {
+    return sql! {
+        select c.constraint_name as name,
+               c.constraint_type,
+               cc.column_name,
+               c.search_condition,
+               c.r_constraint_name as r_constraint
+          from user_constraints c
+          left join user_cons_columns cc
+            on cc.constraint_name = c.constraint_name
+         where c.table_name = upper(:table)
+         order by c.constraint_name, cc.position
+    }.collect();
+}
+
+pub fn indexes_of(table: text) -> list<IndexInfo> {
+    return sql! {
+        select i.index_name as name,
+               i.uniqueness,
+               ic.column_name
+          from user_indexes i
+          join user_ind_columns ic
+            on ic.index_name = i.index_name
+         where i.table_name = upper(:table)
+         order by i.index_name, ic.column_position
+    }.collect();
+}
+
+pub fn foreign_keys_of(table: text) -> list<ForeignKeyInfo> {
+    return sql! {
+        select c.constraint_name as name,
+               cc.column_name,
+               rc.table_name as r_table,
+               rcc.column_name as r_column_name,
+               c.delete_rule
+          from user_constraints c
+          join user_cons_columns cc
+            on cc.constraint_name = c.constraint_name
+          join user_constraints rc
+            on rc.constraint_name = c.r_constraint_name
+          join user_cons_columns rcc
+            on rcc.constraint_name = rc.constraint_name
+           and rcc.position = cc.position
+         where c.constraint_type = 'R'
+           and c.table_name = upper(:table)
+         order by c.constraint_name, cc.position
+    }.collect();
+}
+
+pub fn errors_for(name: text) -> list<ErrorInfo> {
+    return sql! {
+        select name,
+               line,
+               position,
+               text as message
+          from user_errors
+         where name = upper(:name)
+         order by sequence
+    }.collect();
+}
+
+// ---------------------------------------------------------------------------
+// Source — list<text>, one row per line
+// ---------------------------------------------------------------------------
+
+pub fn source_of(name: text) -> list<text> {
+    return sql! {
+        select text from user_source
+         where name = upper(:name)
+         order by type, line
+    }.collect();
+}
+
+pub fn spec_of(name: text) -> list<text> {
+    return sql! {
+        select text from user_source
+         where name = upper(:name) and type = 'PACKAGE'
+         order by line
+    }.collect();
+}
+
+pub fn body_of(name: text) -> list<text> {
+    return sql! {
+        select text from user_source
+         where name = upper(:name) and type = 'PACKAGE BODY'
+         order by line
+    }.collect();
+}
+
+// ---------------------------------------------------------------------------
+// Dependencies — `owner.name` strings
+// ---------------------------------------------------------------------------
+
+pub fn depends_on(name: text) -> list<text> {
+    return sql! {
+        select referenced_owner || '.' || referenced_name
+          from user_dependencies
+         where name = upper(:name)
+         order by 1
+    }.collect();
+}
+
+pub fn dependents_of(name: text) -> list<text> {
+    return sql! {
+        select owner || '.' || name
+          from all_dependencies
+         where referenced_name = upper(:name)
+           and referenced_owner = user
+         order by 1
+    }.collect();
+}

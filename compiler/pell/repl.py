@@ -55,36 +55,47 @@ def scan_project_signatures(root: Optional[Path] = None) -> dict[str, A.TypeRef]
     """Walk `root` (default: cwd) for *.pell files and build a
     `<pkg>::<fn>` → return-type map of pub fn signatures.
 
+    Also includes the pell repo's runtime/ dir (where stdlib modules
+    like `catalog`, `pell_re` live) so callers get type inference for
+    deployed stdlib calls without needing the source in their project.
+
     For dotted modules like `pell_test.hello`, registers both the
     fully-qualified form (`pell_test::hello::fn`) AND the short form
     (`hello::fn`) — the short form lets callers connected to that
     schema use the natural un-prefixed call.
 
-    Shared by the REPL and `pell exec` so both can do cross-package
-    type inference. Best-effort: parse errors on individual files
-    don't stop the scan.
+    Best-effort: parse errors on individual files don't stop the scan.
     """
     sigs: dict[str, A.TypeRef] = {}
-    base = root or Path.cwd()
-    if not base.is_dir():
-        return sigs
-    for path in base.rglob("*.pell"):
-        if any(p in ("built", "out", ".git", "node_modules", "expected")
-               for p in path.parts):
-            continue
-        try:
-            src = path.read_text(encoding="utf-8")
-            from .parser import parse
-            mod = parse(src, str(path))
-        except Exception:
-            continue
-        fq_pkg = mod.name.replace(".", "::")
-        short_pkg = mod.name.split(".")[-1] if "." in mod.name else mod.name
-        for item in mod.items:
-            if isinstance(item, A.FnDef) and item.is_pub and item.return_type is not None:
-                sigs[f"{fq_pkg}::{item.name}"] = item.return_type
-                if short_pkg != fq_pkg:
-                    sigs[f"{short_pkg}::{item.name}"] = item.return_type
+    seen_dirs: set[Path] = set()
+
+    def _scan(base: Path) -> None:
+        if not base.is_dir() or base.resolve() in seen_dirs:
+            return
+        seen_dirs.add(base.resolve())
+        for path in base.rglob("*.pell"):
+            if any(p in ("built", "out", ".git", "node_modules", "expected")
+                   for p in path.parts):
+                continue
+            try:
+                src = path.read_text(encoding="utf-8")
+                from .parser import parse
+                mod = parse(src, str(path))
+            except Exception:
+                continue
+            fq_pkg = mod.name.replace(".", "::")
+            short_pkg = mod.name.split(".")[-1] if "." in mod.name else mod.name
+            for item in mod.items:
+                if isinstance(item, A.FnDef) and item.is_pub and item.return_type is not None:
+                    sigs[f"{fq_pkg}::{item.name}"] = item.return_type
+                    if short_pkg != fq_pkg:
+                        sigs[f"{short_pkg}::{item.name}"] = item.return_type
+
+    _scan(root or Path.cwd())
+    # The pell repo's runtime/ dir, sibling to this package. Walks
+    # `<repo>/compiler/pell/repl.py` → `<repo>/compiler/runtime/`.
+    runtime = Path(__file__).resolve().parent.parent / "runtime"
+    _scan(runtime)
     return sigs
 
 

@@ -3169,6 +3169,28 @@ class Emitter:
                 temp_name, decl_type, assigns = temp
                 self._decl(f"{temp_name} {decl_type};")
                 return prefix + assigns + [f"{indent}RETURN {temp_name};"]
+        # `return sql!{...}.collect()` / `.one()` / `.first()` — these
+        # patterns need a SELECT INTO / BULK COLLECT INTO temp; you
+        # can't put them inline as expressions. Synthesize:
+        #   let _ret_<n>: <fn_return_type> = <expr>;
+        #   RETURN _ret_<n>;
+        # and let the existing let-handling do the right thing.
+        if (isinstance(s.value, A.Call)
+                and isinstance(s.value.callee, A.MemberAccess)
+                and isinstance(s.value.callee.obj, A.SqlBlock)
+                and s.value.callee.field in ("collect", "one", "first")
+                and self._current_fn is not None
+                and self._current_fn.return_type is not None):
+            self._sql_var_counter += 1
+            tmp_name = f"pell_ret_{self._sql_var_counter}"
+            let_stmt = A.LetStmt(
+                loc=s.loc,
+                name=tmp_name,
+                type_annot=self._current_fn.return_type,
+                value=s.value,
+            )
+            let_lines = self._emit_let(let_stmt, indent)
+            return prefix + let_lines + [f"{indent}RETURN {local_name(tmp_name)};"]
         return prefix + [f"{indent}RETURN {self._emit_expr(s.value)};"]
 
     def _record_return_temp(self, sl: A.StructLit) -> Optional[tuple[str, str, list[str]]]:
@@ -3316,8 +3338,23 @@ class Emitter:
         # for x in <list-typed local>: iterate via assoc-array FOR loop
         if isinstance(s.iterable, A.Ident) and s.iterable.name in self._list_locals:
             list_local = local_name(s.iterable.name)
-            elem_pell = self._list_locals[s.iterable.name]  # pell-surface, e.g. "text"
-            elem_sql = self._lt(A.PrimType(loc=s.iterable.loc, name=elem_pell))
+            elem_pell = self._list_locals[s.iterable.name]  # pell-surface, e.g. "text" or "ColumnInfo"
+            # Distinguish primitive vs record element types. Records
+            # lower to t_<name>; primitives use their pell name. If the
+            # list local is foreign-typed (e.g. catalog.t_columninfo_list),
+            # the record element also lives in the foreign pkg.
+            _prims = {"text", "number", "int", "bool", "date", "timestamp",
+                      "bytes", "json", "bigtext", "Unit"}
+            if elem_pell in _prims:
+                elem_sql = self._lt(A.PrimType(loc=s.iterable.loc, name=elem_pell))
+            else:
+                # Record element. Check if the list itself is foreign-typed.
+                list_pl_type = self._local_types.get(s.iterable.name, "")
+                if "." in list_pl_type:
+                    pkg = list_pl_type.split(".", 1)[0]
+                    elem_sql = f"{pkg}.t_{_safe(elem_pell.lower())}"
+                else:
+                    elem_sql = self._lt(A.NamedType(loc=s.iterable.loc, name=elem_pell))
             # Use an integer loop variable and bind the loop name to list_local(i)
             idx = f"i_{s.var_name}"
             out = [f"{indent}FOR {idx} IN {list_local}.FIRST .. {list_local}.LAST LOOP"]
