@@ -3335,6 +3335,38 @@ class Emitter:
             self._loop_vars.pop()
             out.append(f"{indent}END LOOP;")
             return out
+        # for x in <call>() — if the call returns list<T>, synthesize
+        # a temp let and iterate that. Sugar for:
+        #     let _tmp = <call>(); for x in _tmp { ... }
+        # Works for any cross-package call in the project signature
+        # registry, plus same-module fns. (No-arg or with-arg, doesn't
+        # matter — we just unpack the return type.)
+        if isinstance(s.iterable, A.Call) and isinstance(s.iterable.callee, A.Ident):
+            fn_name = s.iterable.callee.name
+            call_ret: Optional[A.TypeRef] = None
+            if "::" in fn_name and fn_name in self._project_signatures:
+                call_ret = self._project_signatures[fn_name]
+            else:
+                for fn in self._fns:
+                    if fn.name == fn_name:
+                        call_ret = fn.return_type
+                        break
+            if (call_ret is not None
+                    and isinstance(call_ret, A.GenericType)
+                    and call_ret.base == "list"
+                    and len(call_ret.params) == 1):
+                self._sql_var_counter += 1
+                tmp_name = f"pell_iter_{self._sql_var_counter}"
+                let_stmt = A.LetStmt(
+                    loc=s.loc, name=tmp_name,
+                    type_annot=call_ret, value=s.iterable,
+                )
+                new_for = A.ForStmt(
+                    loc=s.loc, var_name=s.var_name,
+                    iterable=A.Ident(loc=s.loc, name=tmp_name),
+                    body=s.body,
+                )
+                return self._emit_let(let_stmt, indent) + self._emit_for(new_for, indent)
         # for x in <list-typed local>: iterate via assoc-array FOR loop
         if isinstance(s.iterable, A.Ident) and s.iterable.name in self._list_locals:
             list_local = local_name(s.iterable.name)
