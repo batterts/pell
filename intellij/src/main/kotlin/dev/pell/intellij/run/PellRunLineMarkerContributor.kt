@@ -6,16 +6,21 @@ import com.intellij.psi.PsiElement
 import dev.pell.intellij.PellFileType
 
 /**
- * Puts the green-arrow gutter icon at the top of every .pell file.
- * Clicking it opens a menu of the available pell subcommands so you
- * can pick the one you want without going through Edit Configurations.
+ * Puts a compile/hammer gutter icon at the top of every .pell file.
+ * Clicking it opens a menu of the available pell subcommands.
  *
- *   ▶ Run pell exec              (the default — anonymous block + execute)
- *   ▶ Run pell exec (dry-run)    (show the block, don't connect)
- *   ▶ Run pell build             (compile to PL/SQL, stdout)
- *   ▶ Run pell build → file      (compile to <name>.sql next to source)
- *   ▶ Run pell parse             (print the AST)
- *   ▶ Run pell tokens            (print the token stream)
+ * The icon is a hammer (not a play arrow) because the primary thing
+ * a .pell file does is *compile* to PL/SQL — `pell build` is the
+ * star action, not `pell exec`. The play-arrow icon stays reserved
+ * for the side-by-side preview's "run this compiled SQL on
+ * PELL_DB_URL" button, which is the actual execution surface.
+ *
+ *   ⚒ pell exec                   (compile + execute as anon block)
+ *   ⚒ pell exec (dry-run)         (show the block, don't connect)
+ *   ⚒ pell build                  (compile to PL/SQL on stdout)
+ *   ⚒ pell build → file           (compile to <name>.sql)
+ *   ⚒ pell parse                  (print the AST)
+ *   ⚒ pell tokens                 (print the lexer stream)
  *
  * Each entry creates / reuses a named run config (`pell <action>: <file>`),
  * runs it, and leaves it in the toolbar's run-config dropdown so the
@@ -40,8 +45,8 @@ class PellRunLineMarkerContributor : RunLineMarkerContributor() {
         // One marker per file — on the first PSI leaf (offset 0).
         if (element.textOffset != 0) return null
         return Info(
-            AllIcons.RunConfigurations.TestState.Run,
+            AllIcons.Actions.Compile,
             pellActions,
-        ) { _ -> "Run pell on this file" }
+        ) { _ -> "Compile this .pell file" }
     }
 }
