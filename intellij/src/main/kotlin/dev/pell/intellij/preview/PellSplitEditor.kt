@@ -1,5 +1,9 @@
 package dev.pell.intellij.preview
 
+import com.intellij.execution.configurations.GeneralCommandLine
+import com.intellij.execution.process.OSProcessHandler
+import com.intellij.execution.process.ProcessAdapter
+import com.intellij.execution.process.ProcessEvent
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.editor.event.CaretEvent
 import com.intellij.openapi.editor.event.CaretListener
@@ -8,7 +12,14 @@ import com.intellij.openapi.editor.event.DocumentListener
 import com.intellij.openapi.fileEditor.TextEditor
 import com.intellij.openapi.fileEditor.TextEditorWithPreview
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.VirtualFileManager
+import com.intellij.openapi.vfs.newvfs.BulkFileListener
+import com.intellij.openapi.vfs.newvfs.events.VFileContentChangeEvent
+import com.intellij.openapi.vfs.newvfs.events.VFileEvent
+import dev.pell.intellij.settings.PellSettings
+import java.io.File
 
 /**
  * Markdown-style split editor for `.pell` files:
@@ -58,8 +69,71 @@ class PellSplitEditor(
                 syncPreviewToCaret()
             }
         })
+        // Flush the lowered PL/SQL to `<targetDir>/<name>.sql` whenever
+        // the .pell source's on-disk content changes (Cmd-S, external
+        // edit, git checkout, …). Keeps the committed artifact in sync
+        // with the source you can git-blame.
+        project.messageBus.connect(this).subscribe(
+            VirtualFileManager.VFS_CHANGES,
+            object : BulkFileListener {
+                override fun after(events: List<VFileEvent>) {
+                    for (e in events) {
+                        if (e is VFileContentChangeEvent && e.file == sourceFile) {
+                            flushToTargetDir()
+                            break
+                        }
+                    }
+                }
+            },
+        )
         // Kick off the first compile as soon as the editor is shown.
         ApplicationManager.getApplication().invokeLater { triggerCompile(delayMs = 0) }
+    }
+
+    /**
+     * Shell out to `./pell build <source> -o <targetDir>/<name>.sql`
+     * so the committed artifact stays in lockstep with the source.
+     *
+     * Async (no blocking on the save callback). On success, refreshes
+     * VFS so the file pops into the project tree immediately. On
+     * failure, silently leaves the previous file in place — the
+     * preview pane already surfaces the compile error.
+     */
+    private fun flushToTargetDir() {
+        val basePath = project.basePath ?: return
+        val pellExe = File(basePath, "pell")
+        if (!pellExe.canExecute()) return
+
+        val targetDirName = PellSettings.getInstance(project).targetDirName
+        val targetDir = File(basePath, targetDirName).apply { mkdirs() }
+        val targetFile = File(targetDir, sourceFile.nameWithoutExtension + ".sql")
+
+        val cmd = GeneralCommandLine(pellExe.absolutePath)
+            .withParameters(
+                "build",
+                sourceFile.path,
+                "-o", targetFile.absolutePath,
+                "--reproducible",
+            )
+            .withWorkDirectory(basePath)
+            .withCharset(Charsets.UTF_8)
+            .withRedirectErrorStream(false)
+        try {
+            val handler = OSProcessHandler(cmd)
+            handler.addProcessListener(object : ProcessAdapter() {
+                override fun processTerminated(event: ProcessEvent) {
+                    if (event.exitCode == 0) {
+                        ApplicationManager.getApplication().invokeLater {
+                            LocalFileSystem.getInstance()
+                                .refreshAndFindFileByPath(targetFile.absolutePath)
+                        }
+                    }
+                }
+            })
+            handler.startNotify()
+        } catch (_: Throwable) {
+            // No-op — the preview already shows compile errors.
+        }
     }
 
     /**

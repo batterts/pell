@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.3.7</version>
+    <version>0.3.8</version>
 
     <description><![CDATA[
         IntelliJ support for the <b>pell</b> language — a statically-typed
@@ -64,6 +64,21 @@
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.3.8</h3>
+        <ul>
+          <li><b>Save-to-target-dir wired up.</b> When you save a
+              .pell file (Cmd-S), the plugin now runs
+              <code>./pell build &lt;source&gt; -o
+              &lt;targetDir&gt;/&lt;name&gt;.sql</code> and refreshes
+              the VFS so the file pops into the project tree. The
+              committed PL/SQL artifact stays in lockstep with the
+              authored .pell. Target directory configured in
+              Settings → Tools → pell (default <code>plsql</code>).
+              Hook: VFS_CHANGES → VFileContentChangeEvent on the
+              source file. Async — doesn't block the save callback.
+              Failures are silent (the preview pane already shows
+              compile errors).</li>
+        </ul>
         <h3>0.3.7</h3>
         <ul>
           <li><b>Project settings (Settings → Tools → pell)</b> with
