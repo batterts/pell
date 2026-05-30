@@ -77,6 +77,11 @@ class PellPreviewEditor(
     // run `./pell sql <tmpfile>` so the user sees the result inline.
     private var runHighlighter: RangeHighlighter? = null
 
+    // Caret-sync line highlighter — the line the preview is currently
+    // pinned to when the user clicks a decl in the source. One at a
+    // time; the previous gets removed before the next is added.
+    private var caretSyncHighlighter: RangeHighlighter? = null
+
     init {
         viewer.isViewer = true
         viewer.setCaretEnabled(false)
@@ -113,6 +118,10 @@ class PellPreviewEditor(
     /** Replace the preview contents with successfully-compiled PL/SQL.
      *  Clears the error banner — the new content IS the latest truth. */
     fun setSql(sql: String) {
+        // Clear any stale caret-sync highlight before the document
+        // changes — its line offsets won't be meaningful in the new text.
+        caretSyncHighlighter?.let { viewer.markupModel.removeHighlighter(it) }
+        caretSyncHighlighter = null
         com.intellij.openapi.application.ApplicationManager.getApplication().runWriteAction {
             document.setText(sql.ifEmpty { "// (no output)\n" })
         }
@@ -140,46 +149,95 @@ class PellPreviewEditor(
     }
 
     /**
-     * Markdown-style caret sync: scroll the preview to the first
-     * matching PL/SQL declaration line for the pell decl the source
-     * caret is on.
+     * Markdown-style caret sync: scroll the preview to the matching
+     * PL/SQL declaration for the pell decl the source caret is on,
+     * and highlight the line.
+     *
+     * For `fn`, we deliberately jump to the BODY (`FUNCTION foo IS`)
+     * not the spec (`FUNCTION foo RETURN ...;`) — the body is where
+     * the code lives. Search begins from the
+     * `CREATE OR REPLACE PACKAGE BODY` marker if present.
      *
      * Mapping (best-effort, name-based):
-     *   fn foo          → FUNCTION foo  |  PROCEDURE foo
-     *   record Foo      → TYPE t_foo
-     *   type Foo        → TYPE Foo      |  TYPE t_foo
-     *   error Foo       → pell_runtime.foo_<exc>   (we just match "foo")
-     *   aggregate Foo   → TYPE Foo (the OBJECT TYPE)
+     *   fn foo          → FUNCTION foo IS  |  PROCEDURE foo IS
+     *   record Foo      → TYPE t_foo IS
+     *   type Foo        → TYPE Foo AS OBJECT
+     *   aggregate Foo   → TYPE Foo AS OBJECT
      *
      * Falls through silently if no match. Doesn't try to be exact —
      * just gets you close enough to read the rest.
      */
     fun scrollToDeclaration(kind: String, name: String) {
         val lcName = name.lowercase()
+        val text = document.text
+        // For fn lookups, skip past the PACKAGE spec so we land on the
+        // FUNCTION foo IS body, not the spec's `FUNCTION foo RETURN ...;`.
+        val bodyMarker = "CREATE OR REPLACE PACKAGE BODY"
+        val searchFrom = if (kind == "fn") {
+            val bodyAt = text.indexOf(bodyMarker)
+            if (bodyAt >= 0) bodyAt else 0
+        } else 0
+
+        // Patterns include the body-marker shape (e.g. `FUNCTION foo IS`)
+        // so we match the IS-prefixed body rather than a same-named call
+        // somewhere inside another fn.
         val patterns = when (kind) {
-            "fn"        -> listOf("FUNCTION $lcName", "PROCEDURE $lcName",
-                                  "FUNCTION $name",   "PROCEDURE $name")
-            "record"    -> listOf("TYPE t_$lcName", "TYPE T_$lcName")
-            "type"      -> listOf("TYPE $name", "TYPE t_$lcName")
+            "fn"        -> listOf(
+                "FUNCTION $lcName(", "FUNCTION $lcName ",
+                "PROCEDURE $lcName(", "PROCEDURE $lcName ",
+                "FUNCTION $name(", "PROCEDURE $name(",
+            )
+            "record"    -> listOf("TYPE t_$lcName ", "TYPE T_$lcName ", "TYPE t_$lcName\n")
+            "type"      -> listOf("TYPE $name ", "TYPE t_$lcName ")
             "error"     -> listOf("EXCEPTION_INIT($lcName", "$lcName ")
-            "aggregate" -> listOf("TYPE $name", "TYPE t_$lcName")
-            "enum"      -> listOf("TYPE t_$lcName", "$lcName")
-            "sealed"    -> listOf("TYPE $name", "TYPE t_$lcName")
+            "aggregate" -> listOf("TYPE $name ", "TYPE t_$lcName ")
+            "enum"      -> listOf("TYPE t_$lcName ", "$lcName ")
+            "sealed"    -> listOf("TYPE $name ", "TYPE t_$lcName ")
             else        -> listOf(lcName)
         }
-        val text = document.text
         val hit = patterns.firstNotNullOfOrNull { p ->
-            val idx = text.indexOf(p)
+            val idx = text.indexOf(p, searchFrom)
             if (idx >= 0) idx else null
         } ?: return
         val line = document.getLineNumber(hit)
-        // Scroll AND position the caret/visual region near the top so
-        // the user can read the section. centerLogicalPosition gives
-        // markdown-preview-like behavior.
+
+        // Scroll the line into view (centered, markdown-preview-style).
         viewer.scrollingModel.scrollTo(
             com.intellij.openapi.editor.LogicalPosition(line, 0),
             com.intellij.openapi.editor.ScrollType.CENTER,
         )
+        highlightLine(line)
+    }
+
+    /** Paint a soft background on the given line of the preview so
+     *  the user's eye lands on it after a caret-sync. Only one line
+     *  is highlighted at a time — the previous mark is cleared. */
+    private fun highlightLine(line: Int) {
+        val mm = viewer.markupModel
+        caretSyncHighlighter?.let { mm.removeHighlighter(it) }
+        if (line < 0 || line >= document.lineCount) return
+        val start = document.getLineStartOffset(line)
+        val end = document.getLineEndOffset(line)
+
+        // Reuse the IDE's "caret row" background color so the
+        // highlight reads as native (light yellow on light theme,
+        // dim gray on dark).
+        val scheme = EditorColorsManager.getInstance().globalScheme
+        val attrs = com.intellij.openapi.editor.markup.TextAttributes(
+            null,
+            scheme.getColor(com.intellij.openapi.editor.colors.EditorColors.CARET_ROW_COLOR)
+                ?: JBColor(Color(0xFFF8C5), Color(0x3A3A2C)),
+            null,
+            null,
+            java.awt.Font.PLAIN,
+        )
+        val hl = mm.addRangeHighlighter(
+            start, end,
+            HighlighterLayer.SELECTION - 1,  // under selection, over syntax
+            attrs,
+            HighlighterTargetArea.LINES_IN_RANGE,
+        )
+        caretSyncHighlighter = hl
     }
 
     /** Shell-execute the current preview content as PL/SQL against
