@@ -19,7 +19,7 @@ plugins {
 }
 
 group = "dev.pell"
-version = "0.3.8"
+version = "0.3.9"
 
 repositories {
     mavenCentral()

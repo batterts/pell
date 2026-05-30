@@ -11,12 +11,14 @@ import java.io.File
  *
  *   <root>/
  *   ├── README.md               — project intro
- *   ├── .gitignore              — built/, venv, etc.
+ *   ├── .gitignore              — venv etc. (NOT plsql/ — that's committed)
  *   ├── pell                    — wrapper script that finds the pell CLI
  *   ├── src/
  *   │   └── hello.pell          — starter module
  *   ├── tests/                  — empty, ready for test_*.pell
- *   ├── built/                  — output dir (gitignored)
+ *   ├── plsql/                  — lowered PL/SQL, **committed** so you can
+ *   │                             git-blame + diff the deployment artifact
+ *   │                             over time
  *   └── .idea/runConfigurations/
  *       └── pell_deploy_all.xml — one-click "Deploy all" config
  */
@@ -28,7 +30,7 @@ object PellProjectScaffold {
         root.mkdirs()
         File(root, "src").mkdirs()
         File(root, "tests").mkdirs()
-        File(root, "built").mkdirs()
+        File(root, "plsql").mkdirs()
         File(root, ".idea/runConfigurations").mkdirs()
 
         writeIfMissing(File(root, "README.md"), readme(projectName))
@@ -37,6 +39,9 @@ object PellProjectScaffold {
         writeIfMissing(File(root, "pell"), pellShim(pellHome).also { _ ->
             // mark executable below
         })
+        // `.gitkeep` so the empty plsql/ dir survives the first commit
+        // (it'll fill up the first time you save a .pell).
+        writeIfMissing(File(root, "plsql/.gitkeep"), "")
         writeIfMissing(
             File(root, ".idea/runConfigurations/pell_deploy_all.xml"),
             deployAllRunConfig(root),
@@ -61,7 +66,7 @@ object PellProjectScaffold {
         ## Quick start
 
         ```sh
-        # Compile everything to ./built/
+        # Compile everything to ./plsql/ (no DB connection needed)
         ./pell deploy . --build-only
 
         # Compile + install against PELL_DB_URL
@@ -71,9 +76,10 @@ object PellProjectScaffold {
 
         ## Layout
 
-        - `src/` — `.pell` source files (one per module)
+        - `src/` — `.pell` source files (one per module). Authored.
+        - `plsql/` — lowered PL/SQL output. **Committed** — git-blame
+          shows how each deployment artifact evolved over time.
         - `tests/` — test files (`test_*.pell`)
-        - `built/` — compiler output, gitignored
         - `pell` — wrapper script that finds the pell CLI
 
         ## Resources
@@ -84,8 +90,8 @@ object PellProjectScaffold {
     """.trimIndent() + "\n"
 
     private fun gitignore(): String = """
-        # Compiled artifacts
-        built/
+        # NOTE: plsql/ is deliberately NOT gitignored. The lowered SQL
+        # is the deployment artifact — commit it, git-blame it, audit it.
         *.sql.tmp
 
         # Local environment

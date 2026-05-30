@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.3.8</version>
+    <version>0.3.9</version>
 
     <description><![CDATA[
         IntelliJ support for the <b>pell</b> language — a statically-typed
@@ -64,6 +64,33 @@
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.3.9</h3>
+        <ul>
+          <li><b>plsql/ everywhere.</b> The build-output dir is now
+              `plsql/` by default (was `built/`) — the lowered SQL
+              is the deployment artifact, meant to be committed and
+              git-blamed, not hidden away as ephemeral build output.
+              <ul>
+                <li>New Project wizard scaffolds <code>plsql/.gitkeep</code>
+                    instead of <code>built/</code>, and the .gitignore
+                    no longer excludes it.</li>
+                <li>Tool window's Build / Run SQL / Install runtime
+                    buttons all honor Settings → Tools → pell →
+                    "Target directory".</li>
+                <li>Module-state scan looks at both the configured
+                    target dir AND the legacy <code>built/</code>, so
+                    pre-existing projects keep working until migrated.</li>
+              </ul>
+          </li>
+          <li><b>New CLI: <code>pell migrate</code></b> — idempotent
+              helper for existing projects. <code>pell migrate</code>
+              renames <code>built/</code> → <code>plsql/</code> and
+              drops the corresponding <code>.gitignore</code> entry.
+              Dry-run with <code>--dry-run</code> first to preview.</li>
+          <li><b><code>pell deploy</code> default output dir is now
+              <code>plsql/</code>.</b> Override with <code>--out-dir</code>
+              if you've kept the legacy name.</li>
+        </ul>
         <h3>0.3.8</h3>
         <ul>
           <li><b>Save-to-target-dir wired up.</b> When you save a

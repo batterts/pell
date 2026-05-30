@@ -117,13 +117,13 @@ class PellToolWindow(private val project: Project) {
                         "runtime",
                         project.basePath ?: ".",
                         "-o",
-                        "${project.basePath}/built/pell_runtime.sql",
+                        "${project.basePath}/${targetDir()}/pell_runtime.sql",
                     ),
                     null,
                 )
             })
             add(simpleAction("Install pell_runtime on PELL_DB_URL", AllIcons.Toolwindows.ToolWindowChanges) {
-                val out = File(project.basePath, "built/pell_runtime.sql")
+                val out = File(project.basePath, "${targetDir()}/pell_runtime.sql")
                 out.parentFile?.mkdirs()
                 // Two-step: build the runtime SQL, then install it. The
                 // chained `onSuccess` fires only when the first command
@@ -180,11 +180,16 @@ class PellToolWindow(private val project: Project) {
 
     // -- module actions ----------------------------------------------
 
-    /** Compile a single .pell to `<project>/built/<name>.sql`. Sets
+    /** The target directory configured in Settings → Tools → pell.
+     *  Falls back to `plsql` when no project or settings are available. */
+    private fun targetDir(): String =
+        dev.pell.intellij.settings.PellSettings.getInstance(project).targetDirName
+
+    /** Compile a single .pell to `<project>/<targetDir>/<name>.sql`. Sets
      *  per-module state to Building, then BuildOk / BuildFailed on
      *  process completion (the runPell teardown handles that). */
     private fun buildSelected(mod: PellModule) {
-        val out = File(project.basePath, "built").also { it.mkdirs() }
+        val out = File(project.basePath, targetDir()).also { it.mkdirs() }
         val outFile = File(out, mod.source.nameWithoutExtension + ".sql")
         runPell(
             listOf("build", mod.source.path, "-o", outFile.absolutePath),
@@ -196,7 +201,7 @@ class PellToolWindow(private val project: Project) {
      *  If no built file exists OR the source is newer than the built
      *  copy, builds first, then runs. */
     private fun runBuiltSql(mod: PellModule) {
-        val outDir = File(project.basePath, "built").also { it.mkdirs() }
+        val outDir = File(project.basePath, targetDir()).also { it.mkdirs() }
         val outFile = File(outDir, mod.source.nameWithoutExtension + ".sql")
 
         val needsBuild = !outFile.exists()

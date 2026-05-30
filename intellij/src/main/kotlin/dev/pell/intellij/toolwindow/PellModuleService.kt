@@ -124,16 +124,26 @@ class PellModuleService(private val project: Project) {
                         val existing = synchronized(modulesByPath) { modulesByPath[file.path] }
                         val mod = existing?.copy(source = file)
                             ?: PellModule(source = file, moduleName = parseModuleName(file))
-                        // Look for a matching built .sql under <project>/built/.
-                        // First match wins; this is cheap and covers the
-                        // canonical `pell deploy` layout.
+                        // Look for a matching built .sql under the
+                        // configured target dir (Settings → Tools → pell,
+                        // default `plsql`). Falls back to the legacy
+                        // `built/` location for projects that haven't
+                        // migrated yet.
                         if (mod.built == null || !mod.built!!.exists()) {
                             val projectBase = project.basePath
                             if (projectBase != null) {
-                                val candidate = LocalFileSystem.getInstance()
-                                    .findFileByPath("$projectBase/built/${file.nameWithoutExtension}.sql")
-                                if (candidate != null && candidate.exists()) {
-                                    mod.built = candidate
+                                val targetDir = dev.pell.intellij.settings
+                                    .PellSettings.getInstance(project).targetDirName
+                                val lfs = LocalFileSystem.getInstance()
+                                val candidates = listOf(
+                                    "$projectBase/$targetDir/${file.nameWithoutExtension}.sql",
+                                    "$projectBase/built/${file.nameWithoutExtension}.sql",
+                                )
+                                val hit = candidates.firstNotNullOfOrNull { p ->
+                                    lfs.findFileByPath(p)?.takeIf { it.exists() }
+                                }
+                                if (hit != null) {
+                                    mod.built = hit
                                     if (mod.state == PellModule.State.Unknown) {
                                         mod.state = PellModule.State.BuildOk
                                     }

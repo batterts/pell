@@ -63,3 +63,14 @@ pub fn audit_msg(action: text, target: text) -> text {
 //
 //   [N]> \save my_session.pell
 // ---------------------------------------------------------------------------
+
+
+pub fn display_tables() -> list<text> {
+    return catalog::tables();
+}
+
+pub fn display_tree(name: text) -> list<text> {
+    return catalog::deps_tree(name);
+}
+
+

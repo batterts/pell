@@ -235,7 +235,13 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         return 2
 
     # Build everything first to catch compile errors before connecting.
-    out_dir = Path(args.out_dir) if args.out_dir else (project / "built" if project.is_dir() else project.parent / "built")
+    # Default output dir: `<project>/plsql`. The legacy `built/` name
+    # implied "ephemeral, gitignore me" — but pell's emitted SQL is a
+    # human-readable, SHA-anchored deployment artifact you commit. New
+    # default reflects that intent. Existing projects that still use
+    # `built/` keep working by passing `--out-dir built`.
+    default_root = project if project.is_dir() else project.parent
+    out_dir = Path(args.out_dir) if args.out_dir else (default_root / "plsql")
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"pell deploy: build → {out_dir}")
     built_files: list[Path] = []
@@ -372,6 +378,72 @@ def cmd_sql(args: argparse.Namespace) -> int:
     finally:
         conn.close()
     return 1 if failures else 0
+
+
+def cmd_migrate(args: argparse.Namespace) -> int:
+    """Rename a pell project's old build-output directory to the new
+    default `plsql/`. Idempotent, dry-run by default.
+
+    Existing projects scaffolded by older pell versions have a `built/`
+    dir gitignored and never committed. The new convention puts the
+    lowered SQL in `plsql/`, expects it committed, and pairs with the
+    IntelliJ plugin's per-project `targetDirName` setting.
+
+    Steps:
+      1. Rename <root>/<from> → <root>/<to> (if the source exists and
+         the target doesn't).
+      2. Remove the `<from>/` line from .gitignore.
+      3. Print a summary of what changed.
+
+    With --dry-run, prints what *would* happen without touching disk.
+    """
+    root = Path(args.root).resolve()
+    if not root.is_dir():
+        print(f"pell: not a directory: {root}", file=sys.stderr)
+        return 2
+    src = root / args.from_dir
+    dst = root / args.to_dir
+    actions: list[str] = []
+
+    if src.is_dir() and not dst.exists():
+        actions.append(f"rename: {src} → {dst}")
+    elif src.is_dir() and dst.exists():
+        actions.append(f"skip:   {src} exists, {dst} also exists "
+                       f"(merge manually)")
+    elif not src.is_dir():
+        actions.append(f"skip:   {src} doesn't exist")
+
+    gitignore = root / ".gitignore"
+    new_gitignore: Optional[str] = None
+    if gitignore.is_file():
+        lines = gitignore.read_text().splitlines()
+        kept = [
+            l for l in lines
+            if l.strip() not in (args.from_dir, f"{args.from_dir}/", f"/{args.from_dir}", f"/{args.from_dir}/")
+        ]
+        if len(kept) != len(lines):
+            actions.append(f"edit:   .gitignore — drop {args.from_dir}/")
+            new_gitignore = "\n".join(kept) + ("\n" if kept else "")
+
+    if not actions:
+        print("pell migrate: nothing to do")
+        return 0
+
+    for a in actions:
+        print(f"  {a}")
+    if args.dry_run:
+        print("\n(dry-run — re-run without --dry-run to apply)")
+        return 0
+
+    # Apply
+    if src.is_dir() and not dst.exists():
+        src.rename(dst)
+    if new_gitignore is not None:
+        gitignore.write_text(new_gitignore)
+    print("\npell migrate: done — commit the rename + .gitignore "
+          "change, then `pell deploy` from now on writes to "
+          f"{args.to_dir}/")
+    return 0
 
 
 def cmd_repl(args: argparse.Namespace) -> int:
@@ -515,7 +587,8 @@ def main(argv: list[str] | None = None) -> int:
     dp.add_argument("--reproducible", action="store_true",
                     help="omit volatile preamble fields so output is byte-stable")
     dp.add_argument("--out-dir", "-d",
-                    help="where to write built .sql files (default: <input>/built)")
+                    help="where to write the lowered .sql files "
+                         "(default: <input>/plsql)")
     dp.add_argument("--with-re", action="store_true",
                     help="install pell_re.sql even if no module references re::")
     dp.add_argument("--build-only", action="store_true",
@@ -534,6 +607,22 @@ def main(argv: list[str] | None = None) -> int:
     sq.add_argument("--stop-on-error", action="store_true",
                     help="stop at the first failed statement (default: continue, report at end)")
     sq.set_defaults(func=cmd_sql)
+
+    mig = sub.add_parser(
+        "migrate",
+        help="rename a project's build-output directory (idempotent). "
+             "Use to move existing projects from the legacy `built/` "
+             "to the new default `plsql/`.",
+    )
+    mig.add_argument("root", nargs="?", default=".",
+                     help="project root (default: cwd)")
+    mig.add_argument("--from", dest="from_dir", default="built",
+                     help="current directory name (default: built)")
+    mig.add_argument("--to", dest="to_dir", default="plsql",
+                     help="new directory name (default: plsql)")
+    mig.add_argument("--dry-run", action="store_true",
+                     help="show what would change without touching disk")
+    mig.set_defaults(func=cmd_migrate)
 
     args = p.parse_args(argv)
     return args.func(args)

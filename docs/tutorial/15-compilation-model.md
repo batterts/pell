@@ -201,10 +201,10 @@ my_app/
 │   ├── billing.pell
 │   ├── reports.pell
 │   └── inventory.pell
-├── built/                      (gitignored — `pell build src -d built`)
-│   ├── auth.sql
-│   ├── billing.sql
-│   ├── reports.sql
+├── plsql/                      (committed — `pell deploy . --build-only`)
+│   ├── auth.sql                  the lowered SQL is the deployment
+│   ├── billing.sql               artifact: SHA-anchored, human-readable,
+│   ├── reports.sql               git-blameable. Commit it, audit it.
 │   ├── inventory.sql
 │   ├── pell_runtime.sql
 │   └── pell_re.sql
