@@ -1,6 +1,8 @@
 package dev.pell.intellij.preview
 
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.editor.event.CaretEvent
+import com.intellij.openapi.editor.event.CaretListener
 import com.intellij.openapi.editor.event.DocumentEvent
 import com.intellij.openapi.editor.event.DocumentListener
 import com.intellij.openapi.fileEditor.TextEditor
@@ -47,8 +49,47 @@ class PellSplitEditor(
             }
         }
         doc.addDocumentListener(documentListener, this)
+        // Sync the preview to wherever the caret lands in the source —
+        // markdown-style. When the user clicks `pub fn greet(...)` we
+        // scroll the preview to `FUNCTION greet`. Name-based lookup
+        // (no source-map yet); good enough for ~95% of navigation.
+        textEditor.editor.caretModel.addCaretListener(object : CaretListener {
+            override fun caretPositionChanged(event: CaretEvent) {
+                syncPreviewToCaret()
+            }
+        })
         // Kick off the first compile as soon as the editor is shown.
         ApplicationManager.getApplication().invokeLater { triggerCompile(delayMs = 0) }
+    }
+
+    /**
+     * Walk backward from the caret to find the nearest pell declaration
+     * (`pub fn foo`, `fn foo`, `pub record Foo`, `pub type Foo`, etc.)
+     * and ask the preview to scroll its viewer to the matching PL/SQL
+     * line (`FUNCTION foo`, `PROCEDURE foo`, `TYPE t_foo`, …).
+     */
+    private fun syncPreviewToCaret() {
+        val srcEditor = textEditor.editor
+        val caret = srcEditor.caretModel.offset
+        val text = srcEditor.document.text
+        val (kind, name) = findEnclosingDecl(text, caret) ?: return
+        pellPreview.scrollToDeclaration(kind, name)
+    }
+
+    /**
+     * Returns (kind, name) for the declaration whose body contains
+     * `caretOffset`, or null if none found. Tolerant of whitespace and
+     * the `pub` modifier. Walks backward up to 4KB of source.
+     */
+    private fun findEnclosingDecl(text: String, caretOffset: Int): Pair<String, String>? {
+        // Look in a window ending at caret. Most decls fit in 4KB.
+        val start = (caretOffset - 4096).coerceAtLeast(0)
+        val window = text.substring(start, caretOffset.coerceAtMost(text.length))
+        // Regex catches the LAST matching declaration before caret.
+        val re = Regex("""(?m)^\s*(?:pub\s+)?(fn|record|type|error|aggregate|enum|sealed)\s+(\w+)""")
+        return re.findAll(window).lastOrNull()?.let { m ->
+            m.groupValues[1] to m.groupValues[2]
+        }
     }
 
     private fun triggerCompile(delayMs: Int = 400) {

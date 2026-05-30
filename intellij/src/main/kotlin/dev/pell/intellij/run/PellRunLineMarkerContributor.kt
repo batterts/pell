@@ -28,15 +28,16 @@ import dev.pell.intellij.PellFileType
  */
 class PellRunLineMarkerContributor : RunLineMarkerContributor() {
 
+    // No `build` / `build → file` here — the split-editor preview
+    // already shows the lowered PL/SQL live; the user doesn't need a
+    // menu item to re-build the thing already on their screen.
     private val pellActions = arrayOf(
         PellRunAction("exec",            "Run pell exec",          "Compile to anon block and execute against PELL_DB_URL"),
         PellRunAction("exec --dry-run",  "Run pell exec (dry-run)","Compile to anon block; print it; don't connect"),
-        PellRunAction("build",           "Run pell build",         "Compile to PL/SQL on stdout"),
-        PellRunAction("build -o",        "Run pell build → file",  "Compile to <name>.sql next to the source file"),
-        PellRunAction("parse",           "Run pell parse",         "Print the parsed AST"),
-        PellRunAction("tokens",          "Run pell tokens",        "Print the lexer's token stream"),
         // Interactive — opens a terminal tab + auto `\load`s this file
         PellOpenReplAction(),
+        PellRunAction("parse",           "Show parsed AST",        "Print the parsed AST (debug)"),
+        PellRunAction("tokens",          "Show token stream",      "Print the lexer's token stream (debug)"),
     )
 
     override fun getInfo(element: PsiElement): Info? {

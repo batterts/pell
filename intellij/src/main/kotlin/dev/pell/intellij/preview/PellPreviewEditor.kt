@@ -139,6 +139,49 @@ class PellPreviewEditor(
         runHighlighter = hl
     }
 
+    /**
+     * Markdown-style caret sync: scroll the preview to the first
+     * matching PL/SQL declaration line for the pell decl the source
+     * caret is on.
+     *
+     * Mapping (best-effort, name-based):
+     *   fn foo          → FUNCTION foo  |  PROCEDURE foo
+     *   record Foo      → TYPE t_foo
+     *   type Foo        → TYPE Foo      |  TYPE t_foo
+     *   error Foo       → pell_runtime.foo_<exc>   (we just match "foo")
+     *   aggregate Foo   → TYPE Foo (the OBJECT TYPE)
+     *
+     * Falls through silently if no match. Doesn't try to be exact —
+     * just gets you close enough to read the rest.
+     */
+    fun scrollToDeclaration(kind: String, name: String) {
+        val lcName = name.lowercase()
+        val patterns = when (kind) {
+            "fn"        -> listOf("FUNCTION $lcName", "PROCEDURE $lcName",
+                                  "FUNCTION $name",   "PROCEDURE $name")
+            "record"    -> listOf("TYPE t_$lcName", "TYPE T_$lcName")
+            "type"      -> listOf("TYPE $name", "TYPE t_$lcName")
+            "error"     -> listOf("EXCEPTION_INIT($lcName", "$lcName ")
+            "aggregate" -> listOf("TYPE $name", "TYPE t_$lcName")
+            "enum"      -> listOf("TYPE t_$lcName", "$lcName")
+            "sealed"    -> listOf("TYPE $name", "TYPE t_$lcName")
+            else        -> listOf(lcName)
+        }
+        val text = document.text
+        val hit = patterns.firstNotNullOfOrNull { p ->
+            val idx = text.indexOf(p)
+            if (idx >= 0) idx else null
+        } ?: return
+        val line = document.getLineNumber(hit)
+        // Scroll AND position the caret/visual region near the top so
+        // the user can read the section. centerLogicalPosition gives
+        // markdown-preview-like behavior.
+        viewer.scrollingModel.scrollTo(
+            com.intellij.openapi.editor.LogicalPosition(line, 0),
+            com.intellij.openapi.editor.ScrollType.CENTER,
+        )
+    }
+
     /** Shell-execute the current preview content as PL/SQL against
      *  PELL_DB_URL. Writes the in-memory buffer to a temp .sql file
      *  (no need to depend on disk save) and runs `./pell sql <tmp>` in

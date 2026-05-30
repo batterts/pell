@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.3.5</version>
+    <version>0.3.7</version>
 
     <description><![CDATA[
         IntelliJ support for the <b>pell</b> language — a statically-typed
@@ -64,6 +64,32 @@
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.3.7</h3>
+        <ul>
+          <li><b>Project settings (Settings → Tools → pell)</b> with
+              one knob today: <b>Target directory</b> (where the
+              lowered PL/SQL is written / read by <code>pell deploy</code>).
+              Default <code>plsql</code>; you can pick <code>sql</code>,
+              <code>built</code>, or anything else. Persisted per-project
+              in <code>.idea/pell.xml</code>. Setting is in place; the
+              IntelliJ flows that write output will pick it up in the
+              next iteration.</li>
+        </ul>
+        <h3>0.3.6</h3>
+        <ul>
+          <li><b>Caret sync between source and preview.</b> Click on
+              <code>pub fn greet(...)</code> in the .pell source and
+              the preview scrolls to <code>FUNCTION greet</code>.
+              Works for fn / record / type / error / aggregate / enum
+              / sealed declarations. Name-based mapping (no source-map
+              yet); good enough for most navigation.</li>
+          <li><b>.pell gutter menu trimmed.</b> Removed <code>Run pell
+              build</code> and <code>Run pell build → file</code> —
+              the split-editor preview already shows the lowered
+              PL/SQL live, so these were just noise. Menu is now:
+              exec, exec (dry-run), Open REPL, parse (debug),
+              tokens (debug).</li>
+        </ul>
         <h3>0.3.5</h3>
         <ul>
           <li><b>The .pell gutter icon is now a hammer (compile), not a
@@ -251,14 +277,26 @@
 
         <!-- Run-on-Oracle gutter icon for plain `.sql` files. Registered
              for both TEXT (Community fallback) and SQL (Ultimate's
-             Database plugin owns the language there). The contributor
-             gates internally on file extension. -->
+             Database plugin owns the language there). The two
+             registrations target DIFFERENT language ownerships of the
+             same file extension — only one fires per file based on
+             which language IntelliJ assigns to .sql. -->
         <runLineMarkerContributor
             language="TEXT"
             implementationClass="dev.pell.intellij.run.PellSqlRunLineMarkerContributor" />
         <runLineMarkerContributor
             language="SQL"
             implementationClass="dev.pell.intellij.run.PellSqlRunLineMarkerContributor" />
+
+        <!-- Project settings page (Settings → Tools → pell).
+             Lets the user choose the directory name where the lowered
+             PL/SQL is written. Backed by the per-project
+             PellSettings persistent state component. -->
+        <projectConfigurable
+            parentId="tools"
+            id="dev.pell.settings"
+            displayName="pell"
+            instance="dev.pell.intellij.settings.PellSettingsConfigurable" />
 
         <!-- Side-by-side pell ↔ PL/SQL split editor. Opens .pell files
              in a Markdown-style editor with the source on the left
