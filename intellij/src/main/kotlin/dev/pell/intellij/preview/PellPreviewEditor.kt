@@ -1,11 +1,21 @@
 package dev.pell.intellij.preview
 
+import com.intellij.icons.AllIcons
 import com.intellij.lang.Language
+import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.ActionPlaces
+import com.intellij.openapi.actionSystem.ActionUpdateThread
+import com.intellij.openapi.actionSystem.AnAction
+import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.EditorFactory
 import com.intellij.openapi.editor.colors.EditorColorsManager
 import com.intellij.openapi.editor.ex.EditorEx
 import com.intellij.openapi.editor.ex.util.LexerEditorHighlighter
+import com.intellij.openapi.editor.markup.GutterIconRenderer
+import com.intellij.openapi.editor.markup.HighlighterLayer
+import com.intellij.openapi.editor.markup.HighlighterTargetArea
+import com.intellij.openapi.editor.markup.RangeHighlighter
 import com.intellij.openapi.fileEditor.FileEditor
 import com.intellij.openapi.fileEditor.FileEditorLocation
 import com.intellij.openapi.fileEditor.FileEditorState
@@ -18,6 +28,8 @@ import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
 import java.awt.Color
 import java.beans.PropertyChangeListener
+import java.io.File
+import javax.swing.Icon
 import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JPanel
@@ -60,11 +72,18 @@ class PellPreviewEditor(
         isVisible = false
     }
 
+    // The gutter-icon highlighter that hangs off line 1 of a successful
+    // preview. Click → write doc to a temp file → open a terminal tab →
+    // run `./pell sql <tmpfile>` so the user sees the result inline.
+    private var runHighlighter: RangeHighlighter? = null
+
     init {
         viewer.isViewer = true
         viewer.setCaretEnabled(false)
         viewer.settings.isLineNumbersShown = true
-        viewer.settings.isLineMarkerAreaShown = false
+        // Show the gutter marker area so our Run-on-PELL_DB_URL icon
+        // has a visible home next to line 1.
+        viewer.settings.isLineMarkerAreaShown = true
         viewer.settings.isFoldingOutlineShown = true
         viewer.settings.isUseSoftWraps = false
         // Try to wire up SQL syntax highlighting via IntelliJ's
@@ -99,6 +118,48 @@ class PellPreviewEditor(
         }
         hasGoodCompile = true
         errorBannerPanel.isVisible = false
+        installRunGutterIcon()
+    }
+
+    /** Pin a green-play gutter icon on line 1 of the preview. Click it
+     *  to run the current PL/SQL against PELL_DB_URL via a terminal
+     *  tab. Removes any prior icon first so we don't stack them. */
+    private fun installRunGutterIcon() {
+        val mm = viewer.markupModel
+        runHighlighter?.let { mm.removeHighlighter(it) }
+        if (document.lineCount == 0) return
+        val end = document.getLineEndOffset(0)
+        val hl = mm.addRangeHighlighter(
+            0, end,
+            HighlighterLayer.FIRST,
+            null,
+            HighlighterTargetArea.EXACT_RANGE,
+        )
+        hl.gutterIconRenderer = RunGutterRenderer(this)
+        runHighlighter = hl
+    }
+
+    /** Shell-execute the current preview content as PL/SQL against
+     *  PELL_DB_URL. Writes the in-memory buffer to a temp .sql file
+     *  (no need to depend on disk save) and runs `./pell sql <tmp>` in
+     *  a fresh terminal tab so the user sees row counts and any
+     *  ORA-NNNNN errors next to the source. */
+    fun runOnPellDbUrl() {
+        val cwd = project.basePath ?: return
+        val tmp = File.createTempFile("pell-preview-", ".sql").also {
+            it.writeText(document.text)
+            it.deleteOnExit()
+        }
+        try {
+            val mgr = org.jetbrains.plugins.terminal.TerminalToolWindowManager.getInstance(project)
+            val tabName = "pell sql ${sourceFile.nameWithoutExtension}"
+            val widget = mgr.createShellWidget(cwd, tabName, true, true)
+            widget.sendCommandToExecute("./pell sql ${tmp.absolutePath}")
+        } catch (e: Throwable) {
+            // Terminal plugin unavailable — fall through silently.
+            // (Plugin.xml depends on the Terminal plugin so this shouldn't
+            // happen, but we don't want a stack trace in the UI.)
+        }
     }
 
     /** Surface a compile error WITHOUT clobbering the last successful
@@ -151,4 +212,23 @@ class PellPreviewEditor(
     override fun dispose() {
         editorFactory.releaseEditor(viewer)
     }
+}
+
+/** Gutter renderer for the "Run this PL/SQL on PELL_DB_URL" action.
+ *  Equality is identity-based so IntelliJ doesn't dedupe multiple
+ *  renderer instances across edits. */
+private class RunGutterRenderer(
+    private val preview: PellPreviewEditor,
+) : GutterIconRenderer() {
+    override fun getIcon(): Icon = AllIcons.RunConfigurations.TestState.Run
+    override fun getTooltipText(): String =
+        "Run this PL/SQL on \$PELL_DB_URL"
+    override fun isNavigateAction(): Boolean = true
+    override fun getClickAction(): AnAction =
+        object : AnAction("Run on \$PELL_DB_URL", null, AllIcons.RunConfigurations.TestState.Run) {
+            override fun getActionUpdateThread() = ActionUpdateThread.BGT
+            override fun actionPerformed(e: AnActionEvent) = preview.runOnPellDbUrl()
+        }
+    override fun equals(other: Any?): Boolean = other === this
+    override fun hashCode(): Int = System.identityHashCode(this)
 }

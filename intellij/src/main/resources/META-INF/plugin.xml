@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.3.3</version>
+    <version>0.3.4</version>
 
     <description><![CDATA[
         IntelliJ support for the <b>pell</b> language — a statically-typed
@@ -64,6 +64,19 @@
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.3.4</h3>
+        <ul>
+          <li><b>Run-on-PELL_DB_URL gutter button in the PL/SQL preview
+              pane.</b> The split editor's right-hand preview now has a
+              green-play gutter icon on line 1. Click it to install the
+              currently-displayed PL/SQL against the connected database
+              — no need to save the .pell, no need to open a terminal.
+              The plugin writes the in-memory preview to a temp .sql,
+              opens a terminal tab, and runs <code>./pell sql</code>
+              with the output streaming inline. Reinstalls on every
+              successful re-compile, so you always run the latest
+              lowering.</li>
+        </ul>
         <h3>0.3.3</h3>
         <ul>
           <li>Clears all Marketplace verifier warnings: replaces three
