@@ -469,7 +469,12 @@ def test_list_literal_and_loop():
     assert "l_xs(1) := 1;" in sql
     assert "l_xs(2) := 3;" in sql
     assert "l_xs(3) := 5;" in sql
-    assert "FOR i_x IN l_xs.FIRST .. l_xs.LAST LOOP" in sql
+    # Iteration uses FIRST/NEXT (safe on empty + sparse arrays) — the
+    # FOR..FIRST..LAST form raises VALUE_ERROR when the list is empty
+    # because Oracle won't accept NULL bounds.
+    assert "i_x := l_xs.FIRST;" in sql
+    assert "WHILE i_x IS NOT NULL LOOP" in sql
+    assert "i_x := l_xs.NEXT(i_x);" in sql
     assert "insert into t(n) values (l_x_iter)" in sql
 
 

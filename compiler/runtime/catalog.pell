@@ -284,6 +284,80 @@ pub fn body_of(name: text) -> list<text> {
 }
 
 // ---------------------------------------------------------------------------
+// Dependency graphs — indented text trees, ready for `for line in ... { p(line); }`
+//
+// Oracle's CONNECT BY does the recursion (with NOCYCLE protection) so we
+// just LPAD the level and let the user pipe into `p()`. Output looks like:
+//
+//   ORDERS
+//     CUSTOMERS ->ORDERS (customer_id)
+//     PRODUCTS ->ORDERS (product_id)
+//       CATEGORIES ->PRODUCTS (category_id)
+// ---------------------------------------------------------------------------
+
+pub fn fk_tree(table: text) -> list<text> {
+    // Walks foreign-key references downstream from `table`.
+    // Each line: `<from> -><to> (<column>)` with 2-space indents per level.
+    return sql! {
+        select lpad(' ', 2 * (level - 1)) || c.table_name
+               || ' -> ' || rc.table_name
+               || ' (' || cc.column_name || ')'
+          from user_constraints c
+          join user_cons_columns cc on cc.constraint_name = c.constraint_name
+          join user_constraints rc on rc.constraint_name = c.r_constraint_name
+         where c.constraint_type = 'R'
+         start with c.table_name = upper(:table)
+         connect by nocycle prior rc.table_name = c.table_name
+         order siblings by c.table_name
+    }.collect();
+}
+
+pub fn deps_tree(name: text) -> list<text> {
+    // Walks PL/SQL object dependencies downstream from `name`.
+    // Each line: `<object_name> (<type>)`. Useful for "what does my
+    // package touch?"
+    return sql! {
+        select lpad(' ', 2 * (level - 1)) || referenced_name
+               || ' (' || referenced_type || ')'
+          from user_dependencies
+         start with name = upper(:name)
+         connect by nocycle prior referenced_name = name
+         order siblings by referenced_name
+    }.collect();
+}
+
+pub fn dependents_tree(name: text) -> list<text> {
+    // The mirror of deps_tree — what depends on `name`, transitively.
+    // Useful for "what breaks if I drop this?"
+    return sql! {
+        select lpad(' ', 2 * (level - 1)) || d.name
+               || ' (' || d.type || ')'
+          from all_dependencies d
+         where d.referenced_owner = user
+         start with d.referenced_name = upper(:name)
+         connect by nocycle d.referenced_name = prior d.name
+         order siblings by d.name
+    }.collect();
+}
+
+pub fn fk_mermaid(table: text) -> list<text> {
+    // Same data as fk_tree but emits Mermaid `flowchart LR` syntax.
+    // Paste the output into any Mermaid renderer (GitHub markdown, etc.).
+    return sql! {
+        select 'flowchart LR' as line from dual
+        union all
+        select '  ' || c.table_name || ' -->|' || cc.column_name
+               || '| ' || rc.table_name
+          from user_constraints c
+          join user_cons_columns cc on cc.constraint_name = c.constraint_name
+          join user_constraints rc on rc.constraint_name = c.r_constraint_name
+         where c.constraint_type = 'R'
+           and (c.table_name = upper(:table) or rc.table_name = upper(:table))
+         order by 1
+    }.collect();
+}
+
+// ---------------------------------------------------------------------------
 // Dependencies — `owner.name` strings
 // ---------------------------------------------------------------------------
 

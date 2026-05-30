@@ -3387,19 +3387,21 @@ class Emitter:
                     elem_sql = f"{pkg}.t_{_safe(elem_pell.lower())}"
                 else:
                     elem_sql = self._lt(A.NamedType(loc=s.iterable.loc, name=elem_pell))
-            # Use an integer loop variable and bind the loop name to list_local(i)
+            # Walk via FIRST/NEXT so empty arrays (FIRST returns NULL)
+            # and sparse arrays both work. The naive
+            # `FOR i IN list.FIRST .. list.LAST LOOP` raises VALUE_ERROR
+            # on an empty list because Oracle won't accept NULL bounds.
             idx = f"i_{s.var_name}"
-            out = [f"{indent}FOR {idx} IN {list_local}.FIRST .. {list_local}.LAST LOOP"]
-            # Make the loop variable reference the array element inside the body
-            # by introducing a per-iteration local. Cheapest: declare it once at
-            # the function level and reassign each iteration.
+            self._decl(f"{idx} PLS_INTEGER;")
+            # Per-iteration element local, populated each loop pass.
             shadow = local_name(s.var_name) + "_iter"
             self._decl(f"{shadow} {elem_sql};")
-            out.append(f"{indent}  {shadow} := {list_local}({idx});")
-            # Push a shadow scope: references to `var_name` inside the body
-            # resolve to `shadow` (via _loop_vars + a dedicated map).
+            out = [
+                f"{indent}{idx} := {list_local}.FIRST;",
+                f"{indent}WHILE {idx} IS NOT NULL LOOP",
+                f"{indent}  {shadow} := {list_local}({idx});",
+            ]
             self._loop_vars.append({s.var_name})
-            # We map the loop var name to the shadow via an override stack.
             prev_override = self._loop_var_override.get(s.var_name)
             self._loop_var_override[s.var_name] = shadow
             for stmt in s.body:
@@ -3409,6 +3411,7 @@ class Emitter:
                 del self._loop_var_override[s.var_name]
             else:
                 self._loop_var_override[s.var_name] = prev_override
+            out.append(f"{indent}  {idx} := {list_local}.NEXT({idx});")
             out.append(f"{indent}END LOOP;")
             return out
         # for i in range expressions — generic numeric for
