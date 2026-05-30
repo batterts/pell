@@ -4,6 +4,23 @@ A statically-typed surface language with first-class tooling, designed to
 fix the worst ergonomic pain points of PL/SQL while still emitting
 PL/SQL you can deploy to a real Oracle 23 database.
 
+## IntelliJ plugin
+
+Available on JetBrains Marketplace — split-editor with live PL/SQL
+preview, gutter build/run buttons, REPL launcher, new-project wizard.
+
+<!-- The widget scripts only render on the docs site, not on GitHub —
+     GitHub strips <script> tags from rendered READMEs. -->
+<div id="pell-jetbrains-card"></div>
+<div id="pell-jetbrains-install"></div>
+<script src="https://plugins.jetbrains.com/assets/scripts/mp-widget.js"></script>
+<script>
+  MarketplaceWidget.setupMarketplaceWidget('card',    31994, "#pell-jetbrains-card");
+  MarketplaceWidget.setupMarketplaceWidget('install', 31994, "#pell-jetbrains-install");
+</script>
+
+📦 **Direct link:** [plugins.jetbrains.com/plugin/31994-pell](https://plugins.jetbrains.com/plugin/31994-pell)
+
 ## Status
 
 - **[design.md](./design.md)** — the language spec (1900+ lines).

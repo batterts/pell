@@ -12,6 +12,24 @@ A statically-typed surface language whose only backend target is Oracle
 PL/SQL. It exists to fix the worst readability and ergonomics pain
 points of PL/SQL without losing access to a real Oracle database.
 
+## Get the IntelliJ plugin
+
+<div id="pell-jetbrains-card"></div>
+
+<div id="pell-jetbrains-install"></div>
+
+<script src="https://plugins.jetbrains.com/assets/scripts/mp-widget.js"></script>
+<script>
+  MarketplaceWidget.setupMarketplaceWidget('card',    31994, "#pell-jetbrains-card");
+  MarketplaceWidget.setupMarketplaceWidget('install', 31994, "#pell-jetbrains-install");
+</script>
+
+Split-editor with live PL/SQL preview, gutter build/run buttons, REPL
+launcher, new-project wizard, and full LSP-backed completion/diagnostics.
+Direct: [plugins.jetbrains.com/plugin/31994-pell](https://plugins.jetbrains.com/plugin/31994-pell).
+
+## Sample
+
 ```pell
 module greet;
 
