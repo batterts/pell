@@ -58,6 +58,21 @@ intellijPlatform {
             ide("IC", "2024.3")
         }
     }
+    // Publishing to JetBrains Marketplace.
+    //   ./gradlew publishPlugin
+    // Requires:
+    //   JETBRAINS_MARKETPLACE_TOKEN env var (get one from
+    //   https://plugins.jetbrains.com/author/me/tokens).
+    // The publishPlugin task signs the bundle, uploads via the
+    // Marketplace REST API, and bumps the version row on plugins.jetbrains.com.
+    publishing {
+        token = providers.environmentVariable("JETBRAINS_MARKETPLACE_TOKEN")
+        // Optional channel — leave empty for stable. Set to "eap" or
+        // "beta" if you want pre-release distribution.
+        channels = providers.environmentVariable("JETBRAINS_MARKETPLACE_CHANNEL")
+            .map { listOf(it) }
+            .orElse(listOf("default"))
+    }
 }
 
 kotlin {
