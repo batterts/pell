@@ -405,11 +405,16 @@ def on_completion(params: lsp.CompletionParams) -> lsp.CompletionList:
     if params.position.line >= len(lines):
         return lsp.CompletionList(is_incomplete=False, items=[])
     line = lines[params.position.line][: params.position.character]
-    items = list(_completions_for_line_prefix(line, src, uri))
+    items = list(_completions_for_line_prefix(
+        line, src, uri, params.position.line, params.position.character,
+    ))
     return lsp.CompletionList(is_incomplete=False, items=items)
 
 
-def _completions_for_line_prefix(line: str, src: str, uri: str) -> list[lsp.CompletionItem]:
+def _completions_for_line_prefix(
+    line: str, src: str, uri: str,
+    line_no: int = 0, char_no: int = 0,
+) -> list[lsp.CompletionItem]:
     # `@` context — annotation list
     if line.rstrip().endswith("@"):
         return [
@@ -424,22 +429,38 @@ def _completions_for_line_prefix(line: str, src: str, uri: str) -> list[lsp.Comp
             for name, detail in ANNOTATIONS
         ]
 
-    # `.` context — generic method menu (we don't yet type-check the receiver)
-    if line.rstrip().endswith("."):
-        # If the immediate context is `bulk.`, use the bulk methods
-        if re.search(r"\bbulk\s*\.\s*$", line):
+    # `.` context — generic method menu (we don't yet type-check the
+    # receiver). Matches both "trailing dot" and "dot + partial word"
+    # (the latter happens when the IDE re-queries as the user types
+    # more letters). When some chars have already been typed after the
+    # `.`, we emit an explicit text_edit range so the client knows to
+    # REPLACE just those chars, not guess at the word boundary (which
+    # can run all the way back to file start if the receiver contains
+    # underscores or other word-chars the client doesn't recognize).
+    dot_match = re.search(r"\.(\w*)$", line)
+    if dot_match is not None:
+        # If the immediate context is `bulk.<chars>`, use the bulk methods
+        if re.search(r"\bbulk\s*\.\w*$", line):
             methods = METHODS_ON_BULK
         else:
             methods = (
                 METHODS_ON_SQL_READ + METHODS_ON_RESULT + METHODS_ON_DML
                 + METHODS_ON_LIST + METHODS_ON_TEXT + METHODS_ON_DATE
             )
+        # The replacement range covers the partial word AFTER the dot.
+        partial_len = len(dot_match.group(1))
+        replace_start = lsp.Position(line=line_no, character=char_no - partial_len)
+        replace_end = lsp.Position(line=line_no, character=char_no)
         return [
             lsp.CompletionItem(
                 label=name + "()",
                 kind=lsp.CompletionItemKind.Method,
                 detail=detail,
-                insert_text=f"{name}()",
+                filter_text=name,  # so the IDE filters on the bare name as user types
+                text_edit=lsp.TextEdit(
+                    range=lsp.Range(start=replace_start, end=replace_end),
+                    new_text=f"{name}()",
+                ),
             )
             for name, detail in methods
         ]
