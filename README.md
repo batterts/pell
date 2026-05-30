@@ -6,20 +6,18 @@ PL/SQL you can deploy to a real Oracle 23 database.
 
 ## IntelliJ plugin
 
+[![JetBrains Plugin Version](https://img.shields.io/jetbrains/plugin/v/31994?label=plugin&color=blue)](https://plugins.jetbrains.com/plugin/31994-pell)
+[![JetBrains Plugin Downloads](https://img.shields.io/jetbrains/plugin/d/31994?color=blue)](https://plugins.jetbrains.com/plugin/31994-pell)
+[![JetBrains Plugin Rating](https://img.shields.io/jetbrains/plugin/r/rating/31994?color=blue)](https://plugins.jetbrains.com/plugin/31994-pell)
+
 Available on JetBrains Marketplace — split-editor with live PL/SQL
 preview, gutter build/run buttons, REPL launcher, new-project wizard.
 
-<!-- The widget scripts only render on the docs site, not on GitHub —
-     GitHub strips <script> tags from rendered READMEs. -->
-<div id="pell-jetbrains-card"></div>
-<div id="pell-jetbrains-install"></div>
-<script src="https://plugins.jetbrains.com/assets/scripts/mp-widget.js"></script>
-<script>
-  MarketplaceWidget.setupMarketplaceWidget('card',    31994, "#pell-jetbrains-card");
-  MarketplaceWidget.setupMarketplaceWidget('install', 31994, "#pell-jetbrains-install");
-</script>
+📦 **[plugins.jetbrains.com/plugin/31994-pell](https://plugins.jetbrains.com/plugin/31994-pell)**
 
-📦 **Direct link:** [plugins.jetbrains.com/plugin/31994-pell](https://plugins.jetbrains.com/plugin/31994-pell)
+> The rich Marketplace card with one-click install lives on the docs
+> site instead — see https://batterts.github.io/pell — because GitHub
+> sandboxes `<script>` and `<iframe>` tags for security.
 
 ## Status
 
