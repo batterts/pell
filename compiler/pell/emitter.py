@@ -2407,35 +2407,59 @@ class Emitter:
         """Emit auto-vivifying `.put()` calls for a dotted path like
         `"user.address.city"`.
 
-        For each intermediate segment, checks `.has()` and creates an
-        empty `JSON_OBJECT_T()` if missing, then navigates via
-        `.get_object()`. The final segment does the actual `.put()`.
+        Oracle's `JSON_OBJECT_T.get_object(key)` returns a value-typed
+        copy of the inner object, not a reference. So
+        `obj.get_object('a').put('b', v)` mutates a copy that's never
+        written back — and Oracle catches that as PLS-00363 "cannot
+        be used as an assignment target". The fix: step through the
+        path with named temps, mutate the deepest one, then write
+        each level back up to its parent in reverse order.
 
         Example for path "a.b.c" with value v:
             IF NOT obj.has('a') THEN obj.put('a', JSON_OBJECT_T()); END IF;
-            IF NOT obj.get_object('a').has('b') THEN
-              obj.get_object('a').put('b', JSON_OBJECT_T());
+            l_pell_jobj_1 := obj.get_object('a');
+            IF NOT l_pell_jobj_1.has('b') THEN
+              l_pell_jobj_1.put('b', JSON_OBJECT_T());
             END IF;
-            obj.get_object('a').get_object('b').put('c', v);
+            l_pell_jobj_2 := l_pell_jobj_1.get_object('b');
+            l_pell_jobj_2.put('c', v);
+            -- write back, deepest first
+            l_pell_jobj_1.put('b', l_pell_jobj_2);
+            obj.put('a', l_pell_jobj_1);
         """
         parts = path.split(".")
+        # Single-segment paths don't need any nav — just put.
+        if len(parts) == 1:
+            return [f"{indent}{obj_var}.put({_sql_string(parts[0])}, {val_sql});"]
+
         lines: list[str] = []
+        # Walk from the top down, allocating one temp per intermediate
+        # level. Track (parent, key, child) for the writeback pass.
+        cur_var = obj_var
+        write_back: list[tuple[str, str, str]] = []
         for i in range(len(parts) - 1):
-            # Build the accessor chain to reach the parent at depth i
-            parent = obj_var
-            for j in range(i):
-                parent = f"{parent}.get_object({_sql_string(parts[j])})"
             key = _sql_string(parts[i])
+            # Ensure the key exists at the current level
             lines.extend([
-                f"{indent}IF NOT {parent}.has({key}) THEN",
-                f"{indent}  {parent}.put({key}, JSON_OBJECT_T());",
+                f"{indent}IF NOT {cur_var}.has({key}) THEN",
+                f"{indent}  {cur_var}.put({key}, JSON_OBJECT_T());",
                 f"{indent}END IF;",
             ])
-        # Final put at the deepest level
-        parent = obj_var
-        for j in range(len(parts) - 1):
-            parent = f"{parent}.get_object({_sql_string(parts[j])})"
-        lines.append(f"{indent}{parent}.put({_sql_string(parts[-1])}, {val_sql});")
+            # Fetch the child into a temp (by value — must write back later)
+            tmp = f"l_pell_jobj_{self._sql_var_counter}"
+            self._sql_var_counter += 1
+            self._decl(f"{tmp} JSON_OBJECT_T;")
+            lines.append(f"{indent}{tmp} := {cur_var}.get_object({key});")
+            write_back.append((cur_var, key, tmp))
+            cur_var = tmp
+        # Put the leaf value on the deepest temp
+        lines.append(
+            f"{indent}{cur_var}.put({_sql_string(parts[-1])}, {val_sql});"
+        )
+        # Write back deepest-first so each parent gets the freshly-
+        # mutated child reflected in its slot.
+        for parent_var, key, child_var in reversed(write_back):
+            lines.append(f"{indent}{parent_var}.put({key}, {child_var});")
         return lines
 
     def _json_chain_path_text(self, expr: A.Expr, loc: A.Loc) -> str:
