@@ -50,8 +50,13 @@ pub fn list_totals() -> list<RegionTotals> {
 // Requires `unsafe` for the same reason exec_dyn does — and the `@touches`
 // pinning cursor keeps ALL_DEPENDENCIES accurate even with the SQL hidden
 // inside a quoted string.
+//
+// Note the `cursor<dyn>` return — the column set isn't known at compile
+// time (it depends on what regions show up in `pivot_orders`), so the
+// caller iterates via DBMS_SQL.DESCRIBE_COLUMNS. See 29_dyn_cursor.pell
+// for the consumer side.
 @touches(pivot_orders)
-pub unsafe fn region_sales_dyn() -> cursor<text> {
+pub unsafe fn region_sales_dyn() -> cursor<dyn> {
     return pivot::sum_dyn(
         source = sql!{ select product, region, sales from pivot_orders },
         rows   = product,

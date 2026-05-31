@@ -3603,13 +3603,25 @@ class Emitter:
         """Lower `for row in cursor_returning_call() { ... }` into an
         OPEN / FETCH-loop / CLOSE block.
 
-        The cursor handle is held in a synthesized local, the row
-        temp is typed via the element-type ref, and the loop body
-        sees the user's loop var name as if it were the row local.
-        Both temps are declared at the function scope (not in a
-        nested DECLARE) so nested loops / breaks inside the body
-        Just Work.
+        Two flavors:
+
+        * `cursor<dyn>` (the receiver's element is a NamedType "dyn")
+          → DBMS_SQL.TO_CURSOR_NUMBER + DESCRIBE_COLUMNS +
+          per-row formatted text. Handles any row shape — variable
+          column count, mixed types — at the cost of a CHAR
+          representation. Each row's `row_var` is built as
+          `col1=val1 | col2=val2 | ...`. Use for dynamic pivots and
+          anything where the shape isn't known at compile time.
+
+        * Anything else (cursor<text>, cursor<number>, cursor<Record>,
+          ...) → typed single-column FETCH INTO. Cheaper, but the
+          declared element type must match the actual row shape or
+          Oracle throws ORA-00932.
         """
+        # Dynamic-shape path — uses DBMS_SQL to introspect the cursor.
+        if (isinstance(elem_type, A.NamedType) and elem_type.name == "dyn"):
+            return self._emit_dyn_cursor_iteration(s, indent)
+
         self._sql_var_counter += 1
         cur_var = f"l_pell_cur_{self._sql_var_counter}"
         row_var = f"l_pell_row_{self._sql_var_counter}"
@@ -3648,6 +3660,113 @@ class Emitter:
 
         out.append(f"{indent}END LOOP;")
         out.append(f"{indent}CLOSE {cur_var};")
+        return out
+
+    def _emit_dyn_cursor_iteration(
+        self, s: A.ForStmt, indent: str,
+    ) -> list[str]:
+        """Lower `for row in fn_returning_cursor_dyn() { ... }` into a
+        DBMS_SQL.DESCRIBE_COLUMNS-based loop. Each row is built as
+        a single VARCHAR2 in `col1=val1 | col2=val2 | ...` form so
+        the user's `p(row)` / `\\sql` output is readable.
+
+        Type handling at fetch time:
+          NUMBER (col_type=2)              → defined into l_num, TO_CHAR'd
+          DATE (12)                         → l_dt, YYYY-MM-DD HH24:MI:SS
+          TIMESTAMP / TIMESTAMP TZ (180/181/231) → l_ts, …FF6
+          everything else                   → l_str (VARCHAR2(4000))
+
+        NULLs render as `(null)`.
+
+        Requires EXECUTE on DBMS_SQL — usually granted to the public
+        role, but a DBA can lock it down. We surface the runtime
+        error if so.
+        """
+        self._sql_var_counter += 1
+        cur_var = f"l_pell_cur_{self._sql_var_counter}"
+        dyn_cur = f"l_pell_dyn_cur_{self._sql_var_counter}"
+        desc_var = f"l_pell_desc_{self._sql_var_counter}"
+        col_cnt = f"l_pell_col_cnt_{self._sql_var_counter}"
+        idx_var = f"l_pell_idx_{self._sql_var_counter}"
+        row_var = f"l_pell_row_{self._sql_var_counter}"
+        # Per-type fetch buffers — declared once, reused per column
+        buf_str = f"l_pell_buf_str_{self._sql_var_counter}"
+        buf_num = f"l_pell_buf_num_{self._sql_var_counter}"
+        buf_dt = f"l_pell_buf_dt_{self._sql_var_counter}"
+        buf_ts = f"l_pell_buf_ts_{self._sql_var_counter}"
+        # Per-column rendered value
+        col_val = f"l_pell_col_val_{self._sql_var_counter}"
+
+        self._decl(f"{cur_var} SYS_REFCURSOR;")
+        self._decl(f"{dyn_cur} PLS_INTEGER;")
+        self._decl(f"{col_cnt} PLS_INTEGER;")
+        self._decl(f"{desc_var} DBMS_SQL.DESC_TAB;")
+        self._decl(f"{idx_var} PLS_INTEGER;")
+        self._decl(f"{row_var} VARCHAR2(32767);")
+        self._decl(f"{buf_str} VARCHAR2(4000);")
+        self._decl(f"{buf_num} NUMBER;")
+        self._decl(f"{buf_dt} DATE;")
+        self._decl(f"{buf_ts} TIMESTAMP;")
+        self._decl(f"{col_val} VARCHAR2(4000);")
+
+        call_code = self._emit_expr(s.iterable)
+        out = [
+            f"{indent}{cur_var} := {call_code};",
+            f"{indent}{dyn_cur} := DBMS_SQL.TO_CURSOR_NUMBER({cur_var});",
+            f"{indent}DBMS_SQL.DESCRIBE_COLUMNS({dyn_cur}, {col_cnt}, {desc_var});",
+            # Define each column based on its native type.
+            f"{indent}FOR {idx_var} IN 1 .. {col_cnt} LOOP",
+            f"{indent}  IF {desc_var}({idx_var}).col_type = 2 THEN",
+            f"{indent}    DBMS_SQL.DEFINE_COLUMN({dyn_cur}, {idx_var}, {buf_num});",
+            f"{indent}  ELSIF {desc_var}({idx_var}).col_type = 12 THEN",
+            f"{indent}    DBMS_SQL.DEFINE_COLUMN({dyn_cur}, {idx_var}, {buf_dt});",
+            f"{indent}  ELSIF {desc_var}({idx_var}).col_type IN (180, 181, 231) THEN",
+            f"{indent}    DBMS_SQL.DEFINE_COLUMN({dyn_cur}, {idx_var}, {buf_ts});",
+            f"{indent}  ELSE",
+            f"{indent}    DBMS_SQL.DEFINE_COLUMN({dyn_cur}, {idx_var}, {buf_str}, 4000);",
+            f"{indent}  END IF;",
+            f"{indent}END LOOP;",
+            # Fetch loop.
+            f"{indent}WHILE DBMS_SQL.FETCH_ROWS({dyn_cur}) > 0 LOOP",
+            f"{indent}  {row_var} := NULL;",
+            f"{indent}  FOR {idx_var} IN 1 .. {col_cnt} LOOP",
+            f"{indent}    IF {desc_var}({idx_var}).col_type = 2 THEN",
+            f"{indent}      DBMS_SQL.COLUMN_VALUE({dyn_cur}, {idx_var}, {buf_num});",
+            f"{indent}      {col_val} := TO_CHAR({buf_num});",
+            f"{indent}    ELSIF {desc_var}({idx_var}).col_type = 12 THEN",
+            f"{indent}      DBMS_SQL.COLUMN_VALUE({dyn_cur}, {idx_var}, {buf_dt});",
+            f"{indent}      {col_val} := TO_CHAR({buf_dt}, 'YYYY-MM-DD HH24:MI:SS');",
+            f"{indent}    ELSIF {desc_var}({idx_var}).col_type IN (180, 181, 231) THEN",
+            f"{indent}      DBMS_SQL.COLUMN_VALUE({dyn_cur}, {idx_var}, {buf_ts});",
+            f"{indent}      {col_val} := TO_CHAR({buf_ts}, 'YYYY-MM-DD HH24:MI:SS.FF6');",
+            f"{indent}    ELSE",
+            f"{indent}      DBMS_SQL.COLUMN_VALUE({dyn_cur}, {idx_var}, {buf_str});",
+            f"{indent}      {col_val} := {buf_str};",
+            f"{indent}    END IF;",
+            f"{indent}    IF {row_var} IS NOT NULL THEN {row_var} := {row_var} || ' | '; END IF;",
+            f"{indent}    {row_var} := {row_var} || {desc_var}({idx_var}).col_name || '=' || NVL({col_val}, '(null)');",
+            f"{indent}  END LOOP;",
+        ]
+        # Body — the user's `row` now resolves to `row_var` (a VARCHAR2).
+        self._loop_vars.append({s.var_name})
+        prev_override = self._loop_var_override.get(s.var_name)
+        self._loop_var_override[s.var_name] = row_var
+        prev_type = self._loop_var_types.get(s.var_name)
+        self._loop_var_types[s.var_name] = "text"
+        for stmt in s.body:
+            out.extend(self._emit_stmt(stmt, indent + "  "))
+        self._loop_vars.pop()
+        if prev_override is None:
+            del self._loop_var_override[s.var_name]
+        else:
+            self._loop_var_override[s.var_name] = prev_override
+        if prev_type is None:
+            self._loop_var_types.pop(s.var_name, None)
+        else:
+            self._loop_var_types[s.var_name] = prev_type
+
+        out.append(f"{indent}END LOOP;")
+        out.append(f"{indent}DBMS_SQL.CLOSE_CURSOR({dyn_cur});")
         return out
 
     def _emit_forall(self, s: A.ForallStmt, indent: str) -> list[str]:

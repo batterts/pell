@@ -2275,7 +2275,7 @@ explicit declaration keeps the storage layout visible at the use site.
 
 ```pell
 @touches(orders)
-pub unsafe fn region_sales_dyn() -> cursor<text> {
+pub unsafe fn region_sales_dyn() -> cursor<dyn> {
     return pivot::sum_dyn(
         source = sql!{ select product, region, sales from orders },
         rows   = product,
@@ -2284,6 +2284,18 @@ pub unsafe fn region_sales_dyn() -> cursor<text> {
     );
 }
 ```
+
+`cursor<dyn>` is pell's marker for "the row shape isn't known at compile
+time." The caller's `for row in region_sales_dyn() { … }` lowers via
+`DBMS_SQL.DESCRIBE_COLUMNS`, walking columns positionally and rendering
+each row as `col1=val1 | col2=val2 | …` (NULLs as `(null)`). Type
+fidelity is lost — every value is `TO_CHAR`'d — but the alternative
+(hand-rolled `DBMS_SQL` plumbing) is what we replaced. For shapes you
+*do* know at compile time, declare a `record` and use `cursor<MyRow>`
+instead; that path uses a typed `FETCH INTO` with full type preservation.
+
+Requires EXECUTE on `SYS.DBMS_SQL` — usually granted to PUBLIC, but a
+locked-down schema may need an explicit grant.
 
 Lowers to a two-step PL/SQL block:
 

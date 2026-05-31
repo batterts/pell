@@ -1,0 +1,37 @@
+module dyn_demo;
+
+// ---------------------------------------------------------------------------
+// `cursor<dyn>` — a cursor whose row shape is unknown at compile time.
+//
+// The pell for-loop lowers via `DBMS_SQL.DESCRIBE_COLUMNS` so any column
+// count and any column types work. Each row arrives in the loop body as a
+// single text formatted "col1=val1 | col2=val2 | ..." (NULLs render as
+// `(null)`).
+//
+// Use for:
+//   - dynamic pivots (column set varies per query)
+//   - cursors returned from PL/SQL you don't control
+//   - REPL exploration ("what's in this thing?")
+//
+// Cost: column values are coerced to text via TO_CHAR, so you lose type
+// fidelity. For typed access, declare a Record and use `cursor<MyRow>`.
+//
+// Requires: EXECUTE on DBMS_SQL (usually GRANTed to PUBLIC).
+// ---------------------------------------------------------------------------
+
+@touches(pivot_orders)
+pub unsafe fn region_sales() -> cursor<dyn> {
+  return pivot::sum_dyn(
+    source = sql! { select product, region, sales from pivot_orders },
+    rows   = product,
+    col    = region,
+    value  = sales,
+  );
+}
+
+// Iterate without knowing the column set up front.
+pub fn dump() {
+  for row in region_sales() {
+    p("{row}");
+  }
+}
