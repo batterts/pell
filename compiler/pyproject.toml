@@ -1,16 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "pell"
-version = "0.0.1"
-description = "MVP transpiler from pell to Oracle PL/SQL 23"
+version = "0.1.0"
+description = "A statically-typed language that compiles to Oracle PL/SQL 19c / 23ai"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Shaun Batterton", email = "shaun.batterton@gmail.com" },
+]
+keywords = ["plsql", "pl/sql", "oracle", "transpiler", "compiler",
+            "static-typing", "database", "oracle-23ai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: Software Development :: Code Generators",
+]
+
+[project.urls]
+Homepage = "https://batterts.github.io/pell"
+Repository = "https://github.com/batterts/pell"
+Issues = "https://github.com/batterts/pell/issues"
+Documentation = "https://batterts.github.io/pell"
+
+[project.scripts]
+# Installs a `pell` command on the user's PATH, equivalent to the
+# repo's shim script but pointed at the installed package.
+pell = "pell.cli:main"
 
 [project.optional-dependencies]
-# `pell exec` and `pell repl` need a driver and a TUI. Compiler stays
-# dependency-free; install with `pip install -e .[repl]` to enable.
+# `pell exec`, `pell repl`, `pell sql`, and `pell deploy` need a
+# driver and a TUI. The compiler core itself stays dependency-free.
+# Install with `pip install pell[repl]` to enable.
 repl = [
     "oracledb>=2.0",
     "prompt_toolkit>=3.0",
 ]
+
+[tool.setuptools.packages.find]
+include = ["pell*"]
+exclude = ["tests*", "examples*", "benchmarks*", "runtime*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

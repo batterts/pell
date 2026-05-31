@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.3.12</version>
+    <version>0.3.13</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,22 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.3.13</h3>
+        <ul>
+          <li><b>One-click pell install + first-launch detection.</b>
+              Project open now probes for a working <code>pell</code>
+              CLI on <code>$PELL_HOME</code>, the project shim, and
+              <code>$PATH</code>. If none is found, a friendly
+              notification surfaces with an "Install pell" button
+              that jumps to Settings → Tools → pell, where the CLI
+              status row + an Install button live.</li>
+          <li>The Install button runs
+              <code>pip install --user "pell[repl]"</code> in a
+              background task and notifies on success / failure.
+              On macOS / Linux this leaves <code>pell</code> in
+              <code>~/.local/bin</code> (Python user-base) — restart
+              the IDE after install so the updated PATH is picked up.</li>
+        </ul>
         <h3>0.3.12</h3>
         <ul>
           <li><b>Rewritten Marketplace description</b> — opens with a
@@ -493,6 +509,12 @@ END employees;
             id="dev.pell.settings"
             displayName="pell"
             instance="dev.pell.intellij.settings.PellSettingsConfigurable" />
+
+        <!-- First-launch detection: on project open, probe for a working
+             pell CLI. If missing, surface a friendly install nag with a
+             button that jumps to Settings → Tools → pell. -->
+        <postStartupActivity
+            implementation="dev.pell.intellij.settings.PellFirstLaunchActivity" />
 
         <!-- Side-by-side pell ↔ PL/SQL split editor. Opens .pell files
              in a Markdown-style editor with the source on the left
