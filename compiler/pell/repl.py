@@ -42,6 +42,8 @@ slash commands:
   \\save <file>     dump current session defs to a .pell file
   \\load <file>     append a .pell file's defs into the session
   \\sql <stmt>      run one raw SQL statement and print results
+  \\exec <block>    run a PL/SQL anon block (BEGIN ... END;) and
+                   print DBMS_OUTPUT — multi-line, blank line or `/` submits
   \\reset           clear all accumulated defs + variables
   \\show            print the anon block that would run on the next cell
   \\vars            list all persisted variables with types and values
@@ -166,7 +168,7 @@ class PellCompleter(Completer):
     })
     _SLASH_COMMANDS = (
         "\\help", "\\quit", "\\reset", "\\show", "\\vars", "\\defs",
-        "\\state", "\\load ", "\\save ", "\\sql ", "\\connect ",
+        "\\state", "\\load ", "\\save ", "\\sql ", "\\exec ", "\\connect ",
     )
 
     def __init__(self, repl: "Repl") -> None:
@@ -477,7 +479,16 @@ class Repl:
                 return None
             lines.append(line)
             # Slash commands submit on the first line (single-line by design).
+            # Exception: `\exec` opens a multi-line anon block — terminate on
+            # blank line (handled above) or a line that's just `/` (sqlplus
+            # muscle memory).
             if len(lines) == 1 and line.lstrip().startswith("\\"):
+                head = line.lstrip().split(None, 1)[0]
+                if head != "\\exec":
+                    break
+            elif lines and line.strip() == "/":
+                # Bare `/` mid-block also submits.
+                lines.pop()
                 break
         return "\n".join(lines)
 
@@ -983,6 +994,13 @@ class Repl:
                 return None
             self._run_raw_sql(arg)
             return None
+        if cmd == "\\exec":
+            if not arg.strip():
+                print("  usage: \\exec BEGIN ... END;   (multi-line ok — "
+                      "blank line or `/` submits)", file=sys.stderr)
+                return None
+            self._run_anon_block(arg)
+            return None
         if cmd == "\\connect":
             self._reconnect(arg.strip() or None)
             return None
@@ -1030,8 +1048,14 @@ class Repl:
         if self.conn is None:
             print("  ! no connection", file=sys.stderr)
             return
+        head = sql.lstrip().split(None, 1)[0].lower() if sql.strip() else ""
+        # `\sql BEGIN …` and `\sql DECLARE …` are PL/SQL anon blocks —
+        # route to the anon-block path so DBMS_OUTPUT is captured and
+        # the trailing `END;` isn't mangled by the SELECT/DML stripper.
+        if head in ("begin", "declare"):
+            self._run_anon_block(sql)
+            return
         sql = sql.rstrip().rstrip(";")
-        head = sql.split(None, 1)[0].lower() if sql.strip() else ""
         try:
             if head == "select":
                 rows = self.conn.run_query(sql)
@@ -1044,6 +1068,36 @@ class Repl:
                 print(f"  ok ({rc} row{'s' if rc != 1 else ''})")
         except Exception as e:
             print(f"  ! {e}", file=sys.stderr)
+
+    def _run_anon_block(self, sql: str) -> None:
+        """Run a PL/SQL anonymous block (BEGIN ... END; or DECLARE ...
+        BEGIN ... END;) and print DBMS_OUTPUT. Adds the BEGIN/END wrap
+        if the user provided a bare statement list."""
+        if self.conn is None:
+            print("  ! no connection", file=sys.stderr)
+            return
+        body = sql.strip()
+        # Strip a trailing `/` (sqlplus terminator) — Oracle doesn't
+        # accept it inside cursor.execute, but users type it from habit.
+        if body.endswith("/"):
+            body = body[:-1].rstrip()
+        head = body.split(None, 1)[0].lower() if body else ""
+        if head not in ("begin", "declare"):
+            # Wrap bare statements as anon block. Ensure terminator.
+            if not body.rstrip().endswith(";"):
+                body += ";"
+            body = f"BEGIN {body} END;"
+        elif not body.rstrip().endswith(";"):
+            body += ";"
+        try:
+            out_lines = self.conn.run_block(body)
+        except Exception as e:
+            print(f"  ! {e}", file=sys.stderr)
+            return
+        for ln in out_lines:
+            print(ln)
+        if not out_lines:
+            print("  ok")
 
     def _reconnect(self, dsn: Optional[str]) -> None:
         try:
