@@ -285,6 +285,13 @@ class Emitter:
         self._list_locals: dict[str, str] = {}  # name -> element type spelling
         # name → PL/SQL identifier override (used by list-loop shadows)
         self._loop_var_override: dict[str, str] = {}
+        # Loop variable → element type's pell-surface name (e.g. "text",
+        # "number", "ColumnInfo"). Lets `_emit_expr` validate field
+        # access on the loop variable at compile time: if the element
+        # is a primitive, `i.name` is a clear user error (text has no
+        # fields) — raise an EmitError with the actual issue instead of
+        # letting Oracle throw PLS-00487 at runtime.
+        self._loop_var_types: dict[str, str] = {}
         # Element type for the *current* jq!{}-receiving target (set by the
         # surrounding let-binding before recursing into _emit_assign_to /
         # _emit_call_assignment, restored after). For scalar list<T>, this is T.
@@ -3428,6 +3435,8 @@ class Emitter:
             self._loop_vars.append({s.var_name})
             prev_override = self._loop_var_override.get(s.var_name)
             self._loop_var_override[s.var_name] = shadow
+            prev_type = self._loop_var_types.get(s.var_name)
+            self._loop_var_types[s.var_name] = elem_pell
             for stmt in s.body:
                 out.extend(self._emit_stmt(stmt, indent + "  "))
             self._loop_vars.pop()
@@ -3435,6 +3444,10 @@ class Emitter:
                 del self._loop_var_override[s.var_name]
             else:
                 self._loop_var_override[s.var_name] = prev_override
+            if prev_type is None:
+                self._loop_var_types.pop(s.var_name, None)
+            else:
+                self._loop_var_types[s.var_name] = prev_type
             out.append(f"{indent}  {idx} := {list_local}.NEXT({idx});")
             out.append(f"{indent}END LOOP;")
             return out
@@ -3467,6 +3480,75 @@ class Emitter:
                 f"with `.` instead of `::`. did you mean `{suggestion[1]}`?"
             )
         raise EmitError(msg, s.loc)
+
+    # The set of pell-surface primitive type names. Field access on
+    # any of these is a user error (text has no `.name`, number has no
+    # `.x`, etc.) — except for `.length` and other text/list method
+    # aliases that go through `_emit_call_expr`, not here.
+    _PRIM_TYPE_NAMES = frozenset({
+        "text", "number", "int", "bool", "date", "timestamp",
+        "bytes", "json", "bigtext", "Unit",
+    })
+
+    def _check_field_on_primitive(self, e: "A.MemberAccess") -> None:
+        """Raise a clear EmitError when the user reads `.field` on a
+        primitive-typed receiver — e.g. `i.name` inside
+        `for i in catalog::list_types() { ... }` where `i` is `text`.
+
+        Only fires when we can confidently identify the receiver's type
+        as a primitive — silent on unknown types so we don't false-
+        positive on call chains we don't fully understand. Method calls
+        (`.substr()`, `.contains()`, `.year()`) flow through
+        `_emit_call_expr`, not here, so they aren't affected.
+        """
+        if not isinstance(e.obj, A.Ident):
+            return
+        name = e.obj.name
+        # Loop variable in scope?
+        elem_type = self._loop_var_types.get(name)
+        if elem_type is None:
+            # Maybe a plain let-local whose type we know is primitive.
+            pl_type = self._local_types.get(name, "").upper()
+            # Map PL/SQL type back to a pell surface name we recognize.
+            if "VARCHAR" in pl_type or "CLOB" in pl_type or "CHAR" in pl_type:
+                elem_type = "text"
+            elif "NUMBER" in pl_type or "PLS_INTEGER" in pl_type or "INTEGER" in pl_type:
+                elem_type = "number"
+            elif pl_type == "BOOLEAN":
+                elem_type = "bool"
+            elif "JSON" in pl_type:
+                # json IS a primitive in pell terms, but `.set/.remove`
+                # method-chain dispatch lives in _emit_call_expr, not
+                # here, so silent — and `j.some_field` on a json local
+                # is genuinely ambiguous (could mean JSON_VALUE access).
+                return
+            elif "TIMESTAMP" in pl_type:
+                elem_type = "timestamp"
+            elif "DATE" in pl_type:
+                elem_type = "date"
+            elif "RAW" in pl_type:
+                elem_type = "bytes"
+            else:
+                return
+        if elem_type not in self._PRIM_TYPE_NAMES:
+            return
+        # Primitive! `.field` is invalid.
+        hint = (
+            f"`{name}` is `{elem_type}`, not a record. "
+            f"`{elem_type}` has no `.{e.field}` field — "
+        )
+        if elem_type == "text":
+            hint += (
+                f"if you wanted the string itself, just use `{name}` "
+                f"(it's already text)."
+            )
+        else:
+            hint += (
+                f"check the iterable's element type — if the call "
+                f"returns `list<{elem_type}>`, each element is a "
+                f"`{elem_type}`, not a record."
+            )
+        raise EmitError(hint, e.loc)
 
     def _suggest_cross_pkg_call(self, expr: "A.Expr") -> Optional[tuple[str, str]]:
         """If `expr` looks like a misspelled cross-package call (`pkg.fn(...)`
@@ -3846,6 +3928,13 @@ class Emitter:
         if isinstance(e, A.Ident):
             return self._lower_ident(e.name)
         if isinstance(e, A.MemberAccess):
+            # Validate field access on primitive-typed receivers. The
+            # common trip-up: `for i in catalog::list_types() { p(i.name); }`
+            # where `i` is `text` (list_types returns list<text>), not a
+            # record. Without this check the emit succeeds and Oracle
+            # later throws PLS-00487 / PLS-00302 at runtime, pointing
+            # at the lowered local-name shadow that the user can't read.
+            self._check_field_on_primitive(e)
             return f"{self._emit_expr(e.obj)}.{e.field.lower()}"
         if isinstance(e, A.BinOp):
             return self._emit_binop(e)
