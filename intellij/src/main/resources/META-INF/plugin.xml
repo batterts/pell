@@ -2,68 +2,176 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.3.11</version>
+    <version>0.3.12</version>
 
     <description><![CDATA[
-        IntelliJ support for the <b>pell</b> language — a statically-typed
-        surface language that compiles to Oracle PL/SQL 23.
-        <br><br>
-        <b>What this plugin gives you:</b>
+        <h2>Write PL/SQL like it's 2026</h2>
+
+        <p><b>pell</b> is a statically-typed surface language that
+        compiles to clean, idiomatic <b>Oracle PL/SQL</b> 19c / 23ai.
+        Modern syntax, real type checking, ergonomic SQL — and the
+        emitted PL/SQL is a deployable, human-readable, SHA-anchored
+        artifact you commit, audit, and <code>git blame</code> like any
+        other code.</p>
+
+        <p>This plugin makes <b>IntelliJ IDEA</b>, <b>DataGrip</b>,
+        <b>PyCharm</b>, and the rest of the JetBrains family a real
+        editor for pell: split-view live preview, gutter run/build
+        buttons, an embedded REPL, project scaffold, and full LSP-backed
+        diagnostics / completion / go-to-definition.</p>
+
+        <h3>One look at the lowering</h3>
+
+<pre>
+// src/hr/employees.pell
+module hr.employees;
+
+pub record Employee { id: number, name: text, level: number }
+pub error NotFound { id: number }
+
+pub fn promote(id: number) -> Result&lt;Employee, NotFound&gt; {
+    let row: Employee = sql! {
+        select id, name, level from employees where id = :id
+    }.one()?;
+    return Ok(Employee {
+        id:    row.id,
+        name:  row.name,
+        level: row.level + 1,
+    });
+}
+</pre>
+
+        <p>…lowers to PL/SQL you'd write by hand:</p>
+
+<pre>
+CREATE OR REPLACE PACKAGE hr.employees AS
+  TYPE t_employee IS RECORD (
+    id    NUMBER,
+    name  VARCHAR2(4000),
+    level NUMBER
+  );
+  FUNCTION promote(p_id IN NUMBER) RETURN t_employee;
+END employees;
+/
+
+CREATE OR REPLACE PACKAGE BODY hr.employees AS
+  FUNCTION promote(p_id IN NUMBER) RETURN t_employee IS
+    l_row t_employee;
+    l_ret t_employee;
+  BEGIN
+    SELECT id, name, level
+      INTO l_row
+      FROM employees
+     WHERE id = p_id;
+    l_ret.id    := l_row.id;
+    l_ret.name  := l_row.name;
+    l_ret.level := (l_row.level + 1);
+    RETURN l_ret;
+  EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+      RAISE pell_runtime.hr_employees_notfound;
+  END promote;
+END employees;
+/
+</pre>
+
+        <h3>What you get inside the IDE</h3>
         <ul>
-          <li><b>Run-line markers</b> — green-arrow gutter icon on every
-              <code>.pell</code> file with a popup menu for
-              <code>exec</code> / <code>exec --dry-run</code> /
-              <code>build</code> / <code>build → file</code> /
-              <code>parse</code> / <code>tokens</code>, plus
-              <code>Open pell REPL (load this file)</code>.</li>
-          <li><b>Run on Oracle</b> for plain <code>.sql</code> files —
-              same gutter pattern, runs the SQL against
-              <code>$PELL_DB_URL</code> via the pell driver. No
-              IntelliJ Ultimate Database plugin required.</li>
-          <li><b>Tool window</b> ("pell" tab on the right strip) — module
-              tree with build/deploy state per row, toolbar with
-              Build/Deploy/Run SQL/Open REPL buttons, streaming log
-              panel.</li>
-          <li><b>New Project wizard</b> — File → New → Project → pell
+          <li><b>Side-by-side split editor.</b> Edit a <code>.pell</code>
+              file, see the lowered PL/SQL update in real time on the
+              right pane. Click a <code>pub fn</code> in the source →
+              preview scrolls to the function body and highlights the
+              line. ~400 ms debounce, error banner stays out of your way.</li>
+          <li><b>Gutter actions.</b> Hammer icon on every
+              <code>.pell</code> file: build, exec, parse, tokens, REPL.
+              Play arrow on every <code>.sql</code> file: install on
+              the connected Oracle. Works on IntelliJ Community — no
+              Ultimate Database plugin required.</li>
+          <li><b>Embedded REPL.</b> Notebook-style cells with variable
+              persistence (auto-stringify, snapshot/replay across
+              cells), <code>\load</code> a file into the session, full
+              <code>p()</code> printing, <code>catalog::</code> data
+              dictionary helpers, and live SQL execution.</li>
+          <li><b>New Project wizard.</b> File → New → Project → pell
               scaffolds <code>src/hello.pell</code>, <code>tests/</code>,
-              <code>built/</code>, a portable <code>./pell</code> shim,
-              and a one-click "Deploy all" run configuration.</li>
-          <li><b>Diagnostics + hover + completion</b> via LSP4IJ when
-              pell-lsp is configured (see the
-              <code>pell-intellij</code> Claude Code skill or the
-              repo's <code>lsp/INSTALL.md</code>).</li>
+              <code>plsql/</code> (committed!), a portable
+              <code>./pell</code> shim, and a one-click Deploy run
+              configuration.</li>
+          <li><b>Tool window.</b> Project module tree with per-row
+              build/deploy state, build-all, deploy-all, install
+              <code>pell_runtime</code>, open REPL, all wired to the
+              connected Oracle.</li>
+          <li><b>LSP-backed intelligence.</b> Pell-LSP via LSP4IJ —
+              real-time diagnostics, hover, completion (keywords +
+              project identifiers + dotted-method menus), go-to-definition,
+              outline, dotted-symbol completion (<code>catalog::columns_of</code>
+              suggests the right pre-existing methods on the returned
+              <code>list&lt;ColumnInfo&gt;</code>).</li>
+          <li><b>Save-to-target-dir.</b> Save the .pell → the lowered
+              SQL is rewritten to <code>plsql/&lt;name&gt;.sql</code> with
+              <code>--reproducible</code> on. Commit both files;
+              <code>git blame</code> shows you exactly how each
+              deployment artifact evolved.</li>
         </ul>
 
-        <br>
-        <b>What's new in 0.2.0:</b>
+        <h3>Why pell exists</h3>
+        <p>PL/SQL the language has aged in places that bite — verbose
+        package/spec/body duplication, awkward error handling, no real
+        type checking across boundaries, terrible string interpolation,
+        no module system. But Oracle the database is excellent, and
+        the runtime semantics of PL/SQL are uniquely powerful. Pell
+        keeps the database, replaces the surface:</p>
         <ul>
-          <li>Tool window ("pell" right-strip tab) with module tree,
-              build/deploy state per row, log panel, and a toolbar
-              wired to <code>pell build</code> / <code>pell deploy</code>
-              / <code>pell sql</code> / <code>pell repl</code>.</li>
-          <li>"Open pell REPL" gutter action — launches the REPL in a
-              terminal tab and auto-<code>\\load</code>s the current
-              file's defs into the session.</li>
-          <li>"Run SQL on PELL_DB_URL" gutter action on every
-              <code>.sql</code> file — Community-edition users no
-              longer need the Ultimate Database plugin to run
-              pell-built SQL.</li>
-          <li>New Project wizard ("pell" entry under File → New →
-              Project) with a configurable Pell home and a fully
-              scaffolded starter project.</li>
+          <li><b>Generics &amp; sum types</b> (<code>Result&lt;T, E&gt;</code>,
+              <code>Option&lt;T&gt;</code>, <code>list&lt;T&gt;</code>)
+              that compile to the right PL/SQL collection / exception shapes.</li>
+          <li><b>Real string interpolation</b> with auto-stringify for any
+              type (<code>"got {n} tables"</code>) — number, date,
+              timestamp, json, list, record, all handled.</li>
+          <li><b>Embedded SQL</b> via <code>sql! { ... }</code> with
+              <code>.one()</code> / <code>.collect()</code> / <code>.first()</code>
+              terminators that drive the right INTO clause shape.</li>
+          <li><b>JSON, regex, jq-style queries</b> as first-class —
+              Oracle 23ai JSON_OBJECT_T under the hood with no
+              <code>SELECT FROM dual</code> ceremony.</li>
+          <li><b>The lowered PL/SQL is the deployment artifact</b>: SHA-
+              anchored, byte-stable with <code>--reproducible</code>,
+              meant to be committed and reviewed.</li>
         </ul>
 
-        <br>
-        <b>0.1.0 (initial release):</b>
+        <h3>Learn more</h3>
         <ul>
-          <li>Run-configuration type "pell" with the gutter-icon
-              multi-action popup (build / exec / parse / tokens).</li>
-          <li>Compile-on-save flows wired through the pell CLI.</li>
-          <li><code>.pell</code> file type + LSP4IJ-backed diagnostics.</li>
+          <li><b>Docs &amp; tutorial:</b>
+              <a href="https://batterts.github.io/pell/">batterts.github.io/pell</a></li>
+          <li><b>Examples</b> (30+ <code>.pell</code> files with their
+              compiled output):
+              <a href="https://github.com/batterts/pell/tree/main/compiler/examples">github.com/batterts/pell/tree/main/compiler/examples</a></li>
+          <li><b>Source / contributing:</b>
+              <a href="https://github.com/batterts/pell">github.com/batterts/pell</a></li>
+          <li><b>Issues:</b>
+              <a href="https://github.com/batterts/pell/issues">github.com/batterts/pell/issues</a></li>
         </ul>
+
+        <p><i>Requires the pell CLI installed locally — the plugin
+        shells out to it for compile, deploy, and REPL. Get it with
+        <code>pip install -e .[repl]</code> from the repo, or open a
+        new pell project in the wizard and it sets up a portable
+        <code>./pell</code> shim for you.</i></p>
+
+        <p><i>Keywords: PL/SQL, plsql, Oracle, Oracle database, Oracle
+        23ai, SQL, transpiler, statically-typed, modern PL/SQL.</i></p>
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.3.12</h3>
+        <ul>
+          <li><b>Rewritten Marketplace description</b> — opens with a
+              side-by-side `.pell` → emitted PL/SQL example so people
+              searching <i>plsql</i> / <i>Oracle</i> see the lowering
+              immediately. Links to docs, examples repo, and source.
+              No behavior change in the IDE itself; the rest of the
+              0.3.x line ships as-is.</li>
+        </ul>
         <h3>0.3.11</h3>
         <ul>
           <li><b>"Run preview on PELL_DB_URL" can no longer fire on a
