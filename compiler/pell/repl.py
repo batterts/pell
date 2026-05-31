@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Optional
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.document import Document
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 
@@ -99,6 +101,126 @@ def scan_project_signatures(root: Optional[Path] = None) -> dict[str, A.TypeRef]
     return sigs
 
 
+class PellCompleter(Completer):
+    """Tab-completion for the REPL.
+
+    Three contexts are recognized:
+
+      1. After `<pkg>::` (or `<pkg>::<partial>`) — suggest function
+         names from the project signature registry. Most useful case.
+         e.g. `catalog::<tab>` → list_tables, columns_of, errors_for, …
+
+      2. Bare identifier with no `::` — suggest pell keywords,
+         in-scope variables, accumulated def names (fn / record /
+         error), and known package prefixes (suffixed with `::`).
+
+      3. After `\\` at start of line — slash commands (\\help, \\sql,
+         \\reset, etc.).
+
+    Stays out of the way in string literals and comments — those
+    typically don't have meaningful pell completions.
+    """
+
+    _KEYWORDS = frozenset({
+        "fn", "pub", "let", "mut", "record", "type", "error", "enum",
+        "sealed", "aggregate", "if", "else", "for", "in", "while",
+        "return", "match", "true", "false", "null", "import", "as",
+        "module", "Ok", "Err", "Some", "None",
+    })
+    _SLASH_COMMANDS = (
+        "\\help", "\\quit", "\\reset", "\\show", "\\vars", "\\defs",
+        "\\state", "\\load ", "\\save ", "\\sql ", "\\connect ",
+    )
+
+    def __init__(self, repl: "Repl") -> None:
+        self._repl = repl
+
+    def get_completions(self, document: Document, complete_event):
+        line = document.current_line_before_cursor
+        # Slash commands — only at the start of a line.
+        if document.cursor_position_col > 0 and line.startswith("\\"):
+            for cmd in self._SLASH_COMMANDS:
+                if cmd.startswith(line):
+                    yield Completion(cmd, start_position=-len(line))
+            return
+
+        # `<pkg>::<partial>` — most useful case.
+        import re as _re
+        m = _re.search(r"([A-Za-z_]\w*)::(\w*)$", line)
+        if m is not None:
+            pkg = m.group(1)
+            partial = m.group(2)
+            seen: set[str] = set()
+            for key in self._repl._project_signatures.keys():
+                if not key.startswith(f"{pkg}::"):
+                    continue
+                fn_name = key.split("::", 1)[1]
+                if "::" in fn_name:
+                    continue  # skip deeper-namespaced entries
+                if not fn_name.startswith(partial):
+                    continue
+                if fn_name in seen:
+                    continue
+                seen.add(fn_name)
+                # Add `(` so the user lands inside the arg list. We
+                # could compute the right paren too but bare `(` is
+                # less surprising when the fn takes args.
+                yield Completion(
+                    fn_name + "(",
+                    start_position=-len(partial),
+                    display=fn_name + "(...)",
+                )
+            return
+
+        # Bare identifier — match the partial word the user is typing.
+        m = _re.search(r"([A-Za-z_]\w*)$", line)
+        partial = m.group(1) if m else ""
+
+        # Collect candidates: keywords + accumulated def names +
+        # known package prefixes (suggested with the `::` already
+        # appended so the user can chain).
+        candidates: list[tuple[str, str]] = []  # (insert, display)
+        for kw in self._KEYWORDS:
+            candidates.append((kw, kw))
+        for item in self._repl.items:
+            name = getattr(item, "name", None)
+            if name is None:
+                continue
+            kind = type(item).__name__.replace("Def", "").lower()
+            candidates.append((name, f"{name}  ({kind})"))
+        # Package prefixes from the signature registry (one per
+        # distinct pkg). For dotted names like `pell_test::hello`,
+        # also offer the short form (`hello`).
+        pkgs: set[str] = set()
+        for key in self._repl._project_signatures.keys():
+            head = key.split("::", 1)[0]
+            pkgs.add(head)
+            # Tail (last segment) — `pell_test::hello::fn` → `hello`
+            segs = key.split("::")
+            if len(segs) >= 3:
+                pkgs.add(segs[-2])
+        for pkg in pkgs:
+            candidates.append((pkg + "::", f"{pkg}::"))
+        # Variables in current snapshot scope
+        for var in self._repl.var_snapshots.keys():
+            if "." in var:
+                continue  # skip record-field keys
+            candidates.append((var, f"{var}  (var)"))
+
+        yielded: set[str] = set()
+        for insert, display in candidates:
+            if not insert.startswith(partial):
+                continue
+            if insert in yielded:
+                continue
+            yielded.add(insert)
+            yield Completion(
+                insert,
+                start_position=-len(partial),
+                display=display,
+            )
+
+
 class Repl:
     """The notebook-style REPL state machine."""
 
@@ -129,7 +251,14 @@ class Repl:
         self._scan_project_signatures()
         self.cell_number = 0
         self.history = InMemoryHistory()
-        self.session: PromptSession = PromptSession(history=self.history)
+        self.session: PromptSession = PromptSession(
+            history=self.history,
+            completer=PellCompleter(self),
+            # Make Tab cycle through the popup instead of inserting
+            # a literal tab — that's the muscle memory most REPL users
+            # have. (Up/Down works too.)
+            complete_while_typing=False,
+        )
 
     def _scan_project_signatures(self) -> None:
         """Populate the project signature registry from the cwd."""
