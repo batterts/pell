@@ -101,6 +101,43 @@ def scan_project_signatures(root: Optional[Path] = None) -> dict[str, A.TypeRef]
     return sigs
 
 
+def scan_project_records(root: Optional[Path] = None) -> dict[str, list]:
+    """Walk `root` (default: cwd) + pell runtime dir for *.pell files
+    and collect every pub record's field list. Returns
+    `<RecordName>` → `list[FieldDef]`.
+
+    Used by the REPL completer for type-aware `.` completion: when
+    you're typing `i.<tab>` and `i` is the loop variable of a fn
+    returning `list<ColumnInfo>`, we look up ColumnInfo's fields
+    here and offer them as suggestions.
+    """
+    records: dict[str, list] = {}
+    seen_dirs: set[Path] = set()
+
+    def _scan(base: Path) -> None:
+        if not base.is_dir() or base.resolve() in seen_dirs:
+            return
+        seen_dirs.add(base.resolve())
+        for path in base.rglob("*.pell"):
+            if any(p in ("built", "out", ".git", "node_modules", "expected")
+                   for p in path.parts):
+                continue
+            try:
+                src = path.read_text(encoding="utf-8")
+                from .parser import parse
+                mod = parse(src, str(path))
+            except Exception:
+                continue
+            for item in mod.items:
+                if isinstance(item, A.RecordDef):
+                    records[item.name] = list(item.fields)
+
+    _scan(root or Path.cwd())
+    runtime = Path(__file__).resolve().parent.parent / "runtime"
+    _scan(runtime)
+    return records
+
+
 class PellCompleter(Completer):
     """Tab-completion for the REPL.
 
@@ -135,8 +172,99 @@ class PellCompleter(Completer):
     def __init__(self, repl: "Repl") -> None:
         self._repl = repl
 
+    def _resolve_record_fields(self, receiver: str, text_so_far: str) -> Optional[list]:
+        """Resolve `receiver` to a record's field list, or None.
+
+        Search order:
+          1. Loop scope — `for <receiver> in <call>(...)` somewhere
+             earlier in the cell. Look up the call's return type in
+             the project signature registry; if it's `list<RecordName>`,
+             find RecordName's fields.
+          2. Let-stmt scope — `let <receiver>: RecordName = ...` or
+             `let <receiver> = pkg::fn(...)` where fn returns a record.
+          3. Snapshot scope — record vars persisted from prior cells.
+
+        Returns the list of FieldDef on hit, None on miss.
+        """
+        import re as _re
+        # 1. for-loop scope
+        for_pat = _re.compile(
+            rf"\bfor\s+{_re.escape(receiver)}\s+in\s+([A-Za-z_][\w:]*)\s*\(",
+        )
+        for m in for_pat.finditer(text_so_far):
+            call_name = m.group(1)
+            ret = self._repl._project_signatures.get(call_name)
+            if ret is None:
+                continue
+            rec_name = self._extract_list_record_name(ret)
+            if rec_name and rec_name in self._repl._project_records:
+                return self._repl._project_records[rec_name]
+            if rec_name:
+                # Also check user-defined records in the running session
+                for item in self._repl.items:
+                    if isinstance(item, A.RecordDef) and item.name == rec_name:
+                        return list(item.fields)
+
+        # 2. let-stmt with explicit record annotation
+        let_typed_pat = _re.compile(
+            rf"\blet\s+{_re.escape(receiver)}\s*:\s*([A-Za-z_]\w*)\s*=",
+        )
+        for m in let_typed_pat.finditer(text_so_far):
+            rec_name = m.group(1)
+            if rec_name in self._repl._project_records:
+                return self._repl._project_records[rec_name]
+            for item in self._repl.items:
+                if isinstance(item, A.RecordDef) and item.name == rec_name:
+                    return list(item.fields)
+
+        # 3. let-stmt with inferred type from cross-pkg call
+        let_inferred_pat = _re.compile(
+            rf"\blet\s+{_re.escape(receiver)}\s*=\s*([A-Za-z_][\w:]*)\s*\(",
+        )
+        for m in let_inferred_pat.finditer(text_so_far):
+            call_name = m.group(1)
+            ret = self._repl._project_signatures.get(call_name)
+            if ret is None:
+                continue
+            # Scalar record return: `-> RecordName`
+            if isinstance(ret, A.NamedType) and ret.name in self._repl._project_records:
+                return self._repl._project_records[ret.name]
+
+        # 4. Snapshot scope (record persisted from prior cells)
+        rec_name = self._repl._var_record_names.get(receiver)
+        if rec_name is not None and rec_name in self._repl._project_records:
+            return self._repl._project_records[rec_name]
+
+        return None
+
+    @staticmethod
+    def _extract_list_record_name(ret: A.TypeRef) -> Optional[str]:
+        """If `ret` is `list<RecordName>`, return `RecordName`. Else None."""
+        if (isinstance(ret, A.GenericType) and ret.base == "list"
+                and len(ret.params) == 1
+                and isinstance(ret.params[0], A.NamedType)):
+            return ret.params[0].name
+        return None
+
+    @staticmethod
+    def _render_type_for_display(t: A.TypeRef) -> str:
+        """Compact type rendering for completion popups."""
+        if isinstance(t, A.PrimType):
+            return t.name
+        if isinstance(t, A.NamedType):
+            return t.name
+        if isinstance(t, A.GenericType):
+            inner = ", ".join(
+                PellCompleter._render_type_for_display(p) for p in t.params
+            )
+            return f"{t.base}<{inner}>"
+        return "?"
+
     def get_completions(self, document: Document, complete_event):
         line = document.current_line_before_cursor
+        text_so_far = document.text_before_cursor
+        import re as _re
+
         # Slash commands — only at the start of a line.
         if document.cursor_position_col > 0 and line.startswith("\\"):
             for cmd in self._SLASH_COMMANDS:
@@ -144,8 +272,33 @@ class PellCompleter(Completer):
                     yield Completion(cmd, start_position=-len(line))
             return
 
+        # Field-access completion: `<ident>.<partial>` where we can
+        # resolve <ident> to a record-typed variable. The receiver
+        # must be a bare ident — chained `pkg::fn().field` style isn't
+        # yet recognized. The `(?<![:.])` lookbehind keeps us out of
+        # `pkg::` and `obj.member.` contexts.
+        # Returns unconditionally when we match the `<ident>.<partial>`
+        # shape: even if we can't resolve fields (e.g. ident is a
+        # primitive-typed loop var), falling through to the bare-
+        # identifier path here would surface keywords / packages /
+        # vars in a `.foo` position where they make no sense.
+        mfield = _re.search(r"(?<![:\.])([A-Za-z_]\w*)\.(\w*)$", line)
+        if mfield is not None:
+            recv = mfield.group(1)
+            partial = mfield.group(2)
+            fields = self._resolve_record_fields(recv, text_so_far)
+            if fields is not None:
+                for f in fields:
+                    if f.name.startswith(partial):
+                        type_label = self._render_type_for_display(f.type_ref)
+                        yield Completion(
+                            f.name,
+                            start_position=-len(partial),
+                            display=f"{f.name}: {type_label}",
+                        )
+            return
+
         # `<pkg>::<partial>` — most useful case.
-        import re as _re
         m = _re.search(r"([A-Za-z_]\w*)::(\w*)$", line)
         if m is not None:
             pkg = m.group(1)
@@ -248,6 +401,8 @@ class Repl:
         # foreign collection type (avoids the PLS-00382 nominal type
         # clash on cross-package list returns).
         self._project_signatures: dict[str, A.TypeRef] = {}
+        # Record name → field list (for completer's type-aware `.` completion)
+        self._project_records: dict[str, list] = {}
         self._scan_project_signatures()
         self.cell_number = 0
         self.history = InMemoryHistory()
@@ -261,8 +416,9 @@ class Repl:
         )
 
     def _scan_project_signatures(self) -> None:
-        """Populate the project signature registry from the cwd."""
+        """Populate the project signature + record registries from the cwd."""
         self._project_signatures = scan_project_signatures()
+        self._project_records = scan_project_records()
 
     # -- main loop ---------------------------------------------------------
 
