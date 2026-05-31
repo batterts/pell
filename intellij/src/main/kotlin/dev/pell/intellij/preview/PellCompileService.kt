@@ -101,10 +101,23 @@ class PellCompileService(private val project: Project) {
 
         handler.addProcessListener(object : ProcessAdapter() {
             override fun onTextAvailable(event: ProcessEvent, outputType: Key<*>) {
-                if (outputType.toString() == "stderr") {
-                    stderr.append(event.text)
-                } else {
-                    stdout.append(event.text)
+                // IntelliJ surfaces THREE process channels here: STDOUT,
+                // STDERR, and SYSTEM (which contains the echoed command
+                // line, e.g. "/path/to/pell build /tmp/foo.pell ...\n"
+                // — printed by the process handler itself, not the
+                // process). Match by identity, not by name, and DROP
+                // SYSTEM so the command echo never lands in the
+                // captured SQL. The old `else` branch swept it into
+                // stdout, which contaminated the preview's document
+                // (and any temp file written from it) with a fake
+                // first statement that broke `pell sql` downstream.
+                when (outputType) {
+                    com.intellij.execution.process.ProcessOutputTypes.STDOUT ->
+                        stdout.append(event.text)
+                    com.intellij.execution.process.ProcessOutputTypes.STDERR ->
+                        stderr.append(event.text)
+                    // SYSTEM (and anything else): ignore.
+                    else -> {}
                 }
             }
             override fun processTerminated(event: ProcessEvent) {

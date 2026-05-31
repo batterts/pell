@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.3.10</version>
+    <version>0.3.11</version>
 
     <description><![CDATA[
         IntelliJ support for the <b>pell</b> language — a statically-typed
@@ -64,6 +64,29 @@
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.3.11</h3>
+        <ul>
+          <li><b>"Run preview on PELL_DB_URL" can no longer fire on a
+              broken preview.</b> Three layered defenses:
+              <ol>
+                <li>The error preview body is fully `-- `-prefixed,
+                    so even if you shell <code>./pell sql</code> on
+                    the temp file by hand, Oracle sees a comment
+                    block — no ORA-00900 on path strings.</li>
+                <li>The gutter Run icon is removed when the preview
+                    is showing an error, not just when there's a
+                    good compile.</li>
+                <li>Defensive bail in <code>runOnPellDbUrl()</code>:
+                    if the preview isn't currently showing valid
+                    compiled PL/SQL, surface an IntelliJ notification
+                    ("preview isn't a valid compile yet") instead of
+                    writing garbage to a temp file.</li>
+              </ol>
+              Fixes the symptom of
+              <code>[1/2] /Users/.../pell  FAIL — ORA-00900</code>
+              that you'd see if you ran the gutter icon on a broken
+              preview.</li>
+        </ul>
         <h3>0.3.10</h3>
         <ul>
           <li><b>Caret-sync lands on the body, not the spec.</b> Click
@@ -309,6 +332,14 @@
     <depends>org.jetbrains.plugins.terminal</depends>
 
     <extensions defaultExtensionNs="com.intellij">
+        <!-- Notification group for warnings the plugin surfaces as
+             IntelliJ toasts (e.g. "preview isn't valid yet — fix
+             the source first" on the Run-on-PELL_DB_URL gutter). -->
+        <notificationGroup
+            id="pell"
+            displayType="BALLOON"
+            isLogByDefault="true" />
+
         <!-- Register the .pell file type -->
         <fileType
             name="pell"

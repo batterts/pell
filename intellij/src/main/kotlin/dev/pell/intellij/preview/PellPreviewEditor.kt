@@ -240,6 +240,10 @@ class PellPreviewEditor(
         caretSyncHighlighter = hl
     }
 
+    /** True iff the preview is currently showing successfully-compiled
+     *  PL/SQL (not the "(compiling…)" placeholder, not an error body). */
+    fun isShowingGoodCompile(): Boolean = hasGoodCompile
+
     /** Shell-execute the current preview content as PL/SQL against
      *  PELL_DB_URL. Writes the in-memory buffer to a temp .sql file
      *  (no need to depend on disk save) and runs `./pell sql <tmp>` in
@@ -247,6 +251,22 @@ class PellPreviewEditor(
      *  ORA-NNNNN errors next to the source. */
     fun runOnPellDbUrl() {
         val cwd = project.basePath ?: return
+        // Refuse to run if the preview isn't showing real PL/SQL —
+        // running the "(compiling…)" placeholder or the commented-out
+        // error block against Oracle would either no-op (best case)
+        // or throw ORA-00900 on whatever path strings happen to look
+        // like SQL fragments (worst case).
+        if (!hasGoodCompile) {
+            com.intellij.notification.NotificationGroupManager.getInstance()
+                .getNotificationGroup("pell")
+                ?.createNotification(
+                    "pell preview",
+                    "The preview isn't a valid compile yet — fix the source first.",
+                    com.intellij.notification.NotificationType.WARNING,
+                )
+                ?.notify(project)
+            return
+        }
         val tmp = File.createTempFile("pell-preview-", ".sql").also {
             it.writeText(document.text)
             it.deleteOnExit()
@@ -270,7 +290,10 @@ class PellPreviewEditor(
      *  read the previous PL/SQL while they're still typing — no flicker.
      *
      *  Falls back to rendering the error in the document body only
-     *  when there's no prior successful compile yet. */
+     *  when there's no prior successful compile yet. Every line of
+     *  the error body is `-- `-prefixed so if the user runs it via
+     *  the gutter (or shells `pell sql` on the temp file) Oracle just
+     *  sees a comment block, not garbage that explodes with ORA-00900. */
     fun setError(message: String) {
         if (hasGoodCompile) {
             errorBanner.text = "<html>⚠ <b>compile error</b> — preview frozen at last good compile" +
@@ -279,17 +302,25 @@ class PellPreviewEditor(
             return
         }
         // First compile failed — render the error in the body so the
-        // user has something to look at.
+        // user has something to look at. Comment out every line so
+        // accidentally running this against Oracle is a no-op.
         val text = buildString {
             append("-- =============================================================\n")
             append("--  pell compile error\n")
-            append("-- =============================================================\n\n")
-            append(message.trimEnd())
-            append("\n")
+            append("-- =============================================================\n")
+            for (line in message.trimEnd().lines()) {
+                append("-- ")
+                append(line)
+                append("\n")
+            }
         }
         com.intellij.openapi.application.ApplicationManager.getApplication().runWriteAction {
             document.setText(text)
         }
+        // No good content → no Run button. Strip the gutter icon so
+        // the user isn't tempted to click it on broken output.
+        runHighlighter?.let { viewer.markupModel.removeHighlighter(it) }
+        runHighlighter = null
     }
 
     private fun firstLineOf(s: String): String =
