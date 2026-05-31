@@ -3398,6 +3398,19 @@ class Emitter:
                     body=s.body,
                 )
                 return self._emit_let(let_stmt, indent) + self._emit_for(new_for, indent)
+            # `for x in <call>()` where the call returns `cursor<T>` —
+            # OPEN the cursor, fetch row-by-row into a typed local,
+            # CLOSE on exit. Wrapped in an inner DECLARE so the cursor
+            # and row temp are scoped to the loop. Works for
+            # `cursor<text>`, `cursor<number>`, etc. — element type
+            # comes from the registered return signature.
+            if (call_ret is not None
+                    and isinstance(call_ret, A.GenericType)
+                    and call_ret.base == "cursor"
+                    and len(call_ret.params) == 1):
+                return self._emit_cursor_call_iteration(
+                    s, call_ret.params[0], indent,
+                )
         # for x in <list-typed local>: iterate via assoc-array FOR loop
         if isinstance(s.iterable, A.Ident) and s.iterable.name in self._list_locals:
             list_local = local_name(s.iterable.name)
@@ -3583,6 +3596,59 @@ class Emitter:
         wrong = f"{recv.name}.{callee.field}({arg_text})"
         right = f"{recv.name}::{callee.field}({arg_text})"
         return wrong, right
+
+    def _emit_cursor_call_iteration(
+        self, s: A.ForStmt, elem_type: A.TypeRef, indent: str,
+    ) -> list[str]:
+        """Lower `for row in cursor_returning_call() { ... }` into an
+        OPEN / FETCH-loop / CLOSE block.
+
+        The cursor handle is held in a synthesized local, the row
+        temp is typed via the element-type ref, and the loop body
+        sees the user's loop var name as if it were the row local.
+        Both temps are declared at the function scope (not in a
+        nested DECLARE) so nested loops / breaks inside the body
+        Just Work.
+        """
+        self._sql_var_counter += 1
+        cur_var = f"l_pell_cur_{self._sql_var_counter}"
+        row_var = f"l_pell_row_{self._sql_var_counter}"
+        self._decl(f"{cur_var} SYS_REFCURSOR;")
+        elem_sql = self._lt(elem_type)
+        self._decl(f"{row_var} {elem_sql};")
+
+        call_code = self._emit_expr(s.iterable)
+        out = [
+            f"{indent}{cur_var} := {call_code};",
+            f"{indent}LOOP",
+            f"{indent}  FETCH {cur_var} INTO {row_var};",
+            f"{indent}  EXIT WHEN {cur_var}%NOTFOUND;",
+        ]
+        # Inside the body, `s.var_name` should refer to row_var. Use the
+        # same shadow-override pattern as list iteration.
+        self._loop_vars.append({s.var_name})
+        prev_override = self._loop_var_override.get(s.var_name)
+        self._loop_var_override[s.var_name] = row_var
+        prev_type = self._loop_var_types.get(s.var_name)
+        if isinstance(elem_type, A.PrimType):
+            self._loop_var_types[s.var_name] = elem_type.name
+        elif isinstance(elem_type, A.NamedType):
+            self._loop_var_types[s.var_name] = elem_type.name
+        for stmt in s.body:
+            out.extend(self._emit_stmt(stmt, indent + "  "))
+        self._loop_vars.pop()
+        if prev_override is None:
+            del self._loop_var_override[s.var_name]
+        else:
+            self._loop_var_override[s.var_name] = prev_override
+        if prev_type is None:
+            self._loop_var_types.pop(s.var_name, None)
+        else:
+            self._loop_var_types[s.var_name] = prev_type
+
+        out.append(f"{indent}END LOOP;")
+        out.append(f"{indent}CLOSE {cur_var};")
+        return out
 
     def _emit_forall(self, s: A.ForallStmt, indent: str) -> list[str]:
         """Lower `forall n in nums { sql!{...:n...} }` to PL/SQL FORALL.
