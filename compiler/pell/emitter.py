@@ -3451,12 +3451,56 @@ class Emitter:
             self._loop_vars.pop()
             out.append(f"{indent}END LOOP;")
             return out
-        raise EmitError(
+        # Common typo: `for x in catalog.list_types()` (dot) instead of
+        # `for x in catalog::list_types()` (colon-colon). If the receiver
+        # isn't a known local but `<pkg>::<fn>` IS in the project
+        # signature registry, point that out specifically.
+        suggestion = self._suggest_cross_pkg_call(s.iterable)
+        msg = (
             f"unsupported `for` iterable: {type(s.iterable).__name__}. "
             f"Use `for i in 1..=10`, `for row in sql!{{...}}`, or "
-            f"`for x in <list-typed-variable>`.",
-            s.loc,
+            f"`for x in <list-typed-variable>`."
         )
+        if suggestion is not None:
+            msg = (
+                f"`{suggestion[0]}` looks like a cross-package call written "
+                f"with `.` instead of `::`. did you mean `{suggestion[1]}`?"
+            )
+        raise EmitError(msg, s.loc)
+
+    def _suggest_cross_pkg_call(self, expr: "A.Expr") -> Optional[tuple[str, str]]:
+        """If `expr` looks like a misspelled cross-package call (`pkg.fn(...)`
+        where the receiver isn't a known local but `pkg::fn` is in the
+        project signature registry), return a (wrong, right) pair for
+        the suggestion. Otherwise None.
+
+        Catches the common `.` vs `::` typo without lying about other
+        member accesses on real records.
+        """
+        if not isinstance(expr, A.Call):
+            return None
+        callee = expr.callee
+        if not isinstance(callee, A.MemberAccess):
+            return None
+        recv = callee.obj
+        if not isinstance(recv, A.Ident):
+            return None
+        # The receiver is an Ident — is it actually a known local /
+        # param / record / etc. in this scope? If yes, the call is a
+        # legitimate method dispatch (or user typo we can't help with).
+        if recv.name in self._local_types or recv.name in self._params:
+            return None
+        if recv.name in self._list_locals:
+            return None
+        # Is `<recv>::<field>` in the project signature registry?
+        candidate = f"{recv.name}::{callee.field}"
+        if candidate not in self._project_signatures:
+            return None
+        # Rebuild a printable form of the original and the fix.
+        arg_text = ", ".join(self._emit_expr(a) for a in expr.args) if expr.args else ""
+        wrong = f"{recv.name}.{callee.field}({arg_text})"
+        right = f"{recv.name}::{callee.field}({arg_text})"
+        return wrong, right
 
     def _emit_forall(self, s: A.ForallStmt, indent: str) -> list[str]:
         """Lower `forall n in nums { sql!{...:n...} }` to PL/SQL FORALL.
@@ -4043,6 +4087,21 @@ class Emitter:
     }
 
     def _emit_call_expr(self, e: A.Call) -> str:
+        # Early check: the user wrote `pkg.fn(...)` (dot) when they
+        # meant `pkg::fn(...)` (colon-colon). If pkg isn't a known
+        # local/param but pkg::fn IS in the project signature
+        # registry, that's almost certainly a typo — raise a
+        # compile-time error with the fix rather than letting the
+        # bogus `catalog.list_types()` reach Oracle and fail there.
+        suggestion = self._suggest_cross_pkg_call(e)
+        if suggestion is not None:
+            wrong, right = suggestion
+            raise EmitError(
+                f"`{wrong}` looks like a cross-package call written "
+                f"with `.` instead of `::`. did you mean `{right}`?",
+                e.loc,
+            )
+
         # Print aliases — rewrite to dbms_output.put_line, auto-stringify
         # the single argument so any type prints with the same format as
         # the auto-stringify table (TO_CHAR with explicit masks for
