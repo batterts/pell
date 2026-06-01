@@ -200,6 +200,22 @@ def lower_type(
 _LIST_SENTINEL = "__PELL_LIST__"
 
 
+# Pell-surface type name → the PL/SQL spelling that _infer_expr_type
+# returns. Used when looking up the type of a loop variable, whose
+# binding stores the pell name ("json", "text", ...) rather than the
+# emitter's PL/SQL form.
+_PELL_TO_PLSQL_TYPE: dict[str, str] = {
+    "json":      "JSON",
+    "text":      "VARCHAR2(4000)",
+    "number":    "NUMBER",
+    "bool":      "BOOLEAN",
+    "date":      "DATE",
+    "timestamp": "TIMESTAMP",
+    "bytes":     "RAW(32767)",
+    "bigtext":   "CLOB",
+}
+
+
 def _render_type(t: A.TypeRef) -> str:
     if isinstance(t, A.PrimType):
         return t.name
@@ -1829,6 +1845,12 @@ class Emitter:
             t = self._local_types.get(e.name)
             if t:
                 return t
+            # Check loop vars — `for row in cursor<dyn>(...)` binds row
+            # to a JSON value; record-shaped FETCH binds to a typed
+            # row local. The dict stores pell type names.
+            pell_t = self._loop_var_types.get(e.name)
+            if pell_t:
+                return _PELL_TO_PLSQL_TYPE.get(pell_t, pell_t)
             return None
         if isinstance(e, A.Call):
             return self._infer_call_type(e)
@@ -3666,17 +3688,28 @@ class Emitter:
         self, s: A.ForStmt, indent: str,
     ) -> list[str]:
         """Lower `for row in fn_returning_cursor_dyn() { ... }` into a
-        DBMS_SQL.DESCRIBE_COLUMNS-based loop. Each row is built as
-        a single VARCHAR2 in `col1=val1 | col2=val2 | ...` form so
-        the user's `p(row)` / `\\sql` output is readable.
+        DBMS_SQL.DESCRIBE_COLUMNS-based loop.
 
-        Type handling at fetch time:
-          NUMBER (col_type=2)              → defined into l_num, TO_CHAR'd
-          DATE (12)                         → l_dt, YYYY-MM-DD HH24:MI:SS
-          TIMESTAMP / TIMESTAMP TZ (180/181/231) → l_ts, …FF6
-          everything else                   → l_str (VARCHAR2(4000))
+        Each row arrives in the loop body as a `json` value — a
+        JSON object keyed by column name. Numbers preserve as JSON
+        numbers; dates/timestamps round-trip as ISO 8601 strings;
+        VARCHAR2 stays string. NULLs are represented as JSON null.
 
-        NULLs render as `(null)`.
+        Why JSON and not text:
+          - Text loses column boundaries — you can't get individual
+            cells back out without re-parsing a delimiter.
+          - A synthesized record won't work either: the whole point
+            of cursor<dyn> is the row shape isn't known at compile
+            time. Even @relies_on can't enumerate the columns of a
+            dynamic pivot (regions are discovered at runtime).
+          - JSON is pell's existing dynamic-shape primitive. Users
+            already have json::get_text / json::get_number /
+            json::get_json / json::has, and `p(row)` auto-stringifies
+            via JSON_SERIALIZE.
+
+        Per-fetch we build a fresh JSON_OBJECT_T, populate it with
+        typed put() calls (preserves number/date types), then
+        serialize into the row var.
 
         Requires EXECUTE on DBMS_SQL — usually granted to the public
         role, but a DBA can lock it down. We surface the runtime
@@ -3689,25 +3722,39 @@ class Emitter:
         col_cnt = f"l_pell_col_cnt_{self._sql_var_counter}"
         idx_var = f"l_pell_idx_{self._sql_var_counter}"
         row_var = f"l_pell_row_{self._sql_var_counter}"
-        # Per-type fetch buffers — declared once, reused per column
+        # Mutable JSON DOM used to build each row; serialized into row_var.
+        jobj_var = f"l_pell_jobj_{self._sql_var_counter}"
+        # Per-type fetch buffers — declared once, reused per column.
         buf_str = f"l_pell_buf_str_{self._sql_var_counter}"
         buf_num = f"l_pell_buf_num_{self._sql_var_counter}"
         buf_dt = f"l_pell_buf_dt_{self._sql_var_counter}"
         buf_ts = f"l_pell_buf_ts_{self._sql_var_counter}"
-        # Per-column rendered value
-        col_val = f"l_pell_col_val_{self._sql_var_counter}"
+        col_name = f"l_pell_col_name_{self._sql_var_counter}"
+
+        # On 23ai, `JSON` is a native datatype; on 19c, no such type,
+        # so we fall back to VARCHAR2 holding JSON-shaped text (which
+        # JSON_VALUE / JSON_QUERY happily accept).
+        row_type = "JSON" if self.target == "23" else "VARCHAR2(32767)"
 
         self._decl(f"{cur_var} SYS_REFCURSOR;")
         self._decl(f"{dyn_cur} PLS_INTEGER;")
         self._decl(f"{col_cnt} PLS_INTEGER;")
         self._decl(f"{desc_var} DBMS_SQL.DESC_TAB;")
         self._decl(f"{idx_var} PLS_INTEGER;")
-        self._decl(f"{row_var} VARCHAR2(32767);")
+        self._decl(f"{row_var} {row_type};")
+        self._decl(f"{jobj_var} JSON_OBJECT_T;")
         self._decl(f"{buf_str} VARCHAR2(4000);")
         self._decl(f"{buf_num} NUMBER;")
         self._decl(f"{buf_dt} DATE;")
         self._decl(f"{buf_ts} TIMESTAMP;")
-        self._decl(f"{col_val} VARCHAR2(4000);")
+        self._decl(f"{col_name} VARCHAR2(128);")
+
+        # On 23ai we want a real JSON value, not a string. JSON_OBJECT_T.to_json()
+        # returns JSON; on 19c we use to_string() (no JSON datatype).
+        serialize_call = (
+            f"{jobj_var}.to_json()" if self.target == "23"
+            else f"{jobj_var}.to_string()"
+        )
 
         call_code = self._emit_expr(s.iterable)
         out = [
@@ -3726,33 +3773,37 @@ class Emitter:
             f"{indent}    DBMS_SQL.DEFINE_COLUMN({dyn_cur}, {idx_var}, {buf_str}, 4000);",
             f"{indent}  END IF;",
             f"{indent}END LOOP;",
-            # Fetch loop.
+            # Fetch loop: build a JSON_OBJECT_T per row, serialize at the end.
             f"{indent}WHILE DBMS_SQL.FETCH_ROWS({dyn_cur}) > 0 LOOP",
-            f"{indent}  {row_var} := NULL;",
+            f"{indent}  {jobj_var} := NEW JSON_OBJECT_T();",
             f"{indent}  FOR {idx_var} IN 1 .. {col_cnt} LOOP",
+            f"{indent}    {col_name} := {desc_var}({idx_var}).col_name;",
             f"{indent}    IF {desc_var}({idx_var}).col_type = 2 THEN",
             f"{indent}      DBMS_SQL.COLUMN_VALUE({dyn_cur}, {idx_var}, {buf_num});",
-            f"{indent}      {col_val} := TO_CHAR({buf_num});",
+            f"{indent}      IF {buf_num} IS NULL THEN {jobj_var}.put_null({col_name});",
+            f"{indent}      ELSE {jobj_var}.put({col_name}, {buf_num}); END IF;",
             f"{indent}    ELSIF {desc_var}({idx_var}).col_type = 12 THEN",
             f"{indent}      DBMS_SQL.COLUMN_VALUE({dyn_cur}, {idx_var}, {buf_dt});",
-            f"{indent}      {col_val} := TO_CHAR({buf_dt}, 'YYYY-MM-DD HH24:MI:SS');",
+            f"{indent}      IF {buf_dt} IS NULL THEN {jobj_var}.put_null({col_name});",
+            f"{indent}      ELSE {jobj_var}.put({col_name}, TO_CHAR({buf_dt}, 'YYYY-MM-DD\"T\"HH24:MI:SS')); END IF;",
             f"{indent}    ELSIF {desc_var}({idx_var}).col_type IN (180, 181, 231) THEN",
             f"{indent}      DBMS_SQL.COLUMN_VALUE({dyn_cur}, {idx_var}, {buf_ts});",
-            f"{indent}      {col_val} := TO_CHAR({buf_ts}, 'YYYY-MM-DD HH24:MI:SS.FF6');",
+            f"{indent}      IF {buf_ts} IS NULL THEN {jobj_var}.put_null({col_name});",
+            f"{indent}      ELSE {jobj_var}.put({col_name}, TO_CHAR({buf_ts}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6')); END IF;",
             f"{indent}    ELSE",
             f"{indent}      DBMS_SQL.COLUMN_VALUE({dyn_cur}, {idx_var}, {buf_str});",
-            f"{indent}      {col_val} := {buf_str};",
+            f"{indent}      IF {buf_str} IS NULL THEN {jobj_var}.put_null({col_name});",
+            f"{indent}      ELSE {jobj_var}.put({col_name}, {buf_str}); END IF;",
             f"{indent}    END IF;",
-            f"{indent}    IF {row_var} IS NOT NULL THEN {row_var} := {row_var} || ' | '; END IF;",
-            f"{indent}    {row_var} := {row_var} || {desc_var}({idx_var}).col_name || '=' || NVL({col_val}, '(null)');",
             f"{indent}  END LOOP;",
+            f"{indent}  {row_var} := {serialize_call};",
         ]
-        # Body — the user's `row` now resolves to `row_var` (a VARCHAR2).
+        # Body — the user's `row` is now a pell `json` value.
         self._loop_vars.append({s.var_name})
         prev_override = self._loop_var_override.get(s.var_name)
         self._loop_var_override[s.var_name] = row_var
         prev_type = self._loop_var_types.get(s.var_name)
-        self._loop_var_types[s.var_name] = "text"
+        self._loop_var_types[s.var_name] = "json"
         for stmt in s.body:
             out.extend(self._emit_stmt(stmt, indent + "  "))
         self._loop_vars.pop()

@@ -3,18 +3,25 @@ module dyn_demo;
 // ---------------------------------------------------------------------------
 // `cursor<dyn>` — a cursor whose row shape is unknown at compile time.
 //
-// The pell for-loop lowers via `DBMS_SQL.DESCRIBE_COLUMNS` so any column
-// count and any column types work. Each row arrives in the loop body as a
-// single text formatted "col1=val1 | col2=val2 | ..." (NULLs render as
-// `(null)`).
+// The pell for-loop lowers via `DBMS_SQL.DESCRIBE_COLUMNS` and each row
+// arrives in the loop body as a `json` value keyed by column name.
+// Numbers preserve number-ness, dates/timestamps round-trip as ISO
+// 8601 strings, VARCHAR2 columns stay text, NULLs are JSON null.
 //
-// Use for:
-//   - dynamic pivots (column set varies per query)
-//   - cursors returned from PL/SQL you don't control
-//   - REPL exploration ("what's in this thing?")
+// Access columns by name with the standard `json::*` surface:
 //
-// Cost: column values are coerced to text via TO_CHAR, so you lose type
-// fidelity. For typed access, declare a Record and use `cursor<MyRow>`.
+//     json::get_text   (row, "$.PRODUCT")
+//     json::get_number (row, "$.EAST")
+//     json::get_json   (row, "$.NESTED")
+//     json::has        (row, "$.SOUTH")
+//     p(row)              -- auto-stringified via JSON_SERIALIZE
+//
+// Why JSON and not a synthesized record? Because the whole point of
+// cursor<dyn> is that the column set isn't known at compile time —
+// even @relies_on can't enumerate the columns of a dynamic pivot
+// (regions are discovered at runtime). JSON is pell's existing
+// dynamic-shape primitive; it preserves types and lets you address
+// columns by name.
 //
 // Requires: EXECUTE on DBMS_SQL (usually GRANTed to PUBLIC).
 // ---------------------------------------------------------------------------
@@ -29,9 +36,20 @@ pub unsafe fn region_sales() -> cursor<dyn> {
   );
 }
 
-// Iterate without knowing the column set up front.
+// Dump the whole JSON row per iteration.
 pub fn dump() {
   for row in region_sales() {
     p("{row}");
+  }
+}
+
+// Address columns individually — even though we don't know the column
+// set at compile time, JSON_VALUE happily returns NULL for missing keys.
+pub fn east_vs_west() {
+  for row in region_sales() {
+    let product = json::get_text(row, "$.PRODUCT");
+    let east    = json::get_number(row, "$.EAST");
+    let west    = json::get_number(row, "$.WEST");
+    p("{product}: east={east} west={west}");
   }
 }

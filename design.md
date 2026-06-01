@@ -2287,12 +2287,31 @@ pub unsafe fn region_sales_dyn() -> cursor<dyn> {
 
 `cursor<dyn>` is pell's marker for "the row shape isn't known at compile
 time." The caller's `for row in region_sales_dyn() { … }` lowers via
-`DBMS_SQL.DESCRIBE_COLUMNS`, walking columns positionally and rendering
-each row as `col1=val1 | col2=val2 | …` (NULLs as `(null)`). Type
-fidelity is lost — every value is `TO_CHAR`'d — but the alternative
-(hand-rolled `DBMS_SQL` plumbing) is what we replaced. For shapes you
-*do* know at compile time, declare a `record` and use `cursor<MyRow>`
-instead; that path uses a typed `FETCH INTO` with full type preservation.
+`DBMS_SQL.DESCRIBE_COLUMNS`, walking columns positionally and arriving
+at each row as a pell `json` value keyed by column name:
+
+```pell
+for row in region_sales_dyn() {
+    p(row);                                  -- {"PRODUCT":"widget","EAST":75,...}
+    let east = json::get_number(row, "$.EAST");
+    let west = json::get_number(row, "$.WEST");
+}
+```
+
+Type fidelity is preserved through JSON: numbers stay JSON numbers,
+dates/timestamps round-trip as ISO 8601 strings, NULLs become JSON
+null. `p(row)` auto-stringifies through `JSON_SERIALIZE`. Column access
+is `json::get_text` / `json::get_number` / `json::get_json` / `json::has`.
+
+**Why JSON instead of a synthesized record from `@touches`/`@relies_on`?**
+For dynamic pivots, the column set is discovered by `SELECT DISTINCT`
+at runtime — there's no compile-time enumeration to feed a record
+declaration. JSON is pell's existing dynamic-shape primitive; reusing
+it keeps one surface for "shape unknown at compile time."
+
+For shapes you *do* know at compile time, declare a `record` and use
+`cursor<MyRow>` instead; that path uses a typed `FETCH INTO` with full
+PL/SQL type preservation.
 
 Requires EXECUTE on `SYS.DBMS_SQL` — usually granted to PUBLIC, but a
 locked-down schema may need an explicit grant.
