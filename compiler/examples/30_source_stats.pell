@@ -1,0 +1,67 @@
+module source_stats;
+
+// ---------------------------------------------------------------------------
+// Dynamic pivot of `user_source`: line counts by object kind.
+//
+// This is the canonical "I don't know the column set at compile time"
+// case — every database has a different mix of PACKAGEs, FUNCTIONs,
+// TYPE BODYs, etc., so we return `cursor<dyn>` and let the consumer
+// pick what they want by key.
+//
+// Two consumers below show the typical shapes:
+//
+//   show()              - raw JSON per row (REPL exploration)
+//   show_packages()     - typed access to specific columns
+//
+// Try it from the REPL once deployed:
+//
+//   [1]> \exec BEGIN source_stats.show(); END;
+//   [2]> \exec BEGIN source_stats.show_packages(); END;
+// ---------------------------------------------------------------------------
+
+@touches(user_source)
+pub unsafe fn lines_by_kind() -> cursor<dyn> {
+  return pivot::sum_dyn(
+    // Pre-aggregate to one row per (name, kind). The PIVOT then
+    // spreads those rows out across columns. Renaming TYPE → KIND
+    // sidesteps both the pell keyword `type` AND the awkward
+    // 'PACKAGE BODY' → quoted JSON path; `PACKAGE_BODY` is friendlier.
+    source = sql! {
+      select name,
+             replace(type, ' ', '_') as kind,
+             count(*) as line_count
+        from user_source
+       group by name, type
+    },
+    rows  = name,
+    col   = kind,
+    value = line_count,
+  );
+}
+
+// Raw row dump — every row carries every key, with JSON null where the
+// object has no source of that kind. Good for exploration:
+//
+//   {"NAME":"HELLO","FUNCTION":null,"PACKAGE":5,"PACKAGE_BODY":16,...}
+pub fn show() {
+  for row in lines_by_kind() {
+    p("{row}");
+  }
+}
+
+// Address columns by name. Note `json::has` returns true even when the
+// value is JSON null (the *key* is present), so for "actually has body
+// source" we filter on the value: `body > 0`. NUMBER comparisons against
+// NULL evaluate to UNKNOWN (Oracle three-valued logic), which the `if`
+// treats as falsy — so this naturally skips bodyless objects.
+pub fn show_packages() {
+  for row in lines_by_kind() {
+    let name = json::get_text(row, "$.NAME");
+    let pkg  = json::get_number(row, "$.PACKAGE");
+    let body = json::get_number(row, "$.PACKAGE_BODY");
+    if body > 0 {
+      p("{name}: spec={pkg}  body={body}");
+    }
+  }
+}
+
