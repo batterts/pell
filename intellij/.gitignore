@@ -8,3 +8,7 @@ local.properties
 # PSI TRACK: Grammar-Kit + JFlex output. Regenerated from
 # src/main/flex/Pell.flex and src/main/grammar/Pell.bnf on every build.
 src/main/gen/
+
+# IntelliJ Platform Gradle plugin's local artifact cache. Refilled by
+# `./gradlew buildPlugin` on demand.
+.intellijPlatform/
