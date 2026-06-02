@@ -1,0 +1,5 @@
+module hello;
+
+pub fn greet(name: text) -> text {
+    return "hello, {name}!";
+}

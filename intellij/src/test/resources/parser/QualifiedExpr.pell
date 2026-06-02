@@ -1,0 +1,5 @@
+module quals;
+
+pub fn lookup_tables() -> list<text> {
+    return catalog::tables();
+}

@@ -1,0 +1,5 @@
+module jq_demo;
+
+pub fn extract_names(j: json) -> list<text> {
+    return jq! { .users[].name };
+}

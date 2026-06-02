@@ -1,0 +1,9 @@
+module struct_lit;
+
+pub fn make_employee() -> Employee {
+    return Employee {
+        id: 1,
+        name: "Alice",
+        level: 5,
+    };
+}

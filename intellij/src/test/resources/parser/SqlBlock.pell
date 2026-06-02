@@ -1,0 +1,8 @@
+module sql_demo;
+
+pub fn count_employees() -> number {
+    let n: number = sql! {
+        select count(*) from employees
+    }.one();
+    return n;
+}

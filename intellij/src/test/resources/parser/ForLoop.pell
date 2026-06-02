@@ -1,0 +1,9 @@
+module loops;
+
+pub fn sum(nums: list<number>) -> number {
+    var total: number = 0;
+    for n in nums {
+        total = total + n;
+    }
+    return total;
+}

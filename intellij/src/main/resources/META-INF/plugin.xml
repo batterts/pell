@@ -584,6 +584,13 @@ END employees;
              Captured locals become parameters. -->
         <refactoring.extractMethod
             implementation="dev.pell.intellij.refactor.extract.PellExtractMethodHandler" />
+
+        <!-- PSI-backed autocomplete (Ctrl-Space). Adds keywords, project
+             pub fn / record names, and in-scope locals to the popup.
+             Merges with LSP4IJ's completion feed. -->
+        <completion.contributor
+            language="pell"
+            implementationClass="dev.pell.intellij.completion.PellCompletionContributor" />
         <!-- <<< PSI TRACK <<< -->
     </extensions>
 
