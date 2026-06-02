@@ -25,10 +25,26 @@
   elementTypeClass       = "dev.pell.intellij.psi.PellElementType"
   tokenTypeClass         = "dev.pell.intellij.psi.PellTokenType"
 
-  // PSI inheritance — every node gets PellPsiElement (custom interface
-  // declared in Kotlin, Phase 3) and PellPsiElementImpl (Kotlin base
-  // class, Phase 3). For now they default to ASTWrapperPsiElement; the
-  // mixin classes arrive in Phase 3.
+  // PSI inheritance (Phase 3):
+  //   * Every rule's generated PSI interface extends PellPsiElement.
+  //   * Every named-declaration rule's impl class extends
+  //     PellNamedElementImpl, which implements PsiNameIdentifierOwner
+  //     by delegating to a per-rule getNameIdentifier override that
+  //     returns the wrapping name node (fnName, recordName, etc.).
+
+  extends(".*") = "dev.pell.intellij.psi.impl.PellPsiElementImpl"
+  implements(".*") = "dev.pell.intellij.psi.PellPsiElement"
+
+  // Named-declaration rules — get the PellNamedElement interface and
+  // the PellNamedElementImpl base. Each one's `nameIdentifier` returns
+  // its corresponding *Name wrapper rule.
+  extends("(fn|record|error|type|sealedType|aggregate|enum|seq|method|case|param|field|let|var|for|forall)Def|moduleDecl|enumVariant|typeBodyField|aggregateStateField") = "dev.pell.intellij.psi.impl.PellNamedElementImpl"
+  implements("(fn|record|error|type|sealedType|aggregate|enum|seq|method|case|param|field|let|var|for|forall)Def|moduleDecl|enumVariant|typeBodyField|aggregateStateField") = "dev.pell.intellij.psi.PellNamedElement"
+
+  // *Name wrapper rules implement PellNameIdentifier — the marker the
+  // PellNamedElementImpl base walks children for. PellNameIdentifier
+  // extends PellPsiElement so it picks up the default Impl base.
+  implements(".*Name") = "dev.pell.intellij.psi.PellNameIdentifier"
 
   tokens = [
     // ---- literals / identifiers ---------------------------------------
@@ -130,11 +146,32 @@
 
 pellFile ::= moduleDecl item *
 
-moduleDecl ::= KW_MODULE dottedIdent SEMI { pin = 1 }
+moduleDecl ::= KW_MODULE moduleName SEMI { pin = 1 }
+moduleName ::= dottedIdent
 
 dottedIdent ::= IDENT (DOT IDENT) *
 
 qualifiedIdent ::= IDENT (COLONCOLON IDENT) *
+
+// --- name wrappers (Phase 3) ----------------------------------------
+// Each named declaration wraps its name IDENT in a dedicated rule.
+// This gives the Phase-3 PSI mixin a typed handle for getNameIdentifier
+// instead of "find the first IDENT and hope" tree-walking.
+fnName        ::= IDENT
+recordName    ::= IDENT
+errorName     ::= IDENT
+typeName      ::= IDENT
+aggregateName ::= IDENT
+seqName       ::= qualifiedIdent
+enumName      ::= IDENT
+enumVariantName ::= IDENT
+methodName    ::= IDENT
+caseName      ::= IDENT
+paramName     ::= IDENT
+fieldName     ::= IDENT
+letName       ::= IDENT
+varName       ::= IDENT
+loopVarName   ::= IDENT
 
 // =====================================================================
 // Items
@@ -173,7 +210,7 @@ importStmt ::= KW_IMPORT qualifiedIdent SEMI { pin = 1 }
 
 // --- fn --------------------------------------------------------------
 
-fnDef ::= KW_UNSAFE ? KW_FN IDENT LPAREN paramList ? RPAREN
+fnDef ::= KW_UNSAFE ? KW_FN fnName LPAREN paramList ? RPAREN
          (ARROW typeRef) ?
          block
          (KW_FINALLY block) ?
@@ -181,30 +218,30 @@ fnDef ::= KW_UNSAFE ? KW_FN IDENT LPAREN paramList ? RPAREN
 
 // --- record / error / seq / enum ------------------------------------
 
-recordDef ::= KW_RECORD IDENT LBRACE fieldDefList ? RBRACE { pin = 1 }
+recordDef ::= KW_RECORD recordName LBRACE fieldDefList ? RBRACE { pin = 1 }
 
-errorDef ::= KW_ERROR IDENT (errorBody | SEMI) { pin = 1 }
+errorDef ::= KW_ERROR errorName (errorBody | SEMI) { pin = 1 }
 private errorBody ::= LBRACE fieldDefList ? RBRACE
 
-seqDef ::= KW_SEQ qualifiedIdent SEMI { pin = 1 }
+seqDef ::= KW_SEQ seqName SEMI { pin = 1 }
 
-enumDef ::= KW_ENUM IDENT LBRACE (enumVariant (COMMA enumVariant) * COMMA ?) ? RBRACE { pin = 1 }
-enumVariant ::= IDENT (EQ STRING) ?
+enumDef ::= KW_ENUM enumName LBRACE (enumVariant (COMMA enumVariant) * COMMA ?) ? RBRACE { pin = 1 }
+enumVariant ::= enumVariantName (EQ STRING) ?
 
 // --- type / sealed type --------------------------------------------
 
-typeDef ::= KW_TYPE IDENT typeBody { pin = 1 }
+typeDef ::= KW_TYPE typeName typeBody { pin = 1 }
 
-sealedTypeDef ::= KW_SEALED KW_TYPE IDENT sealedBody { pin = 2 }
+sealedTypeDef ::= KW_SEALED KW_TYPE typeName sealedBody { pin = 2 }
 
 typeBody ::= LBRACE typeBodyItem * RBRACE
 private typeBodyItem ::= methodDef | typeBodyField
-typeBodyField ::= IDENT COLON typeRef SEMI { pin = 2 }
+typeBodyField ::= fieldName COLON typeRef SEMI { pin = 2 }
 
 sealedBody ::= LBRACE sealedBodyItem * RBRACE
 private sealedBodyItem ::= caseDef | methodDef | typeBodyField
 
-methodDef ::= annotation * mapFnModifier ? KW_FN IDENT
+methodDef ::= annotation * mapFnModifier ? KW_FN methodName
               LPAREN paramList ? RPAREN
               (ARROW typeRef) ?
               (block | SEMI)
@@ -212,15 +249,15 @@ methodDef ::= annotation * mapFnModifier ? KW_FN IDENT
 
 private mapFnModifier ::= <<consumeIdent "map">>
 
-caseDef ::= KW_CASE IDENT caseBody ? SEMI ? { pin = 1 }
+caseDef ::= KW_CASE caseName caseBody ? SEMI ? { pin = 1 }
 
 private caseBody ::= LBRACE caseBodyItem * RBRACE (LBRACE methodDef * RBRACE) ?
 private caseBodyItem ::= methodDef | caseFieldDecl
-private caseFieldDecl ::= IDENT COLON typeRef (SEMI | COMMA) ?
+private caseFieldDecl ::= fieldName COLON typeRef (SEMI | COMMA) ?
 
 // --- aggregate ------------------------------------------------------
 
-aggregateDef ::= KW_AGGREGATE IDENT
+aggregateDef ::= KW_AGGREGATE aggregateName
                  LPAREN paramList ? RPAREN
                  (ARROW typeRef) ?
                  LBRACE aggregateBodyItem * RBRACE
@@ -232,22 +269,22 @@ private aggregateBodyItem ::= aggregateState
                             | aggregateFinish
 
 aggregateState ::= <<consumeIdent "state">> LBRACE aggregateStateField + RBRACE { pin = 2 }
-aggregateStateField ::= IDENT COLON typeRef EQ expr SEMI { pin = 2 }
+aggregateStateField ::= fieldName COLON typeRef EQ expr SEMI { pin = 2 }
 
 aggregateStep ::= <<consumeIdent "step">> (LPAREN paramList ? RPAREN) ? block { pin = 1 }
 
-aggregateMerge ::= <<consumeIdent "merge">> LPAREN (IDENT COLON typeRef) ? RPAREN block { pin = 2 }
+aggregateMerge ::= <<consumeIdent "merge">> LPAREN (paramName COLON typeRef) ? RPAREN block { pin = 2 }
 
 aggregateFinish ::= <<consumeIdent "finish">> LPAREN RPAREN (ARROW typeRef) ? block { pin = 1 }
 
 // --- params / fields ------------------------------------------------
 
 paramList ::= param (COMMA param) * COMMA ?
-param ::= paramMode ? IDENT COLON typeRef { pin = 2 }
+param ::= paramMode ? paramName COLON typeRef { pin = 2 }
 private paramMode ::= KW_OUT | KW_INOUT
 
 fieldDefList ::= fieldDef (COMMA fieldDef) * COMMA ?
-fieldDef ::= IDENT COLON typeRef { pin = 2 }
+fieldDef ::= fieldName COLON typeRef { pin = 2 }
 
 // =====================================================================
 // Types
@@ -282,16 +319,16 @@ stmt ::= letStmt
        | yieldStmt
        | exprOrAssignStmt
 
-letStmt ::= KW_LET IDENT (COLON typeRef) ? (EQ expr) ? SEMI { pin = 1 }
-varStmt ::= KW_VAR IDENT (COLON typeRef) ? (EQ expr) ? SEMI { pin = 1 }
+letStmt ::= KW_LET letName (COLON typeRef) ? (EQ expr) ? SEMI { pin = 1 }
+varStmt ::= KW_VAR varName (COLON typeRef) ? (EQ expr) ? SEMI { pin = 1 }
 
 returnStmt ::= KW_RETURN expr ? SEMI { pin = 1 }
 
 ifStmt ::= KW_IF expr block ifElseTail ? { pin = 1 }
 private ifElseTail ::= KW_ELSE (ifStmt | block)
 
-forStmt    ::= KW_FOR    IDENT KW_IN expr block { pin = 1 }
-forallStmt ::= KW_FORALL IDENT KW_IN expr block { pin = 1 }
+forStmt    ::= KW_FOR    loopVarName KW_IN expr block { pin = 1 }
+forallStmt ::= KW_FORALL loopVarName KW_IN expr block { pin = 1 }
 
 matchStmt ::= KW_MATCH expr LBRACE (matchArm (COMMA matchArm) * COMMA ?) ? RBRACE { pin = 1 }
 
