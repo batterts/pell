@@ -1,14 +1,12 @@
 // Grammar-Kit BNF for the pell language.
 //
-// PSI TRACK PHASE 0 STATUS: smoke implementation. Only the file root
-// + one item production. Phase 2 replaces the body with the full port
-// of compiler/pell/parser.py.
+// PSI TRACK PHASE 1 STATUS: terminal token set complete (mirrors
+// compiler/pell/lexer.py exactly). Grammar productions still smoke
+// — Phase 2 replaces the body.
 //
-// Source of truth: compiler/pell/parser.py. Any divergence between
-// what this grammar accepts and what the Python parser accepts is a
-// bug. The round-trip test exercises every example file in
-// compiler/examples/ through both parsers and asserts equivalent
-// structure.
+// Source of truth: compiler/pell/parser.py for productions,
+// compiler/pell/lexer.py for tokens. Any divergence is a bug; the
+// round-trip test (Phase final) catches it.
 
 {
   parserClass = "dev.pell.intellij.parser.PellParser"
@@ -23,21 +21,117 @@
   elementTypeClass       = "dev.pell.intellij.psi.PellElementType"
   tokenTypeClass         = "dev.pell.intellij.psi.PellTokenType"
 
-  // Tokens are produced by the JFlex lexer (src/main/flex/Pell.flex)
-  // and exposed via PellTokenTypes. The names here must match the
-  // PellTokenTypes field names exactly.
+  // The tokens block is the canonical declaration of every terminal
+  // emitted by the JFlex lexer. Grammar-Kit emits one IElementType
+  // constant per entry into PellElementTypes; the JFlex spec imports
+  // these constants. Names must match the names used in the JFlex
+  // spec exactly (case-sensitive).
   tokens = [
-    IDENT         = "IDENT"
-    LINE_COMMENT  = "LINE_COMMENT"
-    BLOCK_COMMENT = "BLOCK_COMMENT"
+    // ---- literals / identifiers ---------------------------------------
+    IDENT     = 'regexp:[A-Za-z_][A-Za-z0-9_]*'
+    NUMBER    = 'regexp:[0-9]+(\.[0-9]+)?'
+    STRING    = 'string literal'
+    RAWSTRING = 'raw string literal'
+    REGEX     = 'regex literal'
+    SQL_BLOCK = 'sql!{...}'
+    JQ_BLOCK  = 'jq!{...}'
+
+    // ---- trivia (parser-side: filtered by parserDefinition) -----------
+    LINE_COMMENT  = '// comment'
+    BLOCK_COMMENT = '/* comment */'
+
+    // ---- keywords (one token per — same set as KEYWORDS in lexer.py) --
+    KW_MODULE      = 'module'
+    KW_IMPORT      = 'import'
+    KW_PUB         = 'pub'
+    KW_FN          = 'fn'
+    KW_LET         = 'let'
+    KW_VAR         = 'var'
+    KW_RETURN      = 'return'
+    KW_YIELD       = 'yield'
+    KW_IF          = 'if'
+    KW_ELSE        = 'else'
+    KW_FOR         = 'for'
+    KW_FORALL      = 'forall'
+    KW_IN          = 'in'
+    KW_MATCH       = 'match'
+    KW_TRANSACTION = 'transaction'
+    KW_RECORD      = 'record'
+    KW_ERROR       = 'error'
+    KW_TRUE        = 'true'
+    KW_FALSE       = 'false'
+    KW_SOME        = 'Some'
+    KW_NONE        = 'None'
+    KW_OK          = 'Ok'
+    KW_ERR         = 'Err'
+    KW_UNSAFE      = 'unsafe'
+    KW_FINALLY     = 'finally'
+    KW_AND         = 'and'
+    KW_OR          = 'or'
+    KW_NOT         = 'not'
+    KW_TYPE        = 'type'
+    KW_SEALED      = 'sealed'
+    KW_AGGREGATE   = 'aggregate'
+    KW_CASE        = 'case'
+    KW_SELF        = 'self'
+    KW_SEQ         = 'seq'
+    KW_OUT         = 'out'
+    KW_INOUT       = 'inout'
+    KW_ENUM        = 'enum'
+
+    // ---- multi-char punctuation (must precede single-char in lexer) ---
+    DOTDOTEQ    = '..='
+    DOTDOT      = '..'
+    COLONCOLON  = '::'
+    ARROW       = '->'
+    FATARROW    = '=>'
+    EQEQ        = '=='
+    BANGEQ      = '!='
+    LE          = '<='
+    GE          = '>='
+    AMPAMP      = '&&'
+    PIPEPIPE    = '||'
+    PIPEGT      = '|>'
+
+    // ---- single-char punctuation --------------------------------------
+    LPAREN   = '('
+    RPAREN   = ')'
+    LBRACE   = '{'
+    RBRACE   = '}'
+    LBRACKET = '['
+    RBRACKET = ']'
+    SEMI     = ';'
+    COMMA    = ','
+    COLON    = ':'
+    DOT      = '.'
+    AT       = '@'
+    QUESTION = '?'
+    PIPE     = '|'
+    AMP      = '&'
+    BANG     = '!'
+    PLUS     = '+'
+    MINUS    = '-'
+    STAR     = '*'
+    SLASH    = '/'
+    PERCENT  = '%'
+    LT       = '<'
+    GT       = '>'
+    EQ       = '='
   ]
 }
 
 // --------------------------------------------------------------------
-// Phase 0 smoke grammar: a pell file is a sequence of identifiers.
-// Phase 2 expands this to: module decl + imports + items
-// (fn / record / error / enum / seq / type / aggregate / stmt+).
+// Phase 1 smoke grammar: file = list of any token.
+// Phase 2 replaces this with the full port of compiler/pell/parser.py.
 // --------------------------------------------------------------------
 
 pellFile ::= item *
-private item ::= IDENT
+private item ::= IDENT | KW_MODULE | KW_FN | KW_RECORD | KW_ERROR | KW_LET
+               | KW_RETURN | KW_IF | KW_ELSE | KW_FOR | KW_MATCH
+               | KW_TRUE | KW_FALSE | KW_SELF | KW_PUB | KW_IMPORT
+               | NUMBER | STRING | RAWSTRING | REGEX | SQL_BLOCK | JQ_BLOCK
+               | LPAREN | RPAREN | LBRACE | RBRACE | LBRACKET | RBRACKET
+               | SEMI | COMMA | COLON | DOT | AT | QUESTION | PIPE | AMP
+               | BANG | PLUS | MINUS | STAR | SLASH | PERCENT | LT | GT | EQ
+               | DOTDOT | DOTDOTEQ | COLONCOLON | ARROW | FATARROW
+               | EQEQ | BANGEQ | LE | GE | AMPAMP | PIPEPIPE | PIPEGT
