@@ -544,6 +544,35 @@ END employees;
             builderClass="dev.pell.intellij.newproject.PellNewProjectWizard$PellNewProjectWizardBuilder" />
         <directoryProjectGenerator
             implementation="dev.pell.intellij.newproject.PellDirectoryProjectGenerator" />
+
+        <!-- >>> PSI TRACK >>> -->
+        <!-- Cross-file reference resolution: every qualified path like
+             `hr::employees::Employee` carries a PsiReference back to the
+             declaring PellNamedElement (Phase 4). -->
+        <psi.referenceContributor
+            language="pell"
+            implementation="dev.pell.intellij.psi.PellReferenceContributor" />
+
+        <!-- Find Usages (Cmd-G / Edit ▸ Find Usages) — enables it for
+             every PellNamedElement; uses a DefaultWordsScanner over IDENT
+             tokens for the cheap first-pass scan, then PSI resolution
+             confirms each candidate. -->
+        <lang.findUsagesProvider
+            language="pell"
+            implementationClass="dev.pell.intellij.codeInsight.PellFindUsagesProvider" />
+
+        <!-- Names validator — used by Rename (Phase 5) and by Inspections
+             to reject names that would collide with pell keywords or
+             aren't legal IDENTs. -->
+        <lang.namesValidator
+            language="pell"
+            implementationClass="dev.pell.intellij.refactor.PellNamesValidator" />
+
+        <!-- Go To Symbol (Cmd-Opt-O) — feeds every project-level
+             PellNamedElement into the popup. -->
+        <gotoSymbolContributor
+            implementation="dev.pell.intellij.codeInsight.PellGotoSymbolContributor" />
+        <!-- <<< PSI TRACK <<< -->
     </extensions>
 
 </idea-plugin>
