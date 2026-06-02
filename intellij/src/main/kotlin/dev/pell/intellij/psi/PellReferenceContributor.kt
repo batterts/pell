@@ -43,10 +43,13 @@ class PellReferenceContributor : PsiReferenceContributor() {
     private object QualifiedProvider : PsiReferenceProvider() {
         override fun getReferencesByElement(element: PsiElement, context: ProcessingContext): Array<PsiReference> {
             val qe = element as? PellQualifiedExpr ?: return PsiReference.EMPTY_ARRAY
-            // The reference range is just the qualified-name portion (excludes
-            // a trailing struct-lit body if present).
-            val pathText = qe.text.substringBefore('{').trim()
-            val range = TextRange(0, pathText.length)
+            // For Rename: the reference range covers only the LAST segment
+            // of `foo::bar::baz`. Renaming `baz` therefore rewrites just the
+            // tail and leaves the qualifier untouched.
+            val pathText = qe.text.substringBefore('{').trimEnd()
+            val lastSep = pathText.lastIndexOf("::")
+            val lastStart = if (lastSep >= 0) lastSep + 2 else 0
+            val range = TextRange(lastStart, pathText.length)
             return arrayOf(PellQualifiedReference(qe, range))
         }
     }

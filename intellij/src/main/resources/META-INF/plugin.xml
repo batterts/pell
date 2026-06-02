@@ -572,6 +572,12 @@ END employees;
              PellNamedElement into the popup. -->
         <gotoSymbolContributor
             implementation="dev.pell.intellij.codeInsight.PellGotoSymbolContributor" />
+
+        <!-- Rename (Shift-F6) processor — claims every PellNamedElement
+             so the platform routes new-name validation through
+             PellNamesValidator and references through PellReferenceContributor. -->
+        <renamePsiElementProcessor
+            implementation="dev.pell.intellij.refactor.PellRenameProcessor" />
         <!-- <<< PSI TRACK <<< -->
     </extensions>
 
