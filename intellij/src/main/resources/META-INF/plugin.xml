@@ -585,12 +585,30 @@ END employees;
         <refactoring.extractMethod
             implementation="dev.pell.intellij.refactor.extract.PellExtractMethodHandler" />
 
-        <!-- PSI-backed autocomplete (Ctrl-Space). Adds keywords, project
-             pub fn / record names, and in-scope locals to the popup.
-             Merges with LSP4IJ's completion feed. -->
+        <!-- PSI-backed autocomplete (Ctrl-Space). Adds primitive types,
+             keywords, project pub fn / record names, and in-scope locals
+             to the popup. Merges with LSP4IJ's completion feed. -->
         <completion.contributor
             language="pell"
             implementationClass="dev.pell.intellij.completion.PellCompletionContributor" />
+
+        <!-- Alt-Enter intention actions. Surfaced when the caret is on a
+             bare expression-statement (e.g. `user_tables();`). -->
+        <intentionAction>
+            <language>pell</language>
+            <className>dev.pell.intellij.intentions.PellIntroduceVariableIntention</className>
+            <category>Pell</category>
+        </intentionAction>
+        <intentionAction>
+            <language>pell</language>
+            <className>dev.pell.intellij.intentions.PellAssignToLocalVariableIntention</className>
+            <category>Pell</category>
+        </intentionAction>
+        <intentionAction>
+            <language>pell</language>
+            <className>dev.pell.intellij.intentions.PellWrapInForLoopIntention</className>
+            <category>Pell</category>
+        </intentionAction>
         <!-- <<< PSI TRACK <<< -->
     </extensions>
 
@@ -635,6 +653,20 @@ END employees;
                 description="Modify a fn's signature and propagate the change to every call site"
                 use-shortcut-of="ChangeSignature">
             <add-to-group group-id="RefactoringMenu" anchor="last" />
+        </action>
+
+        <!-- Generate menu items (Cmd-N / Alt-Insert). -->
+        <action id="pell.GenerateField"
+                class="dev.pell.intellij.generate.PellGenerateFieldAction"
+                text="Field"
+                description="Insert a `name: type,` field into the enclosing record">
+            <add-to-group group-id="GenerateGroup" anchor="last" />
+        </action>
+        <action id="pell.GenerateMethod"
+                class="dev.pell.intellij.generate.PellGenerateMethodAction"
+                text="Method"
+                description="Insert a `pub fn name(params) -> ret { }` skeleton">
+            <add-to-group group-id="GenerateGroup" anchor="last" />
         </action>
     </actions>
     <!-- <<< PSI TRACK <<< -->

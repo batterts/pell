@@ -50,7 +50,18 @@ private object PellCompletionProvider : CompletionProvider<CompletionParameters>
         val pos = parameters.position
         val file = pos.containingFile as? PellFile ?: return
 
-        // 1. Keywords.
+        // 1a. Primitive types — `number`, `text`, `bool`, etc.
+        // Listed first so they're more visible than keywords when the
+        // user is in a type position (after `:` or `->`).
+        PRIMITIVE_TYPES.forEach { ty ->
+            result.addElement(
+                LookupElementBuilder.create(ty)
+                    .withTypeText("primitive type", true)
+                    .withIcon(com.intellij.icons.AllIcons.Nodes.Class),
+            )
+        }
+
+        // 1b. Keywords.
         KEYWORDS.forEach { kw ->
             result.addElement(LookupElementBuilder.create(kw).bold().withTypeText("keyword"))
         }
@@ -101,5 +112,11 @@ private object PellCompletionProvider : CompletionProvider<CompletionParameters>
         "record", "error", "true", "false", "Some", "None", "Ok", "Err",
         "unsafe", "finally", "and", "or", "not",
         "type", "sealed", "aggregate", "case", "self", "seq", "out", "inout", "enum",
+    )
+
+    // Mirrors PRIMITIVES in compiler/pell/parser.py.
+    private val PRIMITIVE_TYPES = listOf(
+        "number", "int", "text", "bigtext", "bool",
+        "date", "timestamp", "interval", "bytes", "json", "Unit",
     )
 }
