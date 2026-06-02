@@ -1,12 +1,16 @@
 // Grammar-Kit BNF for the pell language.
 //
-// PSI TRACK PHASE 1 STATUS: terminal token set complete (mirrors
-// compiler/pell/lexer.py exactly). Grammar productions still smoke
-// — Phase 2 replaces the body.
+// PSI TRACK PHASE 2 STATUS: full port of compiler/pell/parser.py.
 //
-// Source of truth: compiler/pell/parser.py for productions,
-// compiler/pell/lexer.py for tokens. Any divergence is a bug; the
-// round-trip test (Phase final) catches it.
+// Source of truth: compiler/pell/parser.py. Productions here mirror
+// _parse_* methods one-for-one; ambiguities the Python parser resolves
+// by lookahead are resolved here via external rules in PellParserUtil.
+// Round-trip test catches drift.
+//
+// Naming convention: rules are camelCase; Grammar-Kit prepends "Pell"
+// to produce PSI interface names (PellFnDef, PellRecordDef, etc.).
+// Rules marked `private` produce no PSI element — they're inlined into
+// the parent's CST.
 
 {
   parserClass = "dev.pell.intellij.parser.PellParser"
@@ -21,11 +25,11 @@
   elementTypeClass       = "dev.pell.intellij.psi.PellElementType"
   tokenTypeClass         = "dev.pell.intellij.psi.PellTokenType"
 
-  // The tokens block is the canonical declaration of every terminal
-  // emitted by the JFlex lexer. Grammar-Kit emits one IElementType
-  // constant per entry into PellElementTypes; the JFlex spec imports
-  // these constants. Names must match the names used in the JFlex
-  // spec exactly (case-sensitive).
+  // PSI inheritance — every node gets PellPsiElement (custom interface
+  // declared in Kotlin, Phase 3) and PellPsiElementImpl (Kotlin base
+  // class, Phase 3). For now they default to ASTWrapperPsiElement; the
+  // mixin classes arrive in Phase 3.
+
   tokens = [
     // ---- literals / identifiers ---------------------------------------
     IDENT     = 'regexp:[A-Za-z_][A-Za-z0-9_]*'
@@ -36,11 +40,11 @@
     SQL_BLOCK = 'sql!{...}'
     JQ_BLOCK  = 'jq!{...}'
 
-    // ---- trivia (parser-side: filtered by parserDefinition) -----------
+    // ---- trivia ---------------------------------------------------------
     LINE_COMMENT  = '// comment'
     BLOCK_COMMENT = '/* comment */'
 
-    // ---- keywords (one token per — same set as KEYWORDS in lexer.py) --
+    // ---- keywords -------------------------------------------------------
     KW_MODULE      = 'module'
     KW_IMPORT      = 'import'
     KW_PUB         = 'pub'
@@ -79,7 +83,7 @@
     KW_INOUT       = 'inout'
     KW_ENUM        = 'enum'
 
-    // ---- multi-char punctuation (must precede single-char in lexer) ---
+    // ---- multi-char punctuation ----------------------------------------
     DOTDOTEQ    = '..='
     DOTDOT      = '..'
     COLONCOLON  = '::'
@@ -93,7 +97,7 @@
     PIPEPIPE    = '||'
     PIPEGT      = '|>'
 
-    // ---- single-char punctuation --------------------------------------
+    // ---- single-char punctuation ---------------------------------------
     LPAREN   = '('
     RPAREN   = ')'
     LBRACE   = '{'
@@ -120,18 +124,313 @@
   ]
 }
 
-// --------------------------------------------------------------------
-// Phase 1 smoke grammar: file = list of any token.
-// Phase 2 replaces this with the full port of compiler/pell/parser.py.
-// --------------------------------------------------------------------
+// =====================================================================
+// Top level
+// =====================================================================
 
-pellFile ::= item *
-private item ::= IDENT | KW_MODULE | KW_FN | KW_RECORD | KW_ERROR | KW_LET
-               | KW_RETURN | KW_IF | KW_ELSE | KW_FOR | KW_MATCH
-               | KW_TRUE | KW_FALSE | KW_SELF | KW_PUB | KW_IMPORT
-               | NUMBER | STRING | RAWSTRING | REGEX | SQL_BLOCK | JQ_BLOCK
-               | LPAREN | RPAREN | LBRACE | RBRACE | LBRACKET | RBRACKET
-               | SEMI | COMMA | COLON | DOT | AT | QUESTION | PIPE | AMP
-               | BANG | PLUS | MINUS | STAR | SLASH | PERCENT | LT | GT | EQ
-               | DOTDOT | DOTDOTEQ | COLONCOLON | ARROW | FATARROW
-               | EQEQ | BANGEQ | LE | GE | AMPAMP | PIPEPIPE | PIPEGT
+pellFile ::= moduleDecl item *
+
+moduleDecl ::= KW_MODULE dottedIdent SEMI { pin = 1 }
+
+dottedIdent ::= IDENT (DOT IDENT) *
+
+qualifiedIdent ::= IDENT (COLONCOLON IDENT) *
+
+// =====================================================================
+// Items
+// =====================================================================
+//
+// Items can be preceded by @annotations and optional `pub`. `unsafe` is
+// a fn-only modifier so it lives inside fnDef itself, not at item level.
+
+item ::= annotation * KW_PUB ? itemBody { recoverWhile = item_recover }
+private item_recover ::= !(KW_PUB | KW_FN | KW_RECORD | KW_ERROR | KW_TYPE
+                          | KW_SEALED | KW_AGGREGATE | KW_SEQ | KW_ENUM
+                          | KW_IMPORT | KW_UNSAFE | AT)
+
+private itemBody ::= importStmt
+                   | fnDef
+                   | recordDef
+                   | errorDef
+                   | sealedTypeDef
+                   | typeDef
+                   | aggregateDef
+                   | seqDef
+                   | enumDef
+
+// --- annotations -----------------------------------------------------
+
+annotation ::= AT IDENT annotationArgs ? { pin = 1 }
+
+annotationArgs ::= LPAREN (annotationArg (COMMA annotationArg) *) ? COMMA ? RPAREN
+
+annotationArg ::= namedArg | expr
+private namedArg ::= IDENT EQ expr { pin = 2 }
+
+// --- import ----------------------------------------------------------
+
+importStmt ::= KW_IMPORT qualifiedIdent SEMI { pin = 1 }
+
+// --- fn --------------------------------------------------------------
+
+fnDef ::= KW_UNSAFE ? KW_FN IDENT LPAREN paramList ? RPAREN
+         (ARROW typeRef) ?
+         block
+         (KW_FINALLY block) ?
+       { pin = 2 }
+
+// --- record / error / seq / enum ------------------------------------
+
+recordDef ::= KW_RECORD IDENT LBRACE fieldDefList ? RBRACE { pin = 1 }
+
+errorDef ::= KW_ERROR IDENT (errorBody | SEMI) { pin = 1 }
+private errorBody ::= LBRACE fieldDefList ? RBRACE
+
+seqDef ::= KW_SEQ qualifiedIdent SEMI { pin = 1 }
+
+enumDef ::= KW_ENUM IDENT LBRACE (enumVariant (COMMA enumVariant) * COMMA ?) ? RBRACE { pin = 1 }
+enumVariant ::= IDENT (EQ STRING) ?
+
+// --- type / sealed type --------------------------------------------
+
+typeDef ::= KW_TYPE IDENT typeBody { pin = 1 }
+
+sealedTypeDef ::= KW_SEALED KW_TYPE IDENT sealedBody { pin = 2 }
+
+typeBody ::= LBRACE typeBodyItem * RBRACE
+private typeBodyItem ::= methodDef | typeBodyField
+typeBodyField ::= IDENT COLON typeRef SEMI { pin = 2 }
+
+sealedBody ::= LBRACE sealedBodyItem * RBRACE
+private sealedBodyItem ::= caseDef | methodDef | typeBodyField
+
+methodDef ::= annotation * mapFnModifier ? KW_FN IDENT
+              LPAREN paramList ? RPAREN
+              (ARROW typeRef) ?
+              (block | SEMI)
+            { pin = "KW_FN" }
+
+private mapFnModifier ::= <<consumeIdent "map">>
+
+caseDef ::= KW_CASE IDENT caseBody ? SEMI ? { pin = 1 }
+
+private caseBody ::= LBRACE caseBodyItem * RBRACE (LBRACE methodDef * RBRACE) ?
+private caseBodyItem ::= methodDef | caseFieldDecl
+private caseFieldDecl ::= IDENT COLON typeRef (SEMI | COMMA) ?
+
+// --- aggregate ------------------------------------------------------
+
+aggregateDef ::= KW_AGGREGATE IDENT
+                 LPAREN paramList ? RPAREN
+                 (ARROW typeRef) ?
+                 LBRACE aggregateBodyItem * RBRACE
+              { pin = 1 }
+
+private aggregateBodyItem ::= aggregateState
+                            | aggregateStep
+                            | aggregateMerge
+                            | aggregateFinish
+
+aggregateState ::= <<consumeIdent "state">> LBRACE aggregateStateField + RBRACE { pin = 2 }
+aggregateStateField ::= IDENT COLON typeRef EQ expr SEMI { pin = 2 }
+
+aggregateStep ::= <<consumeIdent "step">> (LPAREN paramList ? RPAREN) ? block { pin = 1 }
+
+aggregateMerge ::= <<consumeIdent "merge">> LPAREN (IDENT COLON typeRef) ? RPAREN block { pin = 2 }
+
+aggregateFinish ::= <<consumeIdent "finish">> LPAREN RPAREN (ARROW typeRef) ? block { pin = 1 }
+
+// --- params / fields ------------------------------------------------
+
+paramList ::= param (COMMA param) * COMMA ?
+param ::= paramMode ? IDENT COLON typeRef { pin = 2 }
+private paramMode ::= KW_OUT | KW_INOUT
+
+fieldDefList ::= fieldDef (COMMA fieldDef) * COMMA ?
+fieldDef ::= IDENT COLON typeRef { pin = 2 }
+
+// =====================================================================
+// Types
+// =====================================================================
+
+typeRef ::= typeAtom (PIPE typeAtom) *
+
+typeAtom ::= typeAtomBase typeAtomSuffix *
+
+private typeAtomBase ::= LPAREN typeRef ? RPAREN
+                       | BANG
+                       | IDENT typeArgList ?
+
+typeArgList ::= LT typeRef (COMMA typeRef) * GT { pin = 1 }
+
+private typeAtomSuffix ::= QUESTION
+
+// =====================================================================
+// Statements
+// =====================================================================
+
+block ::= LBRACE stmt * RBRACE { pin = 1 }
+
+stmt ::= letStmt
+       | varStmt
+       | returnStmt
+       | ifStmt
+       | forStmt
+       | forallStmt
+       | matchStmt
+       | transactionStmt
+       | yieldStmt
+       | exprOrAssignStmt
+
+letStmt ::= KW_LET IDENT (COLON typeRef) ? (EQ expr) ? SEMI { pin = 1 }
+varStmt ::= KW_VAR IDENT (COLON typeRef) ? (EQ expr) ? SEMI { pin = 1 }
+
+returnStmt ::= KW_RETURN expr ? SEMI { pin = 1 }
+
+ifStmt ::= KW_IF expr block ifElseTail ? { pin = 1 }
+private ifElseTail ::= KW_ELSE (ifStmt | block)
+
+forStmt    ::= KW_FOR    IDENT KW_IN expr block { pin = 1 }
+forallStmt ::= KW_FORALL IDENT KW_IN expr block { pin = 1 }
+
+matchStmt ::= KW_MATCH expr LBRACE (matchArm (COMMA matchArm) * COMMA ?) ? RBRACE { pin = 1 }
+
+matchArm ::= pattern ARROW (block | expr)
+
+transactionStmt ::= KW_TRANSACTION block { pin = 1 }
+yieldStmt ::= KW_YIELD expr SEMI { pin = 1 }
+
+// expr followed by optional `= expr` is an assignment; otherwise it's
+// an expression-statement. Both end with `;`.
+exprOrAssignStmt ::= expr (EQ expr) ? SEMI
+
+// =====================================================================
+// Patterns
+// =====================================================================
+
+pattern ::= wildcardPattern
+          | variantPattern
+          | literalPattern
+          | bindingPattern
+
+// `_` (the wildcard) is lexed as IDENT in pell — match contextually
+// via PellParserUtil.consumeIdent("_"). Listed before bindingPattern
+// so the IDENT alternative there doesn't shadow it.
+wildcardPattern ::= <<consumeIdent "_">>
+
+variantPattern ::= (KW_NONE | KW_SOME | KW_OK | KW_ERR | IDENT)
+                   (patternArgList | patternFieldList) ?
+
+private patternArgList ::= LPAREN (pattern (COMMA pattern) *) ? RPAREN
+
+private patternFieldList ::= LBRACE
+                              (fieldPattern (COMMA fieldPattern) *
+                                (COMMA DOTDOT) ?
+                                COMMA ?
+                              ) ?
+                             RBRACE
+
+fieldPattern ::= IDENT (COLON pattern) ?
+
+literalPattern ::= NUMBER | STRING | KW_TRUE | KW_FALSE
+bindingPattern ::= IDENT
+
+// =====================================================================
+// Expressions (low → high precedence; left-associative)
+// =====================================================================
+
+expr ::= pipelineExpr
+
+pipelineExpr   ::= logicalOrExpr   (PIPEGT logicalOrExpr) *
+logicalOrExpr  ::= logicalAndExpr  (PIPEPIPE logicalAndExpr) *
+logicalAndExpr ::= equalityExpr    (AMPAMP equalityExpr) *
+equalityExpr   ::= comparisonExpr  ((EQEQ | BANGEQ) comparisonExpr) *
+comparisonExpr ::= additionExpr    ((LT | LE | GT | GE) additionExpr) *
+additionExpr   ::= multiplicationExpr ((PLUS | MINUS) multiplicationExpr) *
+multiplicationExpr ::= unaryExpr   ((STAR | SLASH | PERCENT) unaryExpr) *
+
+unaryExpr ::= unaryPrefixExpr | postfixExpr
+private unaryPrefixExpr ::= (MINUS | BANG) unaryExpr
+
+// --- postfix --------------------------------------------------------
+
+postfixExpr ::= primaryExpr postfixOp *
+
+private postfixOp ::= memberAccessOp
+                    | turbofishCallOp
+                    | callOp
+                    | questionOp
+
+memberAccessOp  ::= DOT IDENT { pin = 1 }
+callOp          ::= LPAREN argList ? RPAREN { pin = 1 }
+turbofishCallOp ::= <<atTurbofish>> COLONCOLON LT typeRef (COMMA typeRef) * GT
+                    LPAREN argList ? RPAREN
+                 { pin = "COLONCOLON" }
+questionOp      ::= QUESTION
+
+argList ::= arg (COMMA arg) * COMMA ?
+arg ::= argNamed | expr
+private argNamed ::= IDENT EQ expr { pin = 2 }
+
+// --- primary --------------------------------------------------------
+
+primaryExpr ::= numberLit
+              | textLit
+              | rawTextLit
+              | regexLit
+              | boolLit
+              | noneLit
+              | selfLit
+              | unitLit            // ()  — must precede parenOrTuple
+              | someExpr
+              | okExpr
+              | errExpr
+              | sqlBlockExpr
+              | jqBlockExpr
+              | parenOrTupleExpr
+              | listLit
+              | qualifiedExpr
+              | ifExpr
+              | matchExpr
+
+numberLit  ::= NUMBER
+textLit    ::= STRING
+rawTextLit ::= RAWSTRING
+regexLit   ::= REGEX
+boolLit    ::= KW_TRUE | KW_FALSE
+noneLit    ::= KW_NONE
+selfLit    ::= KW_SELF
+unitLit    ::= LPAREN RPAREN
+
+someExpr ::= KW_SOME LPAREN expr RPAREN { pin = 1 }
+okExpr   ::= KW_OK   LPAREN expr ? RPAREN { pin = 1 }
+errExpr  ::= KW_ERR  LPAREN expr RPAREN { pin = 1 }
+
+sqlBlockExpr ::= SQL_BLOCK
+jqBlockExpr  ::= JQ_BLOCK
+
+// `(a, b)` → tuple; `(a)` → grouped expression. Grammar-Kit reduces to
+// parenOrTuple here; the AST layer distinguishes by element count.
+parenOrTupleExpr ::= LPAREN expr (COMMA expr) * COMMA ? RPAREN { pin = 1 }
+
+listLit ::= LBRACKET (expr (COMMA expr) * COMMA ?) ? RBRACKET { pin = 1 }
+
+// `foo::bar::baz` qualified path. Then optionally a struct-literal body
+// if next-after-LBRACE looks like field-init pattern (see atStructLit
+// in PellParserUtil). Otherwise it's a plain identifier reference.
+qualifiedExpr ::= IDENT (<<atQualCont>> COLONCOLON IDENT) * structLitBody ?
+
+structLitBody ::= <<atStructLit>> LBRACE
+                  (fieldInit (COMMA fieldInit) * COMMA ?) ?
+                  RBRACE
+
+fieldInit ::= IDENT (COLON expr) ? { pin = 1 }
+
+// --- if/match as expressions ----------------------------------------
+
+ifExpr ::= KW_IF expr block (KW_ELSE block) ? { pin = 1 }
+
+matchExpr ::= KW_MATCH expr LBRACE
+              (matchArm (COMMA matchArm) * COMMA ?) ?
+              RBRACE
+           { pin = 1 }
