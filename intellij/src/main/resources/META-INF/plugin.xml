@@ -578,6 +578,12 @@ END employees;
              PellNamesValidator and references through PellReferenceContributor. -->
         <renamePsiElementProcessor
             implementation="dev.pell.intellij.refactor.PellRenameProcessor" />
+
+        <!-- Extract Method (Cmd-Opt-M). Wraps a contiguous stmt selection
+             in a new pub fn / fn and replaces the selection with a call.
+             Captured locals become parameters. -->
+        <refactoring.extractMethod
+            implementation="dev.pell.intellij.refactor.extract.PellExtractMethodHandler" />
         <!-- <<< PSI TRACK <<< -->
     </extensions>
 
