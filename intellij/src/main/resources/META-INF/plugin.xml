@@ -587,4 +587,48 @@ END employees;
         <!-- <<< PSI TRACK <<< -->
     </extensions>
 
+    <!-- >>> PSI TRACK >>> -->
+    <actions>
+        <!-- Parameters to Record — extracts a fn's parameter list into a
+             new pub record and rewrites every call site to the struct-literal
+             form. Available under Refactor This (Ctrl-T / Ctrl-Alt-Shift-T). -->
+        <action id="pell.ParametersToRecord"
+                class="dev.pell.intellij.refactor.paramsToRecord.PellParamsToRecordAction"
+                text="Parameters to Record"
+                description="Extract a fn's parameter list into a new pub record type">
+            <add-to-group group-id="RefactoringMenu" anchor="last" />
+        </action>
+
+        <!-- Move Symbol to Module — F6 on a pub fn / record / type opens a
+             chooser, moves the declaration to the chosen module, and updates
+             every cross-module reference. Phase 8. -->
+        <action id="pell.MoveSymbolToModule"
+                class="dev.pell.intellij.refactor.move.PellMoveSymbolAction"
+                text="Move to Module..."
+                description="Move a pub declaration to another module"
+                use-shortcut-of="Move">
+            <add-to-group group-id="RefactoringMenu" anchor="last" />
+        </action>
+
+        <!-- Inline — opposite of Extract Method. Substitutes every call
+             site with the fn body and deletes the declaration. Phase 8. -->
+        <action id="pell.InlineSymbol"
+                class="dev.pell.intellij.refactor.inline.PellInlineAction"
+                text="Inline..."
+                description="Replace call sites with the fn body and delete the declaration"
+                use-shortcut-of="Inline">
+            <add-to-group group-id="RefactoringMenu" anchor="last" />
+        </action>
+
+        <!-- Change Signature — modify params (add/remove/reorder/retype) and
+             propagate type-safe rewrites to every call site. Phase 8. -->
+        <action id="pell.ChangeSignature"
+                class="dev.pell.intellij.refactor.signature.PellChangeSignatureAction"
+                text="Change Signature..."
+                description="Modify a fn's signature and propagate the change to every call site"
+                use-shortcut-of="ChangeSignature">
+            <add-to-group group-id="RefactoringMenu" anchor="last" />
+        </action>
+    </actions>
+    <!-- <<< PSI TRACK <<< -->
 </idea-plugin>
