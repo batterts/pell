@@ -33,6 +33,7 @@ class PellGotoSymbolContributor : ChooseByNameContributor {
     ): Array<NavigationItem> {
         return allNamedElements(project)
             .filter { it.name == name }
+            .map { it as NavigationItem }
             .toTypedArray()
     }
 

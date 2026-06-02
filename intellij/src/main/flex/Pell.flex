@@ -31,6 +31,7 @@ import static com.intellij.psi.TokenType.BAD_CHARACTER;
 %function advance
 %type IElementType
 %unicode
+%public
 
 %{
     // Did the *previous* significant (non-whitespace, non-comment) token

@@ -32,19 +32,25 @@
   //     by delegating to a per-rule getNameIdentifier override that
   //     returns the wrapping name node (fnName, recordName, etc.).
 
-  extends(".*") = "dev.pell.intellij.psi.impl.PellPsiElementImpl"
-  implements(".*") = "dev.pell.intellij.psi.PellPsiElement"
+  // Specific rules first — Grammar-Kit picks the first matching
+  // `extends` / `implements` entry, so the specific ones must precede
+  // the catch-all `.*` rule.
 
   // Named-declaration rules — get the PellNamedElement interface and
   // the PellNamedElementImpl base. Each one's `nameIdentifier` returns
-  // its corresponding *Name wrapper rule.
-  extends("(fn|record|error|type|sealedType|aggregate|enum|seq|method|case|param|field|let|var|for|forall)Def|moduleDecl|enumVariant|typeBodyField|aggregateStateField") = "dev.pell.intellij.psi.impl.PellNamedElementImpl"
-  implements("(fn|record|error|type|sealedType|aggregate|enum|seq|method|case|param|field|let|var|for|forall)Def|moduleDecl|enumVariant|typeBodyField|aggregateStateField") = "dev.pell.intellij.psi.PellNamedElement"
+  // its corresponding *Name wrapper rule. (Rule names listed literally
+  // rather than via a regex pattern because Stmt/Decl/Def suffixes are
+  // inconsistent across the language.)
+  extends("fnDef|recordDef|errorDef|typeDef|sealedTypeDef|aggregateDef|enumDef|seqDef|methodDef|caseDef|fieldDef|param|letStmt|varStmt|forStmt|forallStmt|moduleDecl|enumVariant|typeBodyField|aggregateStateField") = "dev.pell.intellij.psi.impl.PellNamedElementImpl"
+  implements("fnDef|recordDef|errorDef|typeDef|sealedTypeDef|aggregateDef|enumDef|seqDef|methodDef|caseDef|fieldDef|param|letStmt|varStmt|forStmt|forallStmt|moduleDecl|enumVariant|typeBodyField|aggregateStateField") = "dev.pell.intellij.psi.PellNamedElement"
 
   // *Name wrapper rules implement PellNameIdentifier — the marker the
-  // PellNamedElementImpl base walks children for. PellNameIdentifier
-  // extends PellPsiElement so it picks up the default Impl base.
+  // PellNamedElementImpl base walks children for.
   implements(".*Name") = "dev.pell.intellij.psi.PellNameIdentifier"
+
+  // Catch-all default base + marker interface for every other rule.
+  extends(".*") = "dev.pell.intellij.psi.impl.PellPsiElementImpl"
+  implements(".*") = "dev.pell.intellij.psi.PellPsiElement"
 
   tokens = [
     // ---- literals / identifiers ---------------------------------------

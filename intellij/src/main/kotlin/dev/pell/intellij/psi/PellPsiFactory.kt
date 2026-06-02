@@ -4,6 +4,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFileFactory
 import com.intellij.psi.util.PsiTreeUtil
+import dev.pell.intellij.PellFile
 import dev.pell.intellij.PellFileType
 // Grammar-Kit-generated PSI interfaces (compiled from src/main/grammar/Pell.bnf
 // into src/main/gen/dev/pell/intellij/psi/). Available after `./gradlew

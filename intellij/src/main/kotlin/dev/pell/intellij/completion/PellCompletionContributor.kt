@@ -10,13 +10,10 @@ import com.intellij.patterns.PlatformPatterns
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.util.ProcessingContext
 import dev.pell.intellij.PellFile
-import dev.pell.intellij.psi.PellElementTypes
+import dev.pell.intellij.PellLanguage
 import dev.pell.intellij.psi.PellFnDef
-import dev.pell.intellij.psi.PellLanguage
 import dev.pell.intellij.psi.PellLetStmt
-import dev.pell.intellij.psi.PellNamedElement
 import dev.pell.intellij.psi.PellParam
-import dev.pell.intellij.psi.PellRecordDef
 import dev.pell.intellij.psi.PellSymbolScanner
 import dev.pell.intellij.psi.PellVarStmt
 

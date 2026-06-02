@@ -100,28 +100,25 @@ sourceSets {
     }
 }
 
-tasks {
-    val generatePellLexer = generateLexer {
-        sourceFile.set(file("src/main/flex/Pell.flex"))
-        targetOutputDir.set(file("src/main/gen/dev/pell/intellij/parser"))
-        purgeOldFiles.set(true)
-    }
-    val generatePellParser = generateParser {
-        sourceFile.set(file("src/main/grammar/Pell.bnf"))
-        targetRootOutputDir.set(file("src/main/gen"))
-        pathToParser.set("dev/pell/intellij/parser/PellParser.java")
-        pathToPsiRoot.set("dev/pell/intellij/psi")
-        purgeOldFiles.set(true)
-    }
-    compileKotlin {
-        dependsOn(generatePellLexer, generatePellParser)
-    }
-    compileJava {
-        dependsOn(generatePellLexer, generatePellParser)
-    }
-    // Clean removes the generated tree too; CI/local always regenerates.
-    clean {
-        delete("src/main/gen")
-    }
+tasks.generateLexer {
+    sourceFile.set(file("src/main/flex/Pell.flex"))
+    targetOutputDir.set(file("src/main/gen/dev/pell/intellij/parser"))
+    purgeOldFiles.set(true)
+}
+tasks.generateParser {
+    sourceFile.set(file("src/main/grammar/Pell.bnf"))
+    targetRootOutputDir.set(file("src/main/gen"))
+    pathToParser.set("dev/pell/intellij/parser/PellParser.java")
+    pathToPsiRoot.set("dev/pell/intellij/psi")
+    purgeOldFiles.set(true)
+}
+tasks.named("compileKotlin") {
+    dependsOn(tasks.generateLexer, tasks.generateParser)
+}
+tasks.named("compileJava") {
+    dependsOn(tasks.generateLexer, tasks.generateParser)
+}
+tasks.named("clean") {
+    doLast { delete("src/main/gen") }
 }
 // <<< PSI TRACK <<<
