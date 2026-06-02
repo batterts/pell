@@ -1,0 +1,43 @@
+// Grammar-Kit BNF for the pell language.
+//
+// PSI TRACK PHASE 0 STATUS: smoke implementation. Only the file root
+// + one item production. Phase 2 replaces the body with the full port
+// of compiler/pell/parser.py.
+//
+// Source of truth: compiler/pell/parser.py. Any divergence between
+// what this grammar accepts and what the Python parser accepts is a
+// bug. The round-trip test exercises every example file in
+// compiler/examples/ through both parsers and asserts equivalent
+// structure.
+
+{
+  parserClass = "dev.pell.intellij.parser.PellParser"
+  parserUtilClass = "dev.pell.intellij.parser.PellParserUtil"
+
+  psiClassPrefix = "Pell"
+  psiImplClassSuffix = "Impl"
+  psiPackage = "dev.pell.intellij.psi"
+  psiImplPackage = "dev.pell.intellij.psi.impl"
+
+  elementTypeHolderClass = "dev.pell.intellij.psi.PellElementTypes"
+  elementTypeClass       = "dev.pell.intellij.psi.PellElementType"
+  tokenTypeClass         = "dev.pell.intellij.psi.PellTokenType"
+
+  // Tokens are produced by the JFlex lexer (src/main/flex/Pell.flex)
+  // and exposed via PellTokenTypes. The names here must match the
+  // PellTokenTypes field names exactly.
+  tokens = [
+    IDENT         = "IDENT"
+    LINE_COMMENT  = "LINE_COMMENT"
+    BLOCK_COMMENT = "BLOCK_COMMENT"
+  ]
+}
+
+// --------------------------------------------------------------------
+// Phase 0 smoke grammar: a pell file is a sequence of identifiers.
+// Phase 2 expands this to: module decl + imports + items
+// (fn / record / error / enum / seq / type / aggregate / stmt+).
+// --------------------------------------------------------------------
+
+pellFile ::= item *
+private item ::= IDENT
