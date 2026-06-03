@@ -2369,6 +2369,7 @@ directions.
 | `json::stringify(j)` | `JSON_SERIALIZE(j)` |
 | `json::from(record_var)` | per-field `JSON_OBJECT('field' VALUE v.field, …)` |
 | `json::into::<Record>(j)` | per-field assignment, each via `JSON_VALUE` or `JSON_QUERY` |
+| `for k in json::get_keys(j) { … }` | `JSON_OBJECT_T(j).get_keys()` + index loop |
 
 **Missing paths** return NULL per Oracle's `JSON_VALUE` default. Wrap in
 `nvl()` when absence is a domain concern; don't try to force `Option<T>`
@@ -2407,6 +2408,28 @@ them inline from literals is a future-work item.
 `json_arrayagg`, `json_table`) work via pass-through — they're SQL-only
 operators, callable from inside a `sql!{}` block but not from PL/SQL
 expressions. No special pell surface needed.
+
+**`for k in json::get_keys(j) { … }`** walks the top-level keys of a
+JSON object. The loop var is `text`. Useful for discovering the shape
+of a `cursor<dyn>` row when you don't know the column set in advance:
+
+```pell
+for row in some_dyn_pivot() {
+    for k in json::get_keys(row) {
+        if k != "NAME" {
+            let v = json::get_number(row, "$.{k}");
+            if v > 0 { p("{k} = {v}"); }
+        }
+    }
+}
+```
+
+Lowers to a `JSON_OBJECT_T(j).get_keys()` call plus a `FOR i IN 1 ..
+keys.COUNT` index loop. Key order is insertion order on 21c+ and
+undefined on earlier versions — don't rely on it. Only available in
+for-loop position; there's no `let keys = json::get_keys(j)` form (yet)
+because `JSON_KEY_LIST` is not assignment-compatible with pell's
+`list<text>` (nominal typing on PL/SQL VARRAYs).
 
 #### Fluent dot-chain construction
 

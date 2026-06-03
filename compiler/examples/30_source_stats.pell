@@ -8,15 +8,18 @@ module source_stats;
 // TYPE BODYs, etc., so we return `cursor<dyn>` and let the consumer
 // pick what they want by key.
 //
-// Two consumers below show the typical shapes:
+// Three consumers below show the typical shapes:
 //
 //   show()              - raw JSON per row (REPL exploration)
 //   show_packages()     - typed access to specific columns
+//   show_kinds()        - walk every column without knowing names
+//                         in advance, via `json::get_keys`
 //
 // Try it from the REPL once deployed:
 //
 //   [1]> \exec BEGIN source_stats.show(); END;
 //   [2]> \exec BEGIN source_stats.show_packages(); END;
+//   [3]> \exec BEGIN source_stats.show_kinds(); END;
 // ---------------------------------------------------------------------------
 
 @touches(user_source)
@@ -60,8 +63,30 @@ pub fn show_packages() {
     let pkg  = json::get_number(row, "$.PACKAGE");
     let body = json::get_number(row, "$.PACKAGE_BODY");
     if body > 0 {
-      p("{name}: spec={pkg}  body={body}");
+      p("{name.rpad(20)}: spec={pkg.rpad(10)}  body={body.rpad(10)}");
     }
   }
 }
 
+// Walk every column without hardcoding any names. `json::get_keys` lets
+// the consumer discover what kinds the dynamic pivot actually produced
+// in this database — useful when you've never seen the schema before,
+// or when you want a one-pass summary that works on any shape.
+//
+// The first row's keys tell us the full column set (every row carries
+// every key, including JSON nulls for absent kinds), so we use it as
+// the legend and then iterate the kinds on each subsequent row.
+pub fn show_kinds() {
+  for row in lines_by_kind() {
+    let name = json::get_text(row, "$.NAME");
+    p("{name}");
+    for k in json::get_keys(row) {
+      if k != "NAME" {
+        let v = json::get_number(row, "$.{k}");
+        if v > 0 {
+          p("  {k} = {v}");
+        }
+      }
+    }
+  }
+}

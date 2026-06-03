@@ -3311,6 +3311,13 @@ class Emitter:
         return out
 
     def _emit_for(self, s: A.ForStmt, indent: str) -> list[str]:
+        # for k in json::get_keys(j): walk every key of a JSON object via
+        # JSON_OBJECT_T.get_keys(). The loop var is `text`. Lets the user
+        # discover the shape of a cursor<dyn> row at runtime.
+        if (isinstance(s.iterable, A.Call)
+                and isinstance(s.iterable.callee, A.Ident)
+                and s.iterable.callee.name == "json::get_keys"):
+            return self._emit_json_keys_iteration(s, indent)
         # for x in <cursor param>: streaming bulk-fetch loop
         if isinstance(s.iterable, A.Ident) and s.iterable.name in self._cursor_params:
             cursor_param = param_name(s.iterable.name)
@@ -3818,6 +3825,71 @@ class Emitter:
 
         out.append(f"{indent}END LOOP;")
         out.append(f"{indent}DBMS_SQL.CLOSE_CURSOR({dyn_cur});")
+        return out
+
+    def _emit_json_keys_iteration(
+        self, s: A.ForStmt, indent: str,
+    ) -> list[str]:
+        """Lower `for k in json::get_keys(j) { ... }` to a JSON_OBJECT_T
+        get_keys() + index loop.
+
+        Useful for walking a `cursor<dyn>` row when you don't know the
+        column set in advance:
+
+            for row in some_dyn_cursor() {
+                for k in json::get_keys(row) {
+                    p("{k} = {json::get_text(row, \"$.\\{k\\}\")}");
+                }
+            }
+
+        Note: get_keys() returns the keys in JSON_OBJECT_T's internal
+        order, which is insertion order on 21c+ and undefined on earlier
+        versions. Don't rely on the order.
+        """
+        call = s.iterable
+        if len(call.args) != 1:
+            raise EmitError(
+                "json::get_keys takes one json value: "
+                "json::get_keys(<json_value>)", s.loc,
+            )
+        self._sql_var_counter += 1
+        jobj_var = f"l_pell_jkl_jobj_{self._sql_var_counter}"
+        keys_var = f"l_pell_jkl_{self._sql_var_counter}"
+        idx_var = f"l_pell_jkl_i_{self._sql_var_counter}"
+        key_var = f"l_pell_jkl_key_{self._sql_var_counter}"
+
+        self._decl(f"{jobj_var} JSON_OBJECT_T;")
+        self._decl(f"{keys_var} JSON_KEY_LIST;")
+        self._decl(f"{idx_var} PLS_INTEGER;")
+        self._decl(f"{key_var} VARCHAR2(4000);")
+
+        # JSON_OBJECT_T(j) is the universal constructor — accepts JSON,
+        # VARCHAR2 (parses), CLOB, or JSON_ELEMENT_T.
+        src = self._emit_expr(call.args[0])
+        out = [
+            f"{indent}{jobj_var} := JSON_OBJECT_T({src});",
+            f"{indent}{keys_var} := {jobj_var}.get_keys();",
+            f"{indent}FOR {idx_var} IN 1 .. {keys_var}.COUNT LOOP",
+            f"{indent}  {key_var} := {keys_var}({idx_var});",
+        ]
+        # Body — `k` shadows to key_var, typed text.
+        self._loop_vars.append({s.var_name})
+        prev_override = self._loop_var_override.get(s.var_name)
+        self._loop_var_override[s.var_name] = key_var
+        prev_type = self._loop_var_types.get(s.var_name)
+        self._loop_var_types[s.var_name] = "text"
+        for stmt in s.body:
+            out.extend(self._emit_stmt(stmt, indent + "  "))
+        self._loop_vars.pop()
+        if prev_override is None:
+            del self._loop_var_override[s.var_name]
+        else:
+            self._loop_var_override[s.var_name] = prev_override
+        if prev_type is None:
+            self._loop_var_types.pop(s.var_name, None)
+        else:
+            self._loop_var_types[s.var_name] = prev_type
+        out.append(f"{indent}END LOOP;")
         return out
 
     def _emit_forall(self, s: A.ForallStmt, indent: str) -> list[str]:
