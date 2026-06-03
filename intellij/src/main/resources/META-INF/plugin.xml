@@ -655,17 +655,25 @@ END employees;
             <add-to-group group-id="RefactoringMenu" anchor="last" />
         </action>
 
-        <!-- Generate menu items (Cmd-N / Alt-Insert). -->
+        <!-- Generate menu items (Cmd-N / Alt-Insert) — pell-specific
+             templates, not generic getters/setters which don't apply to
+             a value-semantics language with auto-derived equality. -->
         <action id="pell.GenerateField"
                 class="dev.pell.intellij.generate.PellGenerateFieldAction"
                 text="Field"
-                description="Insert a `name: type,` field into the enclosing record">
+                description="Add a field to a record">
             <add-to-group group-id="GenerateGroup" anchor="last" />
         </action>
-        <action id="pell.GenerateMethod"
-                class="dev.pell.intellij.generate.PellGenerateMethodAction"
-                text="Method"
-                description="Insert a `pub fn name(params) -> ret { }` skeleton">
+        <action id="pell.GenerateCrud"
+                class="dev.pell.intellij.generate.PellGenerateCrudAction"
+                text="CRUD for record"
+                description="Generate insert / select / update / delete fns from a record's fields">
+            <add-to-group group-id="GenerateGroup" anchor="last" />
+        </action>
+        <action id="pell.GenerateAggregate"
+                class="dev.pell.intellij.generate.PellGenerateAggregateAction"
+                text="Aggregate skeleton"
+                description="Insert a state / step / merge / finish aggregate body">
             <add-to-group group-id="GenerateGroup" anchor="last" />
         </action>
     </actions>
