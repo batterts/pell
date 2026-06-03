@@ -96,10 +96,14 @@ class PellDiscardedReturnInspection : LocalInspectionTool() {
                     resolveInFile(callerFile, fullCallee) ?: return
                 }
 
-                // 3. Function vs procedure: a `-> T` child (PellTypeRef) means
-                //    function. No PellTypeRef means procedure (no return value)
-                //    so calling it as a stmt is fine.
-                val returnType = PsiTreeUtil.findChildOfType(target, PellTypeRef::class.java) ?: return
+                // 3. Function vs procedure: a `-> T` clause means function.
+                //    Use getChildOfType (non-recursive — DIRECT children only).
+                //    findChildOfType would dive into PellParamList → PellParam
+                //    → PellTypeRef and return the FIRST PARAMETER'S type
+                //    instead of the return type, which is how every
+                //    procedure-shaped fn was getting flagged as if it returned
+                //    its first parameter's type (the logger::info bug).
+                val returnType = PsiTreeUtil.getChildOfType(target, PellTypeRef::class.java) ?: return
                 if (returnType.text.trim() == "Unit") return
 
                 val displayName = fullCallee
