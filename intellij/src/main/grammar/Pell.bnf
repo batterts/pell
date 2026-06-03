@@ -1,0 +1,479 @@
+// Grammar-Kit BNF for the pell language.
+//
+// PSI TRACK PHASE 2 STATUS: full port of compiler/pell/parser.py.
+//
+// Source of truth: compiler/pell/parser.py. Productions here mirror
+// _parse_* methods one-for-one; ambiguities the Python parser resolves
+// by lookahead are resolved here via external rules in PellParserUtil.
+// Round-trip test catches drift.
+//
+// Naming convention: rules are camelCase; Grammar-Kit prepends "Pell"
+// to produce PSI interface names (PellFnDef, PellRecordDef, etc.).
+// Rules marked `private` produce no PSI element — they're inlined into
+// the parent's CST.
+
+{
+  parserClass = "dev.pell.intellij.parser.PellParser"
+  parserUtilClass = "dev.pell.intellij.parser.PellParserUtil"
+
+  psiClassPrefix = "Pell"
+  psiImplClassSuffix = "Impl"
+  psiPackage = "dev.pell.intellij.psi"
+  psiImplPackage = "dev.pell.intellij.psi.impl"
+
+  elementTypeHolderClass = "dev.pell.intellij.psi.PellElementTypes"
+  elementTypeClass       = "dev.pell.intellij.psi.PellElementType"
+  tokenTypeClass         = "dev.pell.intellij.psi.PellTokenType"
+
+  // PSI inheritance (Phase 3):
+  //   * Every rule's generated PSI interface extends PellPsiElement.
+  //   * Every named-declaration rule's impl class extends
+  //     PellNamedElementImpl, which implements PsiNameIdentifierOwner
+  //     by delegating to a per-rule getNameIdentifier override that
+  //     returns the wrapping name node (fnName, recordName, etc.).
+
+  // Specific rules first — Grammar-Kit picks the first matching
+  // `extends` / `implements` entry, so the specific ones must precede
+  // the catch-all `.*` rule.
+
+  // Named-declaration rules — get the PellNamedElement interface and
+  // the PellNamedElementImpl base. Each one's `nameIdentifier` returns
+  // its corresponding *Name wrapper rule. (Rule names listed literally
+  // rather than via a regex pattern because Stmt/Decl/Def suffixes are
+  // inconsistent across the language.)
+  extends("fnDef|recordDef|errorDef|typeDef|sealedTypeDef|aggregateDef|enumDef|seqDef|methodDef|caseDef|fieldDef|param|letStmt|varStmt|forStmt|forallStmt|moduleDecl|enumVariant|typeBodyField|aggregateStateField") = "dev.pell.intellij.psi.impl.PellNamedElementImpl"
+  implements("fnDef|recordDef|errorDef|typeDef|sealedTypeDef|aggregateDef|enumDef|seqDef|methodDef|caseDef|fieldDef|param|letStmt|varStmt|forStmt|forallStmt|moduleDecl|enumVariant|typeBodyField|aggregateStateField") = "dev.pell.intellij.psi.PellNamedElement"
+
+  // *Name wrapper rules implement PellNameIdentifier — the marker the
+  // PellNamedElementImpl base walks children for.
+  implements(".*Name") = "dev.pell.intellij.psi.PellNameIdentifier"
+
+  // Catch-all default base + marker interface for every other rule.
+  extends(".*") = "dev.pell.intellij.psi.impl.PellPsiElementImpl"
+  implements(".*") = "dev.pell.intellij.psi.PellPsiElement"
+
+  tokens = [
+    // ---- literals / identifiers ---------------------------------------
+    IDENT     = 'regexp:[A-Za-z_][A-Za-z0-9_]*'
+    NUMBER    = 'regexp:[0-9]+(\.[0-9]+)?'
+    STRING    = 'string literal'
+    RAWSTRING = 'raw string literal'
+    REGEX     = 'regex literal'
+    SQL_BLOCK = 'sql!{...}'
+    JQ_BLOCK  = 'jq!{...}'
+
+    // ---- trivia ---------------------------------------------------------
+    LINE_COMMENT  = '// comment'
+    BLOCK_COMMENT = '/* comment */'
+
+    // ---- keywords -------------------------------------------------------
+    KW_MODULE      = 'module'
+    KW_IMPORT      = 'import'
+    KW_PUB         = 'pub'
+    KW_FN          = 'fn'
+    KW_LET         = 'let'
+    KW_VAR         = 'var'
+    KW_RETURN      = 'return'
+    KW_YIELD       = 'yield'
+    KW_IF          = 'if'
+    KW_ELSE        = 'else'
+    KW_FOR         = 'for'
+    KW_FORALL      = 'forall'
+    KW_IN          = 'in'
+    KW_MATCH       = 'match'
+    KW_TRANSACTION = 'transaction'
+    KW_RECORD      = 'record'
+    KW_ERROR       = 'error'
+    KW_TRUE        = 'true'
+    KW_FALSE       = 'false'
+    KW_SOME        = 'Some'
+    KW_NONE        = 'None'
+    KW_OK          = 'Ok'
+    KW_ERR         = 'Err'
+    KW_UNSAFE      = 'unsafe'
+    KW_FINALLY     = 'finally'
+    KW_AND         = 'and'
+    KW_OR          = 'or'
+    KW_NOT         = 'not'
+    KW_TYPE        = 'type'
+    KW_SEALED      = 'sealed'
+    KW_AGGREGATE   = 'aggregate'
+    KW_CASE        = 'case'
+    KW_SELF        = 'self'
+    KW_SEQ         = 'seq'
+    KW_OUT         = 'out'
+    KW_INOUT       = 'inout'
+    KW_ENUM        = 'enum'
+
+    // ---- multi-char punctuation ----------------------------------------
+    DOTDOTEQ    = '..='
+    DOTDOT      = '..'
+    COLONCOLON  = '::'
+    ARROW       = '->'
+    FATARROW    = '=>'
+    EQEQ        = '=='
+    BANGEQ      = '!='
+    LE          = '<='
+    GE          = '>='
+    AMPAMP      = '&&'
+    PIPEPIPE    = '||'
+    PIPEGT      = '|>'
+
+    // ---- single-char punctuation ---------------------------------------
+    LPAREN   = '('
+    RPAREN   = ')'
+    LBRACE   = '{'
+    RBRACE   = '}'
+    LBRACKET = '['
+    RBRACKET = ']'
+    SEMI     = ';'
+    COMMA    = ','
+    COLON    = ':'
+    DOT      = '.'
+    AT       = '@'
+    QUESTION = '?'
+    PIPE     = '|'
+    AMP      = '&'
+    BANG     = '!'
+    PLUS     = '+'
+    MINUS    = '-'
+    STAR     = '*'
+    SLASH    = '/'
+    PERCENT  = '%'
+    LT       = '<'
+    GT       = '>'
+    EQ       = '='
+  ]
+}
+
+// =====================================================================
+// Top level
+// =====================================================================
+
+pellFile ::= moduleDecl item *
+
+moduleDecl ::= KW_MODULE moduleName SEMI { pin = 1 }
+moduleName ::= dottedIdent
+
+dottedIdent ::= IDENT (DOT IDENT) *
+
+qualifiedIdent ::= IDENT (COLONCOLON IDENT) *
+
+// --- name wrappers (Phase 3) ----------------------------------------
+// Each named declaration wraps its name IDENT in a dedicated rule.
+// This gives the Phase-3 PSI mixin a typed handle for getNameIdentifier
+// instead of "find the first IDENT and hope" tree-walking.
+fnName        ::= IDENT
+recordName    ::= IDENT
+errorName     ::= IDENT
+typeName      ::= IDENT
+aggregateName ::= IDENT
+seqName       ::= qualifiedIdent
+enumName      ::= IDENT
+enumVariantName ::= IDENT
+methodName    ::= IDENT
+caseName      ::= IDENT
+paramName     ::= IDENT
+fieldName     ::= IDENT
+letName       ::= IDENT
+varName       ::= IDENT
+loopVarName   ::= IDENT
+
+// =====================================================================
+// Items
+// =====================================================================
+//
+// Items can be preceded by @annotations and optional `pub`. `unsafe` is
+// a fn-only modifier so it lives inside fnDef itself, not at item level.
+
+item ::= annotation * KW_PUB ? itemBody { recoverWhile = item_recover }
+private item_recover ::= !(KW_PUB | KW_FN | KW_RECORD | KW_ERROR | KW_TYPE
+                          | KW_SEALED | KW_AGGREGATE | KW_SEQ | KW_ENUM
+                          | KW_IMPORT | KW_UNSAFE | AT)
+
+private itemBody ::= importStmt
+                   | fnDef
+                   | recordDef
+                   | errorDef
+                   | sealedTypeDef
+                   | typeDef
+                   | aggregateDef
+                   | seqDef
+                   | enumDef
+
+// --- annotations -----------------------------------------------------
+
+annotation ::= AT IDENT annotationArgs ? { pin = 1 }
+
+annotationArgs ::= LPAREN (annotationArg (COMMA annotationArg) *) ? COMMA ? RPAREN
+
+annotationArg ::= namedArg | expr
+private namedArg ::= IDENT EQ expr { pin = 2 }
+
+// --- import ----------------------------------------------------------
+
+importStmt ::= KW_IMPORT qualifiedIdent SEMI { pin = 1 }
+
+// --- fn --------------------------------------------------------------
+
+fnDef ::= KW_UNSAFE ? KW_FN fnName LPAREN paramList ? RPAREN
+         (ARROW typeRef) ?
+         block
+         (KW_FINALLY block) ?
+       { pin = 2 }
+
+// --- record / error / seq / enum ------------------------------------
+
+recordDef ::= KW_RECORD recordName LBRACE fieldDefList ? RBRACE { pin = 1 }
+
+errorDef ::= KW_ERROR errorName (errorBody | SEMI) { pin = 1 }
+private errorBody ::= LBRACE fieldDefList ? RBRACE
+
+seqDef ::= KW_SEQ seqName SEMI { pin = 1 }
+
+enumDef ::= KW_ENUM enumName LBRACE (enumVariant (COMMA enumVariant) * COMMA ?) ? RBRACE { pin = 1 }
+enumVariant ::= enumVariantName (EQ STRING) ?
+
+// --- type / sealed type --------------------------------------------
+
+typeDef ::= KW_TYPE typeName typeBody { pin = 1 }
+
+sealedTypeDef ::= KW_SEALED KW_TYPE typeName sealedBody { pin = 2 }
+
+typeBody ::= LBRACE typeBodyItem * RBRACE
+private typeBodyItem ::= methodDef | typeBodyField
+typeBodyField ::= fieldName COLON typeRef SEMI { pin = 2 }
+
+sealedBody ::= LBRACE sealedBodyItem * RBRACE
+private sealedBodyItem ::= caseDef | methodDef | typeBodyField
+
+methodDef ::= annotation * mapFnModifier ? KW_FN methodName
+              LPAREN paramList ? RPAREN
+              (ARROW typeRef) ?
+              (block | SEMI)
+            { pin = "KW_FN" }
+
+private mapFnModifier ::= <<consumeIdent "map">>
+
+caseDef ::= KW_CASE caseName caseBody ? SEMI ? { pin = 1 }
+
+private caseBody ::= LBRACE caseBodyItem * RBRACE (LBRACE methodDef * RBRACE) ?
+private caseBodyItem ::= methodDef | caseFieldDecl
+private caseFieldDecl ::= fieldName COLON typeRef (SEMI | COMMA) ?
+
+// --- aggregate ------------------------------------------------------
+
+aggregateDef ::= KW_AGGREGATE aggregateName
+                 LPAREN paramList ? RPAREN
+                 (ARROW typeRef) ?
+                 LBRACE aggregateBodyItem * RBRACE
+              { pin = 1 }
+
+private aggregateBodyItem ::= aggregateState
+                            | aggregateStep
+                            | aggregateMerge
+                            | aggregateFinish
+
+aggregateState ::= <<consumeIdent "state">> LBRACE aggregateStateField + RBRACE { pin = 2 }
+aggregateStateField ::= fieldName COLON typeRef EQ expr SEMI { pin = 2 }
+
+aggregateStep ::= <<consumeIdent "step">> (LPAREN paramList ? RPAREN) ? block { pin = 1 }
+
+aggregateMerge ::= <<consumeIdent "merge">> LPAREN (paramName COLON typeRef) ? RPAREN block { pin = 2 }
+
+aggregateFinish ::= <<consumeIdent "finish">> LPAREN RPAREN (ARROW typeRef) ? block { pin = 1 }
+
+// --- params / fields ------------------------------------------------
+
+paramList ::= param (COMMA param) * COMMA ?
+param ::= paramMode ? paramName COLON typeRef { pin = 2 }
+private paramMode ::= KW_OUT | KW_INOUT
+
+fieldDefList ::= fieldDef (COMMA fieldDef) * COMMA ?
+fieldDef ::= fieldName COLON typeRef { pin = 2 }
+
+// =====================================================================
+// Types
+// =====================================================================
+
+typeRef ::= typeAtom (PIPE typeAtom) *
+
+typeAtom ::= typeAtomBase typeAtomSuffix *
+
+private typeAtomBase ::= LPAREN typeRef ? RPAREN
+                       | BANG
+                       | IDENT typeArgList ?
+
+typeArgList ::= LT typeRef (COMMA typeRef) * GT { pin = 1 }
+
+private typeAtomSuffix ::= QUESTION
+
+// =====================================================================
+// Statements
+// =====================================================================
+
+block ::= LBRACE stmt * RBRACE { pin = 1 }
+
+stmt ::= letStmt
+       | varStmt
+       | returnStmt
+       | ifStmt
+       | forStmt
+       | forallStmt
+       | matchStmt
+       | transactionStmt
+       | yieldStmt
+       | exprOrAssignStmt
+
+letStmt ::= KW_LET letName (COLON typeRef) ? (EQ expr) ? SEMI { pin = 1 }
+varStmt ::= KW_VAR varName (COLON typeRef) ? (EQ expr) ? SEMI { pin = 1 }
+
+returnStmt ::= KW_RETURN expr ? SEMI { pin = 1 }
+
+ifStmt ::= KW_IF expr block ifElseTail ? { pin = 1 }
+private ifElseTail ::= KW_ELSE (ifStmt | block)
+
+forStmt    ::= KW_FOR    loopVarName KW_IN expr block { pin = 1 }
+forallStmt ::= KW_FORALL loopVarName KW_IN expr block { pin = 1 }
+
+matchStmt ::= KW_MATCH expr LBRACE (matchArm (COMMA matchArm) * COMMA ?) ? RBRACE { pin = 1 }
+
+matchArm ::= pattern ARROW (block | expr)
+
+transactionStmt ::= KW_TRANSACTION block { pin = 1 }
+yieldStmt ::= KW_YIELD expr SEMI { pin = 1 }
+
+// expr followed by optional `= expr` is an assignment; otherwise it's
+// an expression-statement. Both end with `;`.
+exprOrAssignStmt ::= expr (EQ expr) ? SEMI
+
+// =====================================================================
+// Patterns
+// =====================================================================
+
+pattern ::= wildcardPattern
+          | variantPattern
+          | literalPattern
+          | bindingPattern
+
+// `_` (the wildcard) is lexed as IDENT in pell — match contextually
+// via PellParserUtil.consumeIdent("_"). Listed before bindingPattern
+// so the IDENT alternative there doesn't shadow it.
+wildcardPattern ::= <<consumeIdent "_">>
+
+variantPattern ::= (KW_NONE | KW_SOME | KW_OK | KW_ERR | IDENT)
+                   (patternArgList | patternFieldList) ?
+
+private patternArgList ::= LPAREN (pattern (COMMA pattern) *) ? RPAREN
+
+private patternFieldList ::= LBRACE
+                              (fieldPattern (COMMA fieldPattern) *
+                                (COMMA DOTDOT) ?
+                                COMMA ?
+                              ) ?
+                             RBRACE
+
+fieldPattern ::= IDENT (COLON pattern) ?
+
+literalPattern ::= NUMBER | STRING | KW_TRUE | KW_FALSE
+bindingPattern ::= IDENT
+
+// =====================================================================
+// Expressions (low → high precedence; left-associative)
+// =====================================================================
+
+expr ::= pipelineExpr
+
+pipelineExpr   ::= logicalOrExpr   (PIPEGT logicalOrExpr) *
+logicalOrExpr  ::= logicalAndExpr  (PIPEPIPE logicalAndExpr) *
+logicalAndExpr ::= equalityExpr    (AMPAMP equalityExpr) *
+equalityExpr   ::= comparisonExpr  ((EQEQ | BANGEQ) comparisonExpr) *
+comparisonExpr ::= additionExpr    ((LT | LE | GT | GE) additionExpr) *
+additionExpr   ::= multiplicationExpr ((PLUS | MINUS) multiplicationExpr) *
+multiplicationExpr ::= unaryExpr   ((STAR | SLASH | PERCENT) unaryExpr) *
+
+unaryExpr ::= unaryPrefixExpr | postfixExpr
+private unaryPrefixExpr ::= (MINUS | BANG) unaryExpr
+
+// --- postfix --------------------------------------------------------
+
+postfixExpr ::= primaryExpr postfixOp *
+
+private postfixOp ::= memberAccessOp
+                    | turbofishCallOp
+                    | callOp
+                    | questionOp
+
+memberAccessOp  ::= DOT IDENT { pin = 1 }
+callOp          ::= LPAREN argList ? RPAREN { pin = 1 }
+turbofishCallOp ::= <<atTurbofish>> COLONCOLON LT typeRef (COMMA typeRef) * GT
+                    LPAREN argList ? RPAREN
+                 { pin = "COLONCOLON" }
+questionOp      ::= QUESTION
+
+argList ::= arg (COMMA arg) * COMMA ?
+arg ::= argNamed | expr
+private argNamed ::= IDENT EQ expr { pin = 2 }
+
+// --- primary --------------------------------------------------------
+
+primaryExpr ::= numberLit
+              | textLit
+              | rawTextLit
+              | regexLit
+              | boolLit
+              | noneLit
+              | selfLit
+              | unitLit            // ()  — must precede parenOrTuple
+              | someExpr
+              | okExpr
+              | errExpr
+              | sqlBlockExpr
+              | jqBlockExpr
+              | parenOrTupleExpr
+              | listLit
+              | qualifiedExpr
+              | ifExpr
+              | matchExpr
+
+numberLit  ::= NUMBER
+textLit    ::= STRING
+rawTextLit ::= RAWSTRING
+regexLit   ::= REGEX
+boolLit    ::= KW_TRUE | KW_FALSE
+noneLit    ::= KW_NONE
+selfLit    ::= KW_SELF
+unitLit    ::= LPAREN RPAREN
+
+someExpr ::= KW_SOME LPAREN expr RPAREN { pin = 1 }
+okExpr   ::= KW_OK   LPAREN expr ? RPAREN { pin = 1 }
+errExpr  ::= KW_ERR  LPAREN expr RPAREN { pin = 1 }
+
+sqlBlockExpr ::= SQL_BLOCK
+jqBlockExpr  ::= JQ_BLOCK
+
+// `(a, b)` → tuple; `(a)` → grouped expression. Grammar-Kit reduces to
+// parenOrTuple here; the AST layer distinguishes by element count.
+parenOrTupleExpr ::= LPAREN expr (COMMA expr) * COMMA ? RPAREN { pin = 1 }
+
+listLit ::= LBRACKET (expr (COMMA expr) * COMMA ?) ? RBRACKET { pin = 1 }
+
+// `foo::bar::baz` qualified path. Then optionally a struct-literal body
+// if next-after-LBRACE looks like field-init pattern (see atStructLit
+// in PellParserUtil). Otherwise it's a plain identifier reference.
+qualifiedExpr ::= IDENT (<<atQualCont>> COLONCOLON IDENT) * structLitBody ?
+
+structLitBody ::= <<atStructLit>> LBRACE
+                  (fieldInit (COMMA fieldInit) * COMMA ?) ?
+                  RBRACE
+
+fieldInit ::= IDENT (COLON expr) ? { pin = 1 }
+
+// --- if/match as expressions ----------------------------------------
+
+ifExpr ::= KW_IF expr block (KW_ELSE block) ? { pin = 1 }
+
+matchExpr ::= KW_MATCH expr LBRACE
+              (matchArm (COMMA matchArm) * COMMA ?) ?
+              RBRACE
+           { pin = 1 }

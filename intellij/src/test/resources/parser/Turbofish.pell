@@ -1,0 +1,5 @@
+module turbofish;
+
+pub fn coerce(x: number) -> text {
+    return x.into::<text>();
+}

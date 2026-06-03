@@ -1,0 +1,7 @@
+module records;
+
+pub record Employee {
+    id: number,
+    name: text,
+    level: number,
+}

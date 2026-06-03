@@ -1,0 +1,5 @@
+module errors;
+
+pub error NotFound {
+    id: number,
+}

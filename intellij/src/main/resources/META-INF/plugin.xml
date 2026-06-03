@@ -544,6 +544,152 @@ END employees;
             builderClass="dev.pell.intellij.newproject.PellNewProjectWizard$PellNewProjectWizardBuilder" />
         <directoryProjectGenerator
             implementation="dev.pell.intellij.newproject.PellDirectoryProjectGenerator" />
+
+        <!-- >>> PSI TRACK >>> -->
+        <!-- Cross-file reference resolution: every qualified path like
+             `hr::employees::Employee` carries a PsiReference back to the
+             declaring PellNamedElement (Phase 4). -->
+        <psi.referenceContributor
+            language="pell"
+            implementation="dev.pell.intellij.psi.PellReferenceContributor" />
+
+        <!-- Find Usages (Cmd-G / Edit ▸ Find Usages) — enables it for
+             every PellNamedElement; uses a DefaultWordsScanner over IDENT
+             tokens for the cheap first-pass scan, then PSI resolution
+             confirms each candidate. -->
+        <lang.findUsagesProvider
+            language="pell"
+            implementationClass="dev.pell.intellij.codeInsight.PellFindUsagesProvider" />
+
+        <!-- Names validator — used by Rename (Phase 5) and by Inspections
+             to reject names that would collide with pell keywords or
+             aren't legal IDENTs. -->
+        <lang.namesValidator
+            language="pell"
+            implementationClass="dev.pell.intellij.refactor.PellNamesValidator" />
+
+        <!-- Go To Symbol (Cmd-Opt-O) — feeds every project-level
+             PellNamedElement into the popup. -->
+        <gotoSymbolContributor
+            implementation="dev.pell.intellij.codeInsight.PellGotoSymbolContributor" />
+
+        <!-- Rename (Shift-F6) processor — claims every PellNamedElement
+             so the platform routes new-name validation through
+             PellNamesValidator and references through PellReferenceContributor. -->
+        <renamePsiElementProcessor
+            implementation="dev.pell.intellij.refactor.PellRenameProcessor" />
+
+        <!-- Extract Method (Cmd-Opt-M). Wraps a contiguous stmt selection
+             in a new pub fn / fn and replaces the selection with a call.
+             Captured locals become parameters. -->
+        <refactoring.extractMethod
+            implementation="dev.pell.intellij.refactor.extract.PellExtractMethodHandler" />
+
+        <!-- PSI-backed autocomplete (Ctrl-Space). Adds primitive types,
+             keywords, project pub fn / record names, and in-scope locals
+             to the popup. Merges with LSP4IJ's completion feed. -->
+        <completion.contributor
+            language="pell"
+            implementationClass="dev.pell.intellij.completion.PellCompletionContributor" />
+
+        <!-- Yellow-squiggle inspection: bare expression-statement whose
+             expression is a function call whose return value is discarded.
+             Discarded returns produce PLS-00221 at deploy time, so we
+             catch them at edit time. Quick-fixes: assign to local, wrap
+             in for-loop. -->
+        <localInspection
+            language="pell"
+            shortName="PellDiscardedReturn"
+            displayName="Discarded function return value"
+            groupName="Pell"
+            enabledByDefault="true"
+            level="WARNING"
+            implementationClass="dev.pell.intellij.inspections.PellDiscardedReturnInspection" />
+
+        <!-- Alt-Enter intention actions. Surfaced when the caret is on a
+             bare expression-statement (e.g. `user_tables();`). -->
+        <intentionAction>
+            <language>pell</language>
+            <className>dev.pell.intellij.intentions.PellIntroduceVariableIntention</className>
+            <category>Pell</category>
+        </intentionAction>
+        <intentionAction>
+            <language>pell</language>
+            <className>dev.pell.intellij.intentions.PellAssignToLocalVariableIntention</className>
+            <category>Pell</category>
+        </intentionAction>
+        <intentionAction>
+            <language>pell</language>
+            <className>dev.pell.intellij.intentions.PellWrapInForLoopIntention</className>
+            <category>Pell</category>
+        </intentionAction>
+        <!-- <<< PSI TRACK <<< -->
     </extensions>
 
+    <!-- >>> PSI TRACK >>> -->
+    <actions>
+        <!-- Parameters to Record — extracts a fn's parameter list into a
+             new pub record and rewrites every call site to the struct-literal
+             form. Available under Refactor This (Ctrl-T / Ctrl-Alt-Shift-T). -->
+        <action id="pell.ParametersToRecord"
+                class="dev.pell.intellij.refactor.paramsToRecord.PellParamsToRecordAction"
+                text="Parameters to Record"
+                description="Extract a fn's parameter list into a new pub record type">
+            <add-to-group group-id="RefactoringMenu" anchor="last" />
+        </action>
+
+        <!-- Move Symbol to Module — F6 on a pub fn / record / type opens a
+             chooser, moves the declaration to the chosen module, and updates
+             every cross-module reference. Phase 8. -->
+        <action id="pell.MoveSymbolToModule"
+                class="dev.pell.intellij.refactor.move.PellMoveSymbolAction"
+                text="Move to Module..."
+                description="Move a pub declaration to another module"
+                use-shortcut-of="Move">
+            <add-to-group group-id="RefactoringMenu" anchor="last" />
+        </action>
+
+        <!-- Inline — opposite of Extract Method. Substitutes every call
+             site with the fn body and deletes the declaration. Phase 8. -->
+        <action id="pell.InlineSymbol"
+                class="dev.pell.intellij.refactor.inline.PellInlineAction"
+                text="Inline..."
+                description="Replace call sites with the fn body and delete the declaration"
+                use-shortcut-of="Inline">
+            <add-to-group group-id="RefactoringMenu" anchor="last" />
+        </action>
+
+        <!-- Change Signature — modify params (add/remove/reorder/retype) and
+             propagate type-safe rewrites to every call site. Phase 8. -->
+        <action id="pell.ChangeSignature"
+                class="dev.pell.intellij.refactor.signature.PellChangeSignatureAction"
+                text="Change Signature..."
+                description="Modify a fn's signature and propagate the change to every call site"
+                use-shortcut-of="ChangeSignature">
+            <add-to-group group-id="RefactoringMenu" anchor="last" />
+        </action>
+
+        <!-- Generate menu items (Cmd-N / Alt-Insert) — pell-specific
+             templates, not generic getters/setters which don't apply to
+             a value-semantics language with auto-derived equality. -->
+        <action id="pell.GenerateField"
+                class="dev.pell.intellij.generate.PellGenerateFieldAction"
+                text="Field"
+                description="Add a field to a record">
+            <add-to-group group-id="GenerateGroup" anchor="last" />
+        </action>
+        <action id="pell.GenerateCrud"
+                class="dev.pell.intellij.generate.PellGenerateCrudAction"
+                text="CRUD for record"
+                description="Generate insert / select / update / delete fns from a record's fields">
+            <add-to-group group-id="GenerateGroup" anchor="last" />
+        </action>
+        <action id="pell.GenerateAggregate"
+                class="dev.pell.intellij.generate.PellGenerateAggregateAction"
+                text="Aggregate skeleton"
+                description="Insert a state / step / merge / finish aggregate body">
+            <add-to-group group-id="GenerateGroup" anchor="last" />
+        </action>
+    </actions>
+    <!-- <<< PSI TRACK <<< -->
 </idea-plugin>

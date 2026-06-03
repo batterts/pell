@@ -1,0 +1,9 @@
+module generics;
+
+pub fn first(xs: list<text>) -> text? {
+    return None;
+}
+
+pub fn lookup(id: number) -> Result<Employee, NotFound> {
+    return Err(NotFound { id: id });
+}

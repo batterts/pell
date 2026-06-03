@@ -16,6 +16,13 @@ plugins {
     java
     id("org.jetbrains.kotlin.jvm") version "2.0.21"
     id("org.jetbrains.intellij.platform") version "2.2.1"
+    // >>> PSI TRACK >>>
+    // Grammar-Kit generates the parser from src/main/grammar/Pell.bnf;
+    // JFlex generates the lexer from src/main/flex/Pell.flex. Outputs
+    // land in src/main/gen/ (gitignored) and are added to the Java
+    // source set below so they compile alongside the hand-written code.
+    id("org.jetbrains.grammarkit") version "2022.3.2.2"
+    // <<< PSI TRACK <<<
 }
 
 group = "dev.pell"
@@ -83,3 +90,35 @@ java {
     sourceCompatibility = JavaVersion.VERSION_21
     targetCompatibility = JavaVersion.VERSION_21
 }
+
+// >>> PSI TRACK >>>
+// Generated parser / lexer go into src/main/gen and are picked up by
+// both the Java and Kotlin compile tasks. The gen dir is gitignored.
+sourceSets {
+    main {
+        java.srcDirs("src/main/gen")
+    }
+}
+
+tasks.generateLexer {
+    sourceFile.set(file("src/main/flex/Pell.flex"))
+    targetOutputDir.set(file("src/main/gen/dev/pell/intellij/parser"))
+    purgeOldFiles.set(true)
+}
+tasks.generateParser {
+    sourceFile.set(file("src/main/grammar/Pell.bnf"))
+    targetRootOutputDir.set(file("src/main/gen"))
+    pathToParser.set("dev/pell/intellij/parser/PellParser.java")
+    pathToPsiRoot.set("dev/pell/intellij/psi")
+    purgeOldFiles.set(true)
+}
+tasks.named("compileKotlin") {
+    dependsOn(tasks.generateLexer, tasks.generateParser)
+}
+tasks.named("compileJava") {
+    dependsOn(tasks.generateLexer, tasks.generateParser)
+}
+tasks.named("clean") {
+    doLast { delete("src/main/gen") }
+}
+// <<< PSI TRACK <<<
