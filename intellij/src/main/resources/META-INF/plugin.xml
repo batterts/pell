@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.3.13</version>
+    <version>0.4.0</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,101 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.4.0 — Real PSI parser + refactorings</h3>
+        <p><b>Big release.</b> Pell gets a real IntelliJ-native PSI
+        layer alongside the existing LSP. The LSP still drives
+        diagnostics + hover; the PSI layer drives navigation,
+        refactoring, structure view, and a growing set of inspections
+        and intentions. The two are designed to co-exist.</p>
+        <ul>
+          <li><b>Grammar-Kit + JFlex parser.</b> Full port of the
+              Python parser/lexer (1100+ lines of pell grammar) to
+              Java/Kotlin so IntelliJ has a real AST to reason about,
+              not just LSP-shaped diagnostics. Structure View
+              (Cmd-7) now renders module / fn / record / error / type
+              / enum / aggregate / seq children as real PSI elements.</li>
+          <li><b>Cross-file navigation.</b> Cmd-Click on a pell symbol
+              jumps to its declaration anywhere in the project.
+              Cmd-Opt-O (Go To Symbol) lists every pub fn / record /
+              type / enum across the project. Cmd-G (Find Usages)
+              shows every call site of the symbol under the caret,
+              traversing module boundaries.</li>
+          <li><b>Rename refactoring.</b> Shift-F6 on any pell name —
+              fn, record, error, type, enum, field, param, let, loop
+              variable — propagates the rename through every
+              reference in the project atomically. Names are validated
+              against pell's keyword set before the rewrite commits.</li>
+          <li><b>Extract Method.</b> Select a contiguous stmt run
+              inside a fn body → Refactor → Extract Method. The new
+              <code>pub fn</code> (or private fn) lands after the
+              enclosing fn; captured locals become parameters; the
+              selection becomes a call site. Won't extract selections
+              that contain a <code>return</code> mixed with other
+              stmts (refuses with a clear message).</li>
+          <li><b>Parameters to Record.</b> Caret in a fn → Refactor
+              This → Parameters to Record. Synthesizes a
+              <code>pub record &lt;FnName&gt;Args</code>, rewrites the
+              fn's signature to a single <code>args: FnNameArgs</code>
+              parameter, rewrites parameter references in the body to
+              <code>args.&lt;name&gt;</code>, and rewrites every call
+              site to the struct-literal form.</li>
+          <li><b>Move to Module / Inline / Change Signature.</b>
+              Three more refactorings under Refactor This, working
+              against any top-level pub declaration.</li>
+          <li><b>Generate menu (Cmd-N).</b> Three pell-specific
+              templates:
+              <ul>
+                <li><b>Field</b> — add a field to a record (with a
+                    chooser when the caret isn't already inside one).</li>
+                <li><b>CRUD for record</b> — pick a record, get
+                    <code>select_*</code> / <code>insert_*</code> /
+                    <code>update_*</code> / <code>delete_*</code> fns
+                    with sql!{ } bodies, plus a matching
+                    <code>pub error &lt;Record&gt;NotFound</code>.</li>
+                <li><b>Aggregate skeleton</b> — full
+                    state / step / merge / finish ODCI aggregate
+                    body with sensible accumulator stubs.</li>
+              </ul>
+          </li>
+          <li><b>Alt-Enter intentions.</b> On a bare expression-statement
+              like <code>user_tables();</code>:
+              <ul>
+                <li><i>Introduce local variable</i> →
+                    <code>let result = user_tables();</code></li>
+                <li><i>Assign to local variable</i> →
+                    <code>let result: list&lt;text&gt; = user_tables();</code></li>
+                <li><i>Wrap in for-loop</i> →
+                    <code>for row in user_tables() { /* TODO */ }</code></li>
+              </ul>
+          </li>
+          <li><b>Inspection: discarded function return value.</b>
+              Yellow squiggle on bare-call statements where the callee
+              is a project fn with a non-Unit return type — the
+              edit-time defense for the PLS-00221 pattern. Resolution
+              is qualifier-aware (<code>logger::info(x);</code> only
+              fires if a project <code>module logger;</code> defines
+              <code>info</code> with a return type), and skips
+              procedures (no <code>-&gt; T</code> clause), built-ins
+              (<code>p()</code>, <code>dbms_output::*</code>,
+              <code>catalog::*</code>), and member-access calls
+              (<code>obj.method()</code> — type inference comes next
+              release).</li>
+          <li><b>Completion popup is richer.</b> Ctrl-Space now lists
+              pell primitive types (<code>number</code>,
+              <code>text</code>, <code>bool</code>, <code>date</code>,
+              <code>timestamp</code>, <code>interval</code>,
+              <code>bytes</code>, <code>json</code>, <code>Unit</code>,
+              <code>bigtext</code>, <code>int</code>) first, then
+              keywords, then project pub fns + records, then in-scope
+              locals. Coexists with the LSP4IJ completion feed.</li>
+        </ul>
+        <p><b>Coexistence with LSP4IJ:</b> diagnostics, hover, and
+        existing LSP-side completion continue to work as before.
+        Phase L1+L2 of the
+        <a href="https://github.com/batterts/pell/blob/main/intellij/LSP_PSI_UNIFICATION.md">LSP_PSI_UNIFICATION.md</a>
+        plan will unify the two stacks via a single PellSymbolService
+        facade backed by a StubIndex, replacing the current PsiTreeUtil
+        walks with O(1) lookups.</p>
         <h3>0.3.13</h3>
         <ul>
           <li><b>One-click pell install + first-launch detection.</b>
