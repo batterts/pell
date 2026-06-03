@@ -4,9 +4,9 @@
 
 module audit.charges;
 
-// note: avoiding `log::info` here because Oracle's built-in LOG() math
+// note: avoiding `logger::info` here because Oracle's built-in LOG() math
 // function shadows user packages named `log` — known v0 issue.
-import std::log;
+import std::logger;
 
 pub fn charge_account(id: number, amount: number) -> number {
   let new_id = sql! {

@@ -246,6 +246,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     print(f"pell deploy: build → {out_dir}")
     built_files: list[Path] = []
     uses_re = False
+    uses_logger = False
     has_errors = False
     failures = 0
     for src_path in inputs:
@@ -264,6 +265,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             uses_re = True
         if "pell_runtime." in sql:
             has_errors = True
+        if "logger." in sql:
+            uses_logger = True
         out_path = out_dir / (src_path.stem + ".sql")
         out_path.write_text(sql)
         built_files.append(out_path)
@@ -283,13 +286,24 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         cmd_runtime(runtime_args)
 
     # Locate pell_re.sql if regex is in use. Look first in the repo's
-    # runtime/ dir (canonical), then alongside the built files.
+    # compiler/runtime/ dir (canonical), then alongside the built files.
+    # __file__ is compiler/pell/cli.py → parents[1] is compiler/.
+    canonical_runtime = Path(__file__).resolve().parents[1] / "runtime"
     re_sql: Path | None = None
     if uses_re or args.with_re:
-        for candidate in (Path(__file__).resolve().parents[2] / "runtime" / "pell_re.sql",
+        for candidate in (canonical_runtime / "pell_re.sql",
                           out_dir / "pell_re.sql"):
             if candidate.exists():
                 re_sql = candidate
+                break
+
+    # Same for logger.sql when any module references logger::*.
+    logger_sql: Path | None = None
+    if uses_logger:
+        for candidate in (canonical_runtime / "logger.sql",
+                          out_dir / "logger.sql"):
+            if candidate.exists():
+                logger_sql = candidate
                 break
 
     # Install — connect via PELL_DB_URL / --connect, then apply each file.
@@ -310,6 +324,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         install_order.append(runtime_sql)
     if re_sql is not None:
         install_order.append(re_sql)
+    if logger_sql is not None:
+        install_order.append(logger_sql)
     install_order.extend(sorted(built_files))
 
     print(f"pell deploy: install {len(install_order)} file(s) → "

@@ -7,7 +7,7 @@
 
 module orders.fulfillment;
 
-import std::log;
+import std::logger;
 
 pub record Order {
   id: number,
@@ -76,7 +76,7 @@ pub fn add_line(order_id: number, sku_id: number, qty: number)
       .returning::<number>()
       .one();
 
-    log::info("added line {new_line_id} to order {order_id}");
+    logger::info("added line {new_line_id} to order {order_id}");
     return Ok(new_line_id);
   }
   return Err(OrderNotFound { id: order_id });
@@ -106,6 +106,6 @@ pub fn print_recent(after: date) {
     where created_at >= :after
     order by created_at desc
   } {
-    log::info("order {row.id}: {row.status}");
+    logger::info("order {row.id}: {row.status}");
   }
 }

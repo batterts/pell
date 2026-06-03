@@ -119,7 +119,7 @@ PL/SQL.
 The known v0 limitations did NOT bite on this workload:
 - No `forall_chunks_of(N)` — but `.collect() + forall` (one big chunk)
   performs within noise of the raw chunked version on 100k rows.
-- `log::info` collision with Oracle's built-in `LOG()` — none of these
+- `logger::info` collision with Oracle's built-in `LOG()` — none of these
   benchmarks use logging.
 - Static-cardinality checks — not exercised here.
 

@@ -1,7 +1,7 @@
 module hello;
 
-import std::log;
+import std::logger;
 
 pub fn greet(name: text) {
-  log::info(name);
+  logger::info(name);
 }

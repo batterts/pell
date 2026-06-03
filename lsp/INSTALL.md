@@ -82,7 +82,7 @@ Once installed (either path), open one of the example files:
 |---|---|
 | `compiler/examples/02_employees.pell` | Hover on `Employee`, `find_employee`, `NotFound` shows record/fn/error declaration. Outline panel shows 3 items. |
 | Make a typo: change `pub fn` → `pub fnn` | Red squiggle on `fnn` with the parser's error message |
-| Add `import std::log;` line | No error (imports are parsed) |
+| Add `import std::logger;` line | No error (imports are parsed) |
 | Type `@` on a new line above a `pub fn` | Completion popup with `@deterministic`, `@result_cache`, `@udf`, `@autonomous`, etc. |
 | Position cursor after `.` on `sql!{...}.` | Completion popup with `.one()`, `.first()`, `.collect()`, `.if_empty()`, `.if_many()`, etc. |
 

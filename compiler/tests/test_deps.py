@@ -86,13 +86,13 @@ def test_collect_packages_from_qualified_calls():
         module m;
         pub fn f(x: text) -> number {
             let h = dbms_utility::get_hash_value(x, 0, 1073741824);
-            log::info("hashed");
+            logger::info("hashed");
             return h;
         }
     """)
     deps = collect_module_deps(m)
     assert "dbms_utility" in deps["packages"]
-    assert "log" in deps["packages"]
+    assert "logger" in deps["packages"]
 
 
 def test_pell_runtime_in_packages_when_errors_declared():

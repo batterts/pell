@@ -70,10 +70,10 @@ or stack-trace clarity is a regression even if it shortens the source.
 ```pell
 module hr.employees;
 
-import std::log;
+import std::logger;
 
 fn greet(name: text) {
-  log::info("hello, {name}");
+  logger::info("hello, {name}");
 }
 ```
 
@@ -219,9 +219,9 @@ Key points:
 
 ```pell
 match promote(emp_id) {
-  Ok(())                         -> log::info("promoted"),
-  Err(NotFound { id, .. })       -> log::warn("no such emp: {id}"),
-  Err(PolicyViolation { reason }) -> log::warn("blocked: {reason}"),
+  Ok(())                         -> logger::info("promoted"),
+  Err(NotFound { id, .. })       -> logger::warn("no such emp: {id}"),
+  Err(PolicyViolation { reason }) -> logger::warn("blocked: {reason}"),
 }
 ```
 
@@ -258,7 +258,7 @@ let active = sql! {
 };
 
 for row in active {
-  log::info(row.name);
+  logger::info(row.name);
 }
 ```
 
@@ -867,7 +867,7 @@ whatever the table currently is," pell provides `rowtype<T>`:
 
 ```pell
 let r: rowtype<accounts> = sql! { select * from accounts where id = :id }.one()?;
-log::info("balance = " || r.balance);   // resolved by Oracle at compile time
+logger::info("balance = " || r.balance);   // resolved by Oracle at compile time
 ```
 
 Lowers verbatim to PL/SQL's `%ROWTYPE`:
@@ -936,11 +936,11 @@ xs.first();                   // -> Option<number>
 xs.last();                    // -> Option<number>
 
 for x in xs {                 // by value
-  log::info("{x}");
+  logger::info("{x}");
 }
 
 for (i, x) in xs.enumerate() {
-  log::info("{i}: {x}");
+  logger::info("{i}: {x}");
 }
 
 // SQL bridging — lists pass directly into `TABLE(:xs)`:
@@ -982,7 +982,7 @@ cache.is_empty();                         // -> bool
 // Iteration — order is unspecified (PL/SQL assoc arrays iterate by
 // key order, but we don't promise that, in case we ever change backing types).
 for (key, val) in cache {
-  log::info("{key} -> {val.name}");
+  logger::info("{key} -> {val.name}");
 }
 
 for key in cache.keys()    { … }          // .keys() -> list<K>
@@ -1619,13 +1619,13 @@ This is the most opinionated part, so it gets its own section.
 
 ```pell
 fn charge_account(id: number, amount: number) -> Result<Unit, ChargeError> {
-  let span = log::span("charge", id, amount);
+  let span = logger::span("charge", id, amount);
 
   sql! { update accounts set balance = balance - :amount where id = :id };
   sql! { insert into ledger(...) values (...) };
   return Ok(());
 } finally {
-  log::info("charge_account done in {span.elapsed()}ms");
+  logger::info("charge_account done in {span.elapsed()}ms");
 }
 ```
 
@@ -1650,7 +1650,7 @@ END;
 ```pell
 // After
 do_stuff() finally {
-  log::info("do_stuff done");   // runs on both success and error
+  logger::info("do_stuff done");   // runs on both success and error
 }
 ```
 
@@ -1668,7 +1668,7 @@ If you only want to run cleanup on the error path, write it explicitly:
 ```pell
 match risky() {
   Ok(v)  -> v,
-  Err(e) -> { log::error("risky failed: {e}"); return Err(e); }
+  Err(e) -> { logger::error("risky failed: {e}"); return Err(e); }
 }
 ```
 
@@ -3037,7 +3037,7 @@ with `pell build`. v1 ships:
   on the `pell` AST only; the package mangling re-derives. Renames of
   identifiers used as `:bind` inside `sql!{}` propagate to the bind sites.
   Renames of SQL identifiers (tables, columns) are out of v1.
-- **Document links** — `import std::log` → the module's source file; module
+- **Document links** — `import std::logger` → the module's source file; module
   references in `@result_cache(relies_on = [hr.employees])` are clickable.
 
 Not in v1: call hierarchy, type hierarchy, monikers, semantic-token delta,

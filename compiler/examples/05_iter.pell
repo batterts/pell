@@ -2,7 +2,7 @@
 
 module reports.daily;
 
-import std::log;
+import std::logger;
 
 pub record OrderSummary {
   order_id: number,
@@ -16,6 +16,6 @@ pub fn print_recent(cutoff: date) {
     where created_at >= :cutoff
     order by created_at desc
   } {
-    log::info(row.order_id);
+    logger::info(row.order_id);
   }
 }

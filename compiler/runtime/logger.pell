@@ -1,0 +1,49 @@
+module logger;
+
+// ---------------------------------------------------------------------------
+// logger — minimal DBMS_OUTPUT-backed logging.
+//
+// Surface:
+//   logger::info(msg)    "INFO:  <msg>"
+//   logger::warn(msg)    "WARN:  <msg>"
+//   logger::err(msg)     "ERROR: <msg>"
+//   logger::debug(msg)   "DEBUG: <msg>"
+//   logger::trace(msg)   "TRACE: <msg>"
+//
+// Naming note: `err` (not `error`) because pell reserves `error` for
+// the `error MyKind("...")` declaration syntax. A fn named `error`
+// would shadow the keyword.
+//
+// Why "logger" and not "log": Oracle reserves `LOG` for the built-in
+// math function (LOG(b, x) = logarithm of x base b). A user-defined
+// package named `log` compiles fine, but any reference to it from
+// PL/SQL fails with PLS-00225 ("out of scope") because Oracle resolves
+// LOG as the math built-in first. Schema-qualifying every call works
+// but is brittle across deployments. Renaming the package side-steps
+// the resolution entirely.
+//
+// Caller-side ergonomics are preserved: pell's emitter auto-stringifies
+// the argument so `logger::info(x)` works for any typed `x` — text,
+// number, json, list, record — via TO_CHAR / JSON_SERIALIZE / etc. as
+// appropriate. No manual cast required.
+// ---------------------------------------------------------------------------
+
+pub fn info(msg: text) {
+  dbms_output::put_line("INFO:  {msg}");
+}
+
+pub fn warn(msg: text) {
+  dbms_output::put_line("WARN:  {msg}");
+}
+
+pub fn err(msg: text) {
+  dbms_output::put_line("ERROR: {msg}");
+}
+
+pub fn debug(msg: text) {
+  dbms_output::put_line("DEBUG: {msg}");
+}
+
+pub fn trace(msg: text) {
+  dbms_output::put_line("TRACE: {msg}");
+}

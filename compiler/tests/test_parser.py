@@ -72,9 +72,9 @@ def test_pub_modifier():
 
 
 def test_import():
-    m = parse("module m; import std::log;")
+    m = parse("module m; import std::logger;")
     assert isinstance(m.items[0], A.ImportStmt)
-    assert m.items[0].path == "std::log"
+    assert m.items[0].path == "std::logger"
 
 
 def test_optional_type():
@@ -164,8 +164,8 @@ def test_match_with_variants():
         module m;
         fn f() {
           match x {
-            Some(v) -> log::info(v),
-            None -> log::warn(0),
+            Some(v) -> logger::info(v),
+            None -> logger::warn(0),
           }
         }
     ''')
@@ -205,7 +205,7 @@ def test_for_loop_over_sql():
         module m;
         fn f() {
           for r in sql! { select id from t } {
-            log::info(r.id);
+            logger::info(r.id);
           }
         }
     ''')

@@ -58,7 +58,7 @@ def test_compound_operators():
 
 
 def test_colon_colon():
-    toks = tokenize("std::log::info")
+    toks = tokenize("std::logger::info")
     kk = [t.kind for t in toks if t.kind != "EOF"]
     assert kk == ["IDENT", "COLONCOLON", "IDENT", "COLONCOLON", "IDENT"]
 

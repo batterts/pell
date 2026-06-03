@@ -3,7 +3,7 @@
 
 module hr.employees;
 
-import std::log;
+import std::logger;
 
 pub record Employee {
   id: number,

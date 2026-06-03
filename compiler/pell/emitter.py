@@ -1875,7 +1875,7 @@ class Emitter:
         text-typed or the type is unknown.
 
         Used by string interpolation (`"{x}"`) and by known text-only
-        call targets (`log::info`, `dbms_output::put_line`) so the user
+        call targets (`logger::info`, `dbms_output::put_line`) so the user
         can pass any typed expression and it Just Works.
         """
         if pl_type is None:
@@ -4505,7 +4505,7 @@ class Emitter:
     # can write `log::info(x)` or `dbms_output::put_line(j)` for any
     # typed `x` without a manual TO_CHAR / JSON_SERIALIZE wrapper.
     _TEXT_CONSUMING_CALLS = frozenset({
-        "log::info", "log::warn", "log::error", "log::debug", "log::trace",
+        "logger::info", "logger::warn", "logger::err", "logger::debug", "logger::trace",
         "dbms_output::put_line",
     })
 

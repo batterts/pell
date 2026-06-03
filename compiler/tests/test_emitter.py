@@ -13,13 +13,13 @@ def test_hello_world():
     sql = compile_to_sql("""
         module hello;
         pub fn greet(name: text) {
-          log::info(name);
+          logger::info(name);
         }
     """)
     assert "CREATE OR REPLACE PACKAGE hello AS" in sql
     assert "PROCEDURE greet(p_name IN VARCHAR2);" in sql
     assert "CREATE OR REPLACE PACKAGE BODY hello AS" in sql
-    assert "log.info(p_name);" in sql
+    assert "logger.info(p_name);" in sql
 
 
 def test_module_name_mangling():
@@ -157,12 +157,12 @@ def test_for_loop_over_sql():
         module m;
         pub fn run() {
           for r in sql! { select id from t } {
-            log::info(r.id);
+            logger::info(r.id);
           }
         }
     """)
     assert "FOR r IN" in sql
-    assert "log.info(r.id)" in sql
+    assert "logger.info(r.id)" in sql
 
 
 def test_if_else():
@@ -205,7 +205,7 @@ def test_rowtype_in_param_position():
     sql = compile_to_sql("""
         module m;
         pub fn process(r: rowtype<accounts>) {
-          log::info(r.id);
+          logger::info(r.id);
         }
     """)
     assert "p_r IN accounts%ROWTYPE" in sql
@@ -364,7 +364,7 @@ def test_bulk_rowcount_and_total():
             sql! { insert into t(n) values (:x) };
           }
           for i in xs.indices() {
-            log::info("rows: {bulk.rowcount(i)} total {bulk.total()}");
+            logger::info("rows: {bulk.rowcount(i)} total {bulk.total()}");
           }
         }
     """)
@@ -396,7 +396,7 @@ def test_for_indices_loop():
         pub fn run() {
           let xs: list<number> = [1, 2, 3];
           for i in xs.indices() {
-            log::info("at {i}");
+            logger::info("at {i}");
           }
         }
     """)
@@ -408,7 +408,7 @@ def test_interpolation_supports_method_calls():
         module m;
         pub fn run() {
           let xs: list<number> = [1];
-          log::info("len is {xs.len()}");
+          logger::info("len is {xs.len()}");
         }
     """)
     assert "'len is ' || l_xs.COUNT" in sql
@@ -436,7 +436,7 @@ def test_forall_rejects_non_dml_body():
             pub fn run() {
               let xs: list<number> = [1, 2];
               forall x in xs {
-                log::info(x);
+                logger::info(x);
               }
             }
         """)
@@ -484,11 +484,11 @@ def test_finally_block_emitted():
         pub fn charge(id: number) {
           sql! { insert into audit(id) values (:id) };
         } finally {
-          log::info("done");
+          logger::info("done");
         }
     """)
     assert "PROCEDURE pell_finally_body IS" in sql
-    assert "log.info('done')" in sql
+    assert "logger.info('done')" in sql
     assert "EXCEPTION" in sql
     # The finally should be called in both the success path AND
     # the WHEN OTHERS handler path (then re-raise).
@@ -499,7 +499,7 @@ def test_finally_block_emitted():
 def test_no_finally_no_wrapping():
     sql = compile_to_sql("""
         module m;
-        pub fn simple() { log::info("hi"); }
+        pub fn simple() { logger::info("hi"); }
     """)
     assert "pell_finally_body" not in sql
 
@@ -544,7 +544,7 @@ def test_string_interpolation():
     sql = compile_to_sql("""
         module m;
         pub fn greet(name: text) {
-          log::info("hello {name}");
+          logger::info("hello {name}");
         }
     """)
     assert "'hello ' || p_name" in sql
@@ -555,7 +555,7 @@ def test_string_interpolation_field_access():
         module m;
         pub record P { id: number, name: text }
         pub fn show(p: P) {
-          log::info("id={p.id}");
+          logger::info("id={p.id}");
         }
     """)
     assert "'id=' || p_p.id" in sql
@@ -565,7 +565,7 @@ def test_string_no_interpolation_unchanged():
     sql = compile_to_sql("""
         module m;
         pub fn p() {
-          log::info("no braces here");
+          logger::info("no braces here");
         }
     """)
     assert "'no braces here'" in sql
@@ -1928,17 +1928,17 @@ def test_auto_stringify_date_in_interpolation():
 def test_auto_stringify_log_info_number():
     sql = compile_to_sql("""
         module m;
-        pub fn f(n: number) { log::info(n); }
+        pub fn f(n: number) { logger::info(n); }
     """)
-    assert "log.info(TO_CHAR(p_n))" in sql
+    assert "logger.info(TO_CHAR(p_n))" in sql
 
 
 def test_auto_stringify_log_info_json():
     sql = compile_to_sql("""
         module m;
-        pub fn f(j: json) { log::info(j); }
+        pub fn f(j: json) { logger::info(j); }
     """)
-    assert "log.info(JSON_SERIALIZE(p_j))" in sql
+    assert "logger.info(JSON_SERIALIZE(p_j))" in sql
 
 
 def test_auto_stringify_dbms_output_put_line_number():
@@ -1953,9 +1953,9 @@ def test_auto_stringify_text_passthrough():
     """text args should NOT be wrapped."""
     sql = compile_to_sql("""
         module m;
-        pub fn f(s: text) { log::info(s); }
+        pub fn f(s: text) { logger::info(s); }
     """)
-    assert "log.info(p_s)" in sql
+    assert "logger.info(p_s)" in sql
     assert "TO_CHAR" not in sql
 
 

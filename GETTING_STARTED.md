@@ -48,10 +48,10 @@ The `pell` wrapper at the repo root finds the project's venv and runs
 // hello.pell
 module hello;
 
-import std::log;
+import std::logger;
 
 pub fn greet(name: text) {
-  log::info(name);
+  logger::info(name);
 }
 ```
 
@@ -69,7 +69,7 @@ CREATE OR REPLACE PACKAGE BODY hello AS
 
   PROCEDURE greet(p_name IN VARCHAR2) IS
   BEGIN
-    log.info(p_name);
+    logger.info(p_name);
   END greet;
 END hello;
 /
@@ -80,7 +80,7 @@ END hello;
 | Feature | Example | Notes |
 |---|---|---|
 | `module foo.bar;` | `compiler/examples/01_hello.pell` | lowers to `foo_bar` package |
-| `import std::log;` | `02_employees.pell` | parsed; uses `log.info(...)` in lowered code |
+| `import std::logger;` | `02_employees.pell` | parsed; uses `logger.info(...)` in lowered code |
 | `pub` modifier on items | everywhere | controls spec visibility |
 | `record` decl | `02_employees.pell` §4.2 | emits `TYPE … IS RECORD` |
 | `error` decl with payload | `02_employees.pell` | emits `EXCEPTION` + `PRAGMA EXCEPTION_INIT` in `pell_runtime` comment block |
@@ -132,7 +132,7 @@ Roughly ordered by how much pain they'll cause if you hit them:
 
 8. **No schema snapshot, no `pell.toml`, no `pell deploy`.** Those land in M4. For v0, the CLI is just `build`, `parse`, and `tokens`.
 
-9. **Single-file modules only.** No cross-module imports beyond `import std::log;` (which doesn't even resolve, just prints as `log.info` in the body). Multi-file projects work if you compile each `.pell` separately, but cross-references aren't checked.
+9. **Single-file modules only.** No cross-module imports beyond `import std::logger;` (which doesn't even resolve, just prints as `logger.info` in the body). Multi-file projects work if you compile each `.pell` separately, but cross-references aren't checked.
 
 11. **Type-args (`::<T>`) only work on `.returning` and `.into`.** Generic `foo::<T>(...)` calls otherwise won't typecheck.
 
