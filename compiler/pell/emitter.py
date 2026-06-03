@@ -4224,8 +4224,75 @@ class Emitter:
                 "`let _ = ...` or use it inside a call/assignment.",
                 s.loc,
             )
+        # Discarded function return: `f();` where f has a non-Unit
+        # return type is invalid PL/SQL (PLS-00221 — "is not a procedure
+        # or is undefined"). Catch it at compile time when we can
+        # resolve the callee. Cross-system calls (dbms_output.*, Oracle
+        # built-ins, opaque OBJECT methods) stay permissive because we
+        # don't have signatures for them.
+        self._reject_unused_return(e, s.loc)
         # Side-effecting expression (Call / pipeline / try-call / etc.)
         return [f"{indent}{self._emit_expr(e)};"]
+
+    def _reject_unused_return(self, e: A.Expr, loc: Any) -> None:
+        """Raise EmitError if `e` is a bare-statement Call whose callee
+        we can resolve AND whose return type is non-Unit.
+
+        Resolution sources, in order:
+          - Same-module fns in `self._fns`
+          - Cross-package fns in `self._project_signatures`
+
+        Unresolvable callees (member access, unknown identifiers, Oracle
+        built-ins, OBJECT methods) pass through — we'd rather miss a real
+        error than reject legitimate code we can't type-check.
+        """
+        # Unwrap try-call / Ok / Some — the callee is on the inner.
+        inner: A.Expr = e
+        while isinstance(inner, (A.QuestionMark, A.OkExpr, A.SomeExpr)):
+            inner = inner.inner
+        if not isinstance(inner, A.Call):
+            return
+        if not isinstance(inner.callee, A.Ident):
+            return
+        fn_name = inner.callee.name
+        # Side-effect-only builtins that don't need this check. Most
+        # are already handled by earlier branches in _emit_expr_stmt,
+        # but listing them here makes the intent explicit.
+        if fn_name in ("exec_dyn", "p", "print", "println"):
+            return
+        ret_type = None
+        # Same-module first.
+        for fn in self._fns:
+            if fn.name == fn_name:
+                ret_type = fn.return_type
+                break
+        # Cross-package registry.
+        if ret_type is None and "::" in fn_name:
+            ret_type = self._project_signatures.get(fn_name)
+        if ret_type is None:
+            return  # unknown callee — be permissive
+        if self._is_unit_return(ret_type):
+            return
+        raise EmitError(
+            f"function `{fn_name}` returns a non-Unit value that's "
+            "being discarded. PL/SQL rejects this (PLS-00221: not a "
+            "procedure). Bind the result with `let _ = "
+            f"{fn_name}(...)` or use it in an expression.",
+            loc,
+        )
+
+    @staticmethod
+    def _is_unit_return(t: A.TypeRef) -> bool:
+        """A pell return type is Unit (PL/SQL PROCEDURE) when it's
+        absent, the literal `Unit`, or the parser's placeholder for
+        a bare `fn foo() { ... }` with no `-> T`."""
+        if t is None:
+            return True
+        if isinstance(t, A.PrimType) and t.name == "Unit":
+            return True
+        if isinstance(t, A.NamedType) and t.name == "Unit":
+            return True
+        return False
 
     @staticmethod
     def _is_statement_shaped(e: A.Expr) -> bool:

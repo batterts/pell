@@ -272,12 +272,23 @@ import re as _re
 
 # Order matters: longer specifiers first so PACKAGE BODY doesn't get
 # matched as PACKAGE with leftover BODY. Same for TYPE BODY.
+# The name part is a dotted identifier: either schema-qualified
+# (`scott.foo`), bare (`foo`), or quoted (`"My Pkg"`). Each segment
+# is bare-or-quoted independently. We capture the whole thing so we
+# can strip down to the last segment afterwards (USER_ERRORS keys on
+# the schema-local name, not the qualified form). Pell emits modules
+# like `pell_test.hello` as a single dotted identifier in the DDL,
+# which the previous "[A-Za-z_$][A-Za-z0-9_$]*" pattern stopped at
+# the first dot — that captured the schema name `pell_test` and
+# the subsequent USER_ERRORS lookup never matched anything, so a
+# clearly-broken PACKAGE BODY was reported as deployed-OK.
 _CREATE_OBJECT_RE = _re.compile(
     r"\bCREATE\s+(?:OR\s+REPLACE\s+)?"
     r"(?:EDITIONABLE\s+|NONEDITIONABLE\s+)?"
     r"(PACKAGE\s+BODY|TYPE\s+BODY|PACKAGE|TYPE|"
     r"FUNCTION|PROCEDURE|TRIGGER|VIEW)\s+"
-    r"(?:\"([^\"]+)\"|([A-Za-z_$][A-Za-z0-9_$]*))",
+    r"((?:\"[^\"]+\"|[A-Za-z_$][A-Za-z0-9_$]*)"
+    r"(?:\.(?:\"[^\"]+\"|[A-Za-z_$][A-Za-z0-9_$]*))*)",
     _re.IGNORECASE,
 )
 
@@ -287,17 +298,21 @@ def _parse_create_object(stmt: str) -> Optional[tuple[str, str]]:
     `stmt`, or None if it's not a CREATE OR REPLACE for an object type
     that has a USER_ERRORS row.
 
-    Schema-qualified names ("scott.foo") are stripped to the bare name
-    since USER_ERRORS keys on the current schema's namespace.
+    Schema-qualified names ("scott.foo") AND dotted-module names
+    ("pell_test.hello", which pell emits for `module pell_test.hello`)
+    are stripped to the last segment — that's how Oracle stores the
+    object name in USER_OBJECTS / USER_ERRORS.
     """
     m = _CREATE_OBJECT_RE.search(stmt)
     if m is None:
         return None
     obj_type = _re.sub(r"\s+", " ", m.group(1).upper())
-    raw_name = m.group(2) or m.group(3)
-    if "." in raw_name:
-        raw_name = raw_name.rsplit(".", 1)[1]
-    return raw_name.upper(), obj_type
+    raw_name = m.group(2)
+    # Last segment of a dotted name. Strip surrounding quotes if any.
+    last = raw_name.rsplit(".", 1)[-1]
+    if last.startswith('"') and last.endswith('"'):
+        last = last[1:-1]
+    return last.upper(), obj_type
 
 
 def _user_errors_for(
