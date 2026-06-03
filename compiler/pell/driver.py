@@ -132,22 +132,39 @@ class Connection:
         the build emitter produces. Statements split on lines that are
         just `/` (SQL*Plus convention).
 
-        After each CREATE OR REPLACE statement, queries USER_ERRORS for
-        the newly-created object and raises InstallError if compilation
-        produced any errors. Oracle's CREATE OR REPLACE *always succeeds*
-        at the SQL level even when the body has compile errors — the
-        errors only surface in USER_ERRORS. Without this check, `pell
-        deploy` reports OK for unusable packages.
+        Oracle's CREATE OR REPLACE *always succeeds* at the SQL level
+        even when the body has compile errors. The dirty case is
+        signaled as ORA-24344 / DPY-7000 ("success with compilation
+        error") which python-oracledb surfaces on `cur.warning` rather
+        than raising. So:
+
+          1. Run the stmt.
+          2. If `cur.warning` is set, parse out the object name + type
+             from the DDL and pull error rows from USER_ERRORS, raise
+             InstallError with the details.
+          3. If no warning, object compiled clean — no extra query.
+
+        Net effect: clean deploys do zero USER_ERRORS roundtrips; only
+        the actual error case pays for the lookup.
         """
         with self.raw.cursor() as cur:
             for stmt in _split_script(sql_script):
                 cur.execute(stmt)
+                if cur.warning is None:
+                    continue
                 obj = _parse_create_object(stmt)
-                if obj is not None:
-                    name, obj_type = obj
-                    errors = _user_errors_for(cur, name, obj_type)
-                    if errors:
-                        raise InstallError(name, obj_type, errors)
+                if obj is None:
+                    # Oracle warned but we can't pin the object — surface
+                    # the raw warning so the user knows something compiled
+                    # dirty even if we can't pinpoint where.
+                    raise InstallError(
+                        "<unknown>", "<unknown>",
+                        [(0, 0, str(cur.warning))],
+                    )
+                name, obj_type = obj
+                errors = _user_errors_for(cur, name, obj_type)
+                if errors:
+                    raise InstallError(name, obj_type, errors)
 
     def commit(self) -> None:
         self.raw.commit()
