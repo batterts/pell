@@ -128,8 +128,14 @@ The LSP server is intentionally minimal. What's *not* implemented yet:
 - **Semantic tokens / fine-grained highlighting** — IntelliJ's default
   highlighter colors based on plugin.xml file-type registration; we
   don't yet emit LSP semantic-token responses.
-- **Code actions / quick fixes** — the wishlist in `INSTRUMENTATION_WISHLIST.md`
-  has six concrete ones.
+- **Code actions / quick fixes** — implemented for the
+  `pell.unused-return` and `pell.unused-value` EmitError codes:
+  Alt+Enter on a red squiggle offers
+  *"Bind result with `let _ = `"*. Adding more is a matter of
+  tagging the relevant `EmitError(..., code="pell.X")` and adding
+  `pell.X` to `_QUICKFIX_CODES` in `pell_lsp/server.py`. The
+  wishlist in `INSTRUMENTATION_WISHLIST.md` has six more concrete
+  ideas.
 
 ## Troubleshooting
 
@@ -143,6 +149,13 @@ The LSP server is intentionally minimal. What's *not* implemented yet:
 - **Diagnostics stop updating**: the server caches the last parsed module
   per URI. If the IDE doesn't notify the server of edits (rare), restart
   the LSP server via the LSP4IJ status bar.
+- **Quickfix / code action lightbulb doesn't appear** even though the
+  red squiggle is there: the running pell-lsp Python process is
+  stale. After updating the pell repo (e.g. `git pull`), restart the
+  LSP server via **View → Tool Windows → LSP Consoles** → right-click
+  the *pell* entry → **Restart**. The new code action handlers are
+  registered at server-startup time, so a hot reload of `server.py`
+  doesn't propagate without a restart.
 - **Build fails with "could not resolve plugin"**: `./gradlew buildPlugin`
   needs internet access on first run to download the IntelliJ Platform
   Gradle plugin and LSP4IJ jar.

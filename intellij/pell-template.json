@@ -11,7 +11,7 @@
       "languageId": "pell"
     }
   ],
-  "description": "Pell language server (wraps the pell compiler for diagnostics, hover, document symbols, and basic completion).",
+  "description": "Pell language server (wraps the pell compiler for diagnostics, hover, document symbols, completion, and quickfix code actions).",
   "clientConfiguration": {},
   "configurationContent": "",
   "settings": {}
