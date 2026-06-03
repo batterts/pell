@@ -14,14 +14,13 @@ import dev.pell.intellij.PellLanguage
 import dev.pell.intellij.psi.PellFnDef
 import dev.pell.intellij.psi.PellLetStmt
 import dev.pell.intellij.psi.PellParam
-import dev.pell.intellij.psi.PellSymbolScanner
 import dev.pell.intellij.psi.PellVarStmt
 
 /**
  * Backs Ctrl-Space autocomplete in `.pell` files with:
  *
  *   - All pell keywords (constant set).
- *   - Project-wide pub fn / record names (via PellSymbolScanner).
+ *   - Project-wide pub fn / record names (via PellSymbolService).
  *   - In-scope locals (params + lets + vars in the enclosing fn).
  *
  * LSP4IJ provides a similar but heavier completion path; this
@@ -66,19 +65,18 @@ private object PellCompletionProvider : CompletionProvider<CompletionParameters>
             result.addElement(LookupElementBuilder.create(kw).bold().withTypeText("keyword"))
         }
 
-        // 2. Project-wide pub fns + records.
-        for (fn in PellSymbolScanner.findPubFns(file.project)) {
-            val name = fn.name ?: continue
+        // 2. Project-wide pub fns + records — via PellSymbolService.
+        val symbols = dev.pell.intellij.symbols.PellSymbolService.getInstance(file.project)
+        for (fn in symbols.findPubFns()) {
             result.addElement(
-                LookupElementBuilder.create(name)
+                LookupElementBuilder.create(fn.name)
                     .withIcon(com.intellij.icons.AllIcons.Nodes.Function)
-                    .withTypeText("fn", true),
+                    .withTypeText(fn.type?.displayName() ?: "fn", true),
             )
         }
-        for (rec in PellSymbolScanner.findPubRecords(file.project)) {
-            val name = rec.name ?: continue
+        for (rec in symbols.findPubRecords()) {
             result.addElement(
-                LookupElementBuilder.create(name)
+                LookupElementBuilder.create(rec.name)
                     .withIcon(com.intellij.icons.AllIcons.Nodes.Record)
                     .withTypeText("record", true),
             )

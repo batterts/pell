@@ -687,6 +687,14 @@ END employees;
             language="pell"
             implementationClass="dev.pell.intellij.completion.PellCompletionContributor" />
 
+        <!-- PellSymbolService project-level facade. Every inspection,
+             refactoring, intention, and completion contributor routes
+             symbol lookups through this service. L1: PSI-walk backed.
+             L2: StubIndex backed (perf upgrade, no API change). -->
+        <projectService
+            serviceInterface="dev.pell.intellij.symbols.PellSymbolService"
+            serviceImplementation="dev.pell.intellij.symbols.PellSymbolServiceImpl" />
+
         <!-- Yellow-squiggle inspection: bare expression-statement whose
              expression is a function call whose return value is discarded.
              Discarded returns produce PLS-00221 at deploy time, so we
