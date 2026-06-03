@@ -592,6 +592,20 @@ END employees;
             language="pell"
             implementationClass="dev.pell.intellij.completion.PellCompletionContributor" />
 
+        <!-- Yellow-squiggle inspection: bare expression-statement whose
+             expression is a function call whose return value is discarded.
+             Discarded returns produce PLS-00221 at deploy time, so we
+             catch them at edit time. Quick-fixes: assign to local, wrap
+             in for-loop. -->
+        <localInspection
+            language="pell"
+            shortName="PellDiscardedReturn"
+            displayName="Discarded function return value"
+            groupName="Pell"
+            enabledByDefault="true"
+            level="WARNING"
+            implementationClass="dev.pell.intellij.inspections.PellDiscardedReturnInspection" />
+
         <!-- Alt-Enter intention actions. Surfaced when the caret is on a
              bare expression-statement (e.g. `user_tables();`). -->
         <intentionAction>
