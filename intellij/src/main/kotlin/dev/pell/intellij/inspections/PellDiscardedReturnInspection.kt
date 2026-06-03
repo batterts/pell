@@ -10,9 +10,10 @@ import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiElementVisitor
 import com.intellij.psi.util.PsiTreeUtil
-import dev.pell.intellij.psi.PellCallOp
 import dev.pell.intellij.psi.PellElementTypes
 import dev.pell.intellij.psi.PellExprOrAssignStmt
+import dev.pell.intellij.psi.PellSymbolScanner
+import dev.pell.intellij.psi.PellTypeRef
 
 /**
  * Warns when a bare expression-statement is a function call whose
@@ -31,10 +32,21 @@ import dev.pell.intellij.psi.PellExprOrAssignStmt
  *   - "Assign to local variable" → `let result = user_tables();`
  *   - "Wrap in for-loop"          → `for row in user_tables() { /* TODO */ }`
  *
- * Heuristic: any bare expression-statement that contains a [PellCallOp]
- * descendant. False positives are possible (the call really might be a
- * procedure-style fn whose return is intentionally ignored) but the
- * "Suppress for statement" Alt-Enter option handles those cases.
+ * Detection rule: only flag a bare expression-statement when we can
+ * prove the callee returns a value. Specifically:
+ *
+ *   1. The stmt starts with `<name>(` or `<qualified::name>(` /
+ *      `<obj.method>(` — i.e. its outermost expression IS a call.
+ *   2. The callee name resolves to a [dev.pell.intellij.psi.PellFnDef]
+ *      somewhere in the project.
+ *   3. That fn declaration carries a `-> T` clause whose T is not
+ *      `Unit` — i.e. it's a function, not a procedure.
+ *
+ * Procedures (no `-> T` or `-> Unit`) and unresolved callees (built-ins
+ * like `p(...)`, `dbms_output::put_line(...)`, `catalog::*` that aren't
+ * in the user's project) are deliberately NOT flagged. Conservative
+ * stance — better to miss a real function-discard than to nag on every
+ * procedure call.
  *
  * PSI TRACK — owned by the PSI work stream. See intellij/PSI_TRACK.md.
  */
@@ -51,18 +63,38 @@ class PellDiscardedReturnInspection : LocalInspectionTool() {
                 if (element !is PellExprOrAssignStmt) return
                 // Skip assignment statements — they bind the value, no discard.
                 if (element.node.findChildByType(PellElementTypes.EQ) != null) return
-                // Skip if there's no call in the expression.
-                PsiTreeUtil.findChildOfType(element, PellCallOp::class.java) ?: return
+
+                // 1. Extract the leading callee name from the stmt's text.
+                //    Matches `name(`, `path::name(`, `obj.method(` at the start.
+                val text = element.text.trimEnd(';', ' ', '\n').trim()
+                val match = LEADING_CALL_RE.find(text) ?: return
+                val fullCallee = match.groupValues[1]
+                val calleeName = fullCallee.substringAfterLast("::").substringAfterLast(".")
+
+                // 2. Resolve to a fn in the project. Built-ins (p, catalog::*,
+                //    dbms_output::*, anything outside the user's pell sources)
+                //    won't resolve — skip them rather than guess.
+                val target = PellSymbolScanner.findPubFns(element.project, calleeName).firstOrNull() ?: return
+
+                // 3. Function vs procedure: a `-> T` child (PellTypeRef) means
+                //    function. No PellTypeRef means procedure (no return value)
+                //    so calling it as a stmt is fine.
+                val returnType = PsiTreeUtil.findChildOfType(target, PellTypeRef::class.java) ?: return
+                if (returnType.text.trim() == "Unit") return
 
                 holder.registerProblem(
                     element,
-                    "Function call result is discarded — assign it or iterate it (Oracle PL/SQL can't call a function as a statement)",
+                    "Function `$calleeName` returns `${returnType.text.trim()}` — discarding it lowers to PLS-00221 at deploy (Oracle PL/SQL can't call a function as a statement)",
                     ProblemHighlightType.WARNING,
                     AssignToLocalFix,
                     WrapInForLoopFix,
                 )
             }
         }
+    }
+
+    companion object {
+        private val LEADING_CALL_RE = Regex("""^([A-Za-z_][A-Za-z0-9_.:]*)\s*\(""")
     }
 }
 
