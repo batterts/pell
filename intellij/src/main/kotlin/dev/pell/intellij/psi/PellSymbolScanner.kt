@@ -31,18 +31,22 @@ object PellSymbolScanner {
     }
 
     /** All public functions visible at module scope, optionally filtered
-     *  by name. */
+     *  by name. Uses recursive findChildrenOfType because the BNF wraps
+     *  each top-level decl in a PellItem node (`item ::= annotation*
+     *  KW_PUB? itemBody`), so PellFnDef is a *grandchild* of PellFile,
+     *  not a direct child. */
     fun findPubFns(project: Project, name: String? = null): List<PellFnDef> =
         allFiles(project)
-            .flatMap { PsiTreeUtil.getChildrenOfTypeAsList(it, PellFnDef::class.java).asSequence() }
+            .flatMap { PsiTreeUtil.findChildrenOfType(it, PellFnDef::class.java).asSequence() }
             .filter { /* TODO: is_pub flag once Phase 4 adds a child accessor */ true }
             .filter { name == null || it.name == name }
             .toList()
 
-    /** All public records project-wide, optionally filtered by name. */
+    /** All public records project-wide, optionally filtered by name.
+     *  Same recursive-scan rationale as findPubFns. */
     fun findPubRecords(project: Project, name: String? = null): List<PellRecordDef> =
         allFiles(project)
-            .flatMap { PsiTreeUtil.getChildrenOfTypeAsList(it, PellRecordDef::class.java).asSequence() }
+            .flatMap { PsiTreeUtil.findChildrenOfType(it, PellRecordDef::class.java).asSequence() }
             .filter { name == null || it.name == name }
             .toList()
 
