@@ -4209,8 +4209,47 @@ class Emitter:
                 and isinstance(e.callee, A.Ident)
                 and e.callee.name == "exec_dyn"):
             return self._emit_exec_dyn(None, e, indent)
-        # otherwise just emit the expression with `;`
+        # Reject pure expressions as bare statements. PL/SQL has no
+        # `<expr>;` statement form — only calls, assignments, SQL DML,
+        # and control flow. Letting a NumberLit / BinOp / Ident through
+        # produces invalid PL/SQL that Oracle quietly compiles to a
+        # broken package body (USER_ERRORS catches it eventually but
+        # the pell user sees a confusing PLS-00103 instead of a clear
+        # "this statement has no effect" message).
+        if not self._is_statement_shaped(e):
+            kind = type(e).__name__
+            raise EmitError(
+                f"expression of type {kind} can't stand alone as a "
+                "statement — its value is unused. Bind it with "
+                "`let _ = ...` or use it inside a call/assignment.",
+                s.loc,
+            )
+        # Side-effecting expression (Call / pipeline / try-call / etc.)
         return [f"{indent}{self._emit_expr(e)};"]
+
+    @staticmethod
+    def _is_statement_shaped(e: A.Expr) -> bool:
+        """A bare-statement expression must have a side effect. Calls
+        (procedure or function-for-side-effect), pipelines that reduce
+        to calls, and try-call (`call()?`) all qualify. Pure literals,
+        identifiers, binops, and member accesses do not.
+
+        Conservative: when in doubt, allow — better to let Oracle's
+        own parser reject a weird edge case than to refuse legitimate
+        code. The known-pure shapes below are the high-confidence
+        rejects.
+        """
+        if isinstance(e, (A.Call, A.PipelineExpr)):
+            return True
+        # Try-call: `foo()?` — sugar for "raise if foo returned an err".
+        # Still a call underneath.
+        if isinstance(e, A.QuestionMark):
+            return Emitter._is_statement_shaped(e.inner)
+        if isinstance(e, A.OkExpr):
+            return Emitter._is_statement_shaped(e.inner)
+        if isinstance(e, A.SomeExpr):
+            return Emitter._is_statement_shaped(e.inner)
+        return False
 
     # ---- expressions ----------------------------------------------------
 

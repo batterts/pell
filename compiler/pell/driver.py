@@ -68,6 +68,26 @@ def _parse_dsn(url: str) -> tuple[str, str, str, int, str]:
     return user, password, host, port, service
 
 
+class InstallError(Exception):
+    """Raised by Connection.execute_install when USER_ERRORS shows a
+    compile error on a freshly-created object. Message lists each
+    error as `LINE:POSITION  TEXT` so cmd_deploy's `✗` line pinpoints
+    the offending object."""
+
+    def __init__(
+        self, name: str, obj_type: str, errors: list[tuple[int, int, str]],
+    ) -> None:
+        self.name = name
+        self.obj_type = obj_type
+        self.errors = errors
+        body = "\n".join(
+            f"    {line}:{pos}  {text}" for line, pos, text in errors
+        )
+        super().__init__(
+            f"{obj_type} {name} compiled with {len(errors)} error(s):\n{body}"
+        )
+
+
 class Connection:
     """Thin wrapper around an oracledb connection.
 
@@ -110,10 +130,24 @@ class Connection:
     def execute_install(self, sql_script: str) -> None:
         """Run a `/`-terminated multi-statement install script — the format
         the build emitter produces. Statements split on lines that are
-        just `/` (SQL*Plus convention)."""
+        just `/` (SQL*Plus convention).
+
+        After each CREATE OR REPLACE statement, queries USER_ERRORS for
+        the newly-created object and raises InstallError if compilation
+        produced any errors. Oracle's CREATE OR REPLACE *always succeeds*
+        at the SQL level even when the body has compile errors — the
+        errors only surface in USER_ERRORS. Without this check, `pell
+        deploy` reports OK for unusable packages.
+        """
         with self.raw.cursor() as cur:
             for stmt in _split_script(sql_script):
                 cur.execute(stmt)
+                obj = _parse_create_object(stmt)
+                if obj is not None:
+                    name, obj_type = obj
+                    errors = _user_errors_for(cur, name, obj_type)
+                    if errors:
+                        raise InstallError(name, obj_type, errors)
 
     def commit(self) -> None:
         self.raw.commit()
@@ -208,3 +242,56 @@ def _split_script(sql_script: str) -> list[str]:
     if tail:
         chunks.append(tail)
     return chunks
+
+
+# ---------------------------------------------------------------------------
+# USER_ERRORS pinning — Oracle's CREATE OR REPLACE always succeeds at the
+# SQL level. For object types that have a compile phase (packages, types,
+# triggers, views, ...), errors only surface in USER_ERRORS. These helpers
+# let execute_install detect that without false positives.
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+# Order matters: longer specifiers first so PACKAGE BODY doesn't get
+# matched as PACKAGE with leftover BODY. Same for TYPE BODY.
+_CREATE_OBJECT_RE = _re.compile(
+    r"\bCREATE\s+(?:OR\s+REPLACE\s+)?"
+    r"(?:EDITIONABLE\s+|NONEDITIONABLE\s+)?"
+    r"(PACKAGE\s+BODY|TYPE\s+BODY|PACKAGE|TYPE|"
+    r"FUNCTION|PROCEDURE|TRIGGER|VIEW)\s+"
+    r"(?:\"([^\"]+)\"|([A-Za-z_$][A-Za-z0-9_$]*))",
+    _re.IGNORECASE,
+)
+
+
+def _parse_create_object(stmt: str) -> Optional[tuple[str, str]]:
+    """Return (name_upper, type_upper) of the object being created by
+    `stmt`, or None if it's not a CREATE OR REPLACE for an object type
+    that has a USER_ERRORS row.
+
+    Schema-qualified names ("scott.foo") are stripped to the bare name
+    since USER_ERRORS keys on the current schema's namespace.
+    """
+    m = _CREATE_OBJECT_RE.search(stmt)
+    if m is None:
+        return None
+    obj_type = _re.sub(r"\s+", " ", m.group(1).upper())
+    raw_name = m.group(2) or m.group(3)
+    if "." in raw_name:
+        raw_name = raw_name.rsplit(".", 1)[1]
+    return raw_name.upper(), obj_type
+
+
+def _user_errors_for(
+    cur: Any, name: str, obj_type: str,
+) -> list[tuple[int, int, str]]:
+    """Pull all errors for (name, type) from USER_ERRORS, ordered by
+    sequence. Returns [] when the object compiled clean."""
+    cur.execute(
+        "SELECT line, position, text FROM user_errors "
+        "WHERE name = :n AND type = :t "
+        "ORDER BY sequence",
+        {"n": name, "t": obj_type},
+    )
+    return [(int(line), int(pos), text) for line, pos, text in cur.fetchall()]
