@@ -19,7 +19,7 @@ from lsprotocol import types as lsp
 
 # Imports from the compiler package — wrapper script puts compiler/ on PYTHONPATH.
 from pell import ast as A
-from pell.emitter import EmitError, lower_type
+from pell.emitter import EmitError, emit, lower_type
 from pell.lexer import LexError
 from pell.parser import ParseError, parse
 
@@ -69,6 +69,12 @@ def _validate(uri: str) -> None:
     module: Optional[A.Module] = None
     try:
         module = parse(src, doc.path or uri)
+        # Run the emitter so EmitError-level checks (unused returns,
+        # bare pure expressions, type mismatches, missing fields,
+        # cross-package signature errors, ...) surface as red squiggles
+        # too. Without this the IDE only sees parse-level issues and
+        # happily shows "No problems found" on code that won't compile.
+        emit(module, source_text=src, source_path=doc.path or uri)
     except (LexError, ParseError) as e:
         diagnostics.append(_diagnostic_from_error(e, src))
     except EmitError as e:
