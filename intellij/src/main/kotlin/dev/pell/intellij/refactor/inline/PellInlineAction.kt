@@ -12,7 +12,7 @@ import dev.pell.intellij.psi.PellBlock
 import dev.pell.intellij.psi.PellCallOp
 import dev.pell.intellij.psi.PellFnDef
 import dev.pell.intellij.psi.PellLetStmt
-import dev.pell.intellij.psi.PellSymbolScanner
+import dev.pell.intellij.symbols.index.PellProjectIndex
 
 /**
  * Inline a fn or `let`. Inverse of Extract Method (Phase 6).
@@ -84,7 +84,8 @@ class PellInlineAction : AnAction() {
 
         WriteCommandAction.runWriteCommandAction(project, "Inline fn `$name`", null, Runnable {
             val pm = PsiDocumentManager.getInstance(project)
-            val callOps = PellSymbolScanner.findPubFns(project, name)
+            val callOps = PellProjectIndex.getInstance(project).findByName(name)
+                .filterIsInstance<PellFnDef>()
                 .flatMap { fn ->
                     PsiTreeUtil.findChildrenOfType(fn.containingFile, PellCallOp::class.java)
                         .filter { it.prevSibling?.text == name }

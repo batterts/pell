@@ -15,7 +15,7 @@ import dev.pell.intellij.psi.PellCallOp
 import dev.pell.intellij.psi.PellFnDef
 import dev.pell.intellij.psi.PellMethodDef
 import dev.pell.intellij.psi.PellParam
-import dev.pell.intellij.psi.PellSymbolScanner
+import dev.pell.intellij.symbols.index.PellProjectIndex
 
 /**
  * Extract a fn's parameter list into a new pub record. Rewrites the
@@ -157,13 +157,14 @@ class PellParamsToRecordHandler : RefactoringActionHandler {
         paramSpecs: List<ParamSpec>,
     ) {
         // For each call expression in the project whose callee text equals
-        // `fnName`, rewrite its args. PellSymbolScanner's name filter gives
-        // the rough set; Phase 8 sharpens this with type-based filtering.
-        // For v0, rewrite by textual match.
+        // `fnName`, rewrite its args. The project index gives us the
+        // rough set of files containing a fn by that name; Phase 8
+        // sharpens this with type-based filtering once the inferencer
+        // ships.
         val pm = PsiDocumentManager.getInstance(project)
-        val callOps = PellSymbolScanner.findPubFns(project, fnName)
+        val callOps = PellProjectIndex.getInstance(project).findByName(fnName)
+            .filterIsInstance<PellFnDef>()
             .flatMap { fn ->
-                // Find all PellCallOp's whose textual prefix matches `fnName(`.
                 PsiTreeUtil.findChildrenOfType(fn.containingFile, PellCallOp::class.java)
                     .filter { it.prevSibling?.text == fnName }
             }

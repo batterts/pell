@@ -10,7 +10,7 @@ import dev.pell.intellij.psi.PellModuleDecl
 import dev.pell.intellij.psi.PellNamedElement
 import dev.pell.intellij.psi.PellRecordDef
 import dev.pell.intellij.psi.PellSqlBlockExpr
-import dev.pell.intellij.psi.PellSymbolScanner
+import dev.pell.intellij.symbols.index.PellProjectIndex
 
 /**
  * Project-level facade that every PSI consumer (inspections,
@@ -78,18 +78,25 @@ interface PellSymbolService {
 }
 
 /**
- * L1 implementation — PSI-walk backed via [PellSymbolScanner]. Same
- * O(project · file) cost the inspections paid before L1; the value
- * of L1 is the API surface, not the perf. L2 swaps this for a
- * StubIndex-backed impl with O(1) lookups and zero API churn.
+ * L2 implementation — backed by [PellProjectIndex] (O(1) HashMap
+ * lookups, refreshed by a VFS listener). Same API as the L1
+ * implementation; consumers see no behavioural change beyond not
+ * paying the project-wide PsiTreeUtil scan cost per lookup.
  */
 @Service(Service.Level.PROJECT)
 class PellSymbolServiceImpl(private val project: Project) : PellSymbolService {
 
+    private val index get() = PellProjectIndex.getInstance(project)
+
     override fun findSymbol(name: String): List<PellSymbolInfo> =
-        PellSymbolScanner.findAllByName(project, name).map(::toInfo)
+        index.findByName(name).map(::toInfo)
 
     override fun findQualified(path: String): PellSymbolInfo? {
+        // Fast path: an exact qualified-name match. Slow path: tail
+        // matching (qualifier `hello` matches `module pell_test.hello`'s
+        // tail).
+        index.findByQualifiedName(path).firstOrNull()?.let { return toInfo(it) }
+
         val parts = path.split("::").filter { it.isNotEmpty() }
         if (parts.isEmpty()) return null
         val short = parts.last()
@@ -129,7 +136,7 @@ class PellSymbolServiceImpl(private val project: Project) : PellSymbolService {
     }
 
     override fun resolveModule(dottedName: String): PellModuleInfo? {
-        val decl = PellSymbolScanner.findModule(project, dottedName) ?: return null
+        val decl = index.findModule(dottedName) ?: return null
         return PellModuleInfo(dottedName = decl.name ?: dottedName, location = decl)
     }
 
@@ -143,11 +150,23 @@ class PellSymbolServiceImpl(private val project: Project) : PellSymbolService {
 
     override fun effectsOf(sqlBlock: PellSqlBlockExpr): SqlEffects = SqlEffects.NONE
 
-    override fun findPubFns(name: String?): List<PellSymbolInfo> =
-        PellSymbolScanner.findPubFns(project, name).map(::toFnInfo)
+    override fun findPubFns(name: String?): List<PellSymbolInfo> {
+        val matches = if (name != null) {
+            index.findByName(name).filterIsInstance<PellFnDef>()
+        } else {
+            index.allOfKind { it is PellFnDef }.filterIsInstance<PellFnDef>()
+        }
+        return matches.map(::toFnInfo)
+    }
 
-    override fun findPubRecords(name: String?): List<PellSymbolInfo> =
-        PellSymbolScanner.findPubRecords(project, name).map(::toRecordInfo)
+    override fun findPubRecords(name: String?): List<PellSymbolInfo> {
+        val matches = if (name != null) {
+            index.findByName(name).filterIsInstance<PellRecordDef>()
+        } else {
+            index.allOfKind { it is PellRecordDef }.filterIsInstance<PellRecordDef>()
+        }
+        return matches.map(::toRecordInfo)
+    }
 
     // ---------- mapping PSI → DTO ----------
 

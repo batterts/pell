@@ -11,7 +11,7 @@ import com.intellij.psi.util.PsiTreeUtil
 import dev.pell.intellij.PellFile
 import dev.pell.intellij.psi.PellModuleDecl
 import dev.pell.intellij.psi.PellNamedElement
-import dev.pell.intellij.psi.PellSymbolScanner
+import dev.pell.intellij.symbols.index.PellProjectIndex
 
 /**
  * Move a top-level pub declaration (fn / record / type / error /
@@ -52,7 +52,8 @@ class PellMoveSymbolAction : AnAction() {
             return
         }
 
-        val modules = PellSymbolScanner.findPubFns(project) // any file gives us its module
+        val index = PellProjectIndex.getInstance(project)
+        val modules = index.allOfKind { true }
             .mapNotNull { it.containingFile as? PellFile }
             .distinct()
             .mapNotNull { f -> PsiTreeUtil.findChildOfType(f, PellModuleDecl::class.java)?.let { it.name!! to f } }

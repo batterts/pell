@@ -23,8 +23,8 @@ import com.intellij.util.ProcessingContext
  *   - PellTypeRef (named types in declarations) → resolves to the
  *     matching record / type / sealed type / enum / error.
  *
- * Resolution uses [PellSymbolScanner]; will switch to stub-backed
- * lookup once stubs land (no API change required).
+ * Resolution uses [dev.pell.intellij.symbols.index.PellProjectIndex]
+ * for O(1) lookup keyed by simple name.
  *
  * PSI TRACK — owned by the PSI work stream. See intellij/PSI_TRACK.md.
  */
@@ -76,7 +76,8 @@ class PellQualifiedReference(
     override fun multiResolve(incompleteCode: Boolean): Array<ResolveResult> {
         val path = element.text.substringBefore('{').trim()
         val lastSegment = path.substringAfterLast("::").substringAfterLast('.')
-        return PellSymbolScanner.findAllByName(element.project, lastSegment)
+        return dev.pell.intellij.symbols.index.PellProjectIndex.getInstance(element.project)
+            .findByName(lastSegment)
             .map { PsiElementResolveResult(it) }
             .toTypedArray()
     }
@@ -93,7 +94,8 @@ class PellTypeReference(
     override fun multiResolve(incompleteCode: Boolean): Array<ResolveResult> {
         val name = element.text.substringBefore('<').substringAfterLast("::").trim()
         if (name.isEmpty()) return ResolveResult.EMPTY_ARRAY
-        return PellSymbolScanner.findAllByName(element.project, name)
+        return dev.pell.intellij.symbols.index.PellProjectIndex.getInstance(element.project)
+            .findByName(name)
             .map { PsiElementResolveResult(it) }
             .toTypedArray()
     }

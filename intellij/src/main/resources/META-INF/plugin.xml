@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.4.0</version>
+    <version>0.4.1</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,45 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.4.1 — Parsed-lookup index (O(1) symbol resolution)</h3>
+        <p><b>Performance + architecture cleanup.</b> Every symbol
+        lookup (inspections, refactorings, completion, references)
+        now goes through one project-level facade
+        <code>PellSymbolService</code>, backed by an in-memory index
+        (<code>PellProjectIndex</code>) refreshed by a VFS listener.
+        Replaces the per-query PsiTreeUtil walk that landed in 0.4.0
+        — same behaviour, O(1) lookups instead of O(project · file).</p>
+        <ul>
+          <li><b>New facade.</b> <code>PellSymbolService</code> is the
+              single API every PSI consumer talks to. Returns rich
+              <code>PellSymbolInfo</code> records (name, qualified
+              name, kind, structured <code>PellType</code>, params,
+              fields, source, PSI location). L3 will wire stdlib
+              symbols (<code>catalog::*</code>, <code>logger::*</code>,
+              <code>p</code>) into the same facade via a custom LSP
+              method; no consumer change needed.</li>
+          <li><b>Sealed type hierarchy.</b>
+              <code>PellType.parse()</code> recognises every pell
+              type form — primitives, <code>list&lt;T&gt;</code>,
+              <code>Result&lt;T, E&gt;</code>, <code>T?</code>,
+              <code>T | U</code>, named user types — and renders them
+              back via <code>displayName()</code> for completion popup
+              "type" labels and inspection messages.</li>
+          <li><b>Cached index, refreshed by VFS listener.</b>
+              <code>PellProjectIndex</code> indexes every project
+              <code>.pell</code> file at first read and incrementally
+              reindexes any file the IDE writes / creates / moves /
+              deletes. Lives in memory; rebuilds on project open.
+              Real disk-persistent <code>StubIndex</code> is the
+              v0.5.0 upgrade if the in-memory rebuild ever feels
+              heavy.</li>
+          <li>Internal: <code>PellSymbolScanner</code> deleted —
+              <code>PellProjectIndex</code> is the new home for
+              project-wide lookup. <code>PellReferenceContributor</code>,
+              <code>PellInlineAction</code>, <code>PellMoveSymbolAction</code>,
+              <code>PellParamsToRecordHandler</code> all routed through
+              the new index. No user-visible API or UI change.</li>
+        </ul>
         <h3>0.4.0 — Real PSI parser + refactorings</h3>
         <p><b>Big release.</b> Pell gets a real IntelliJ-native PSI
         layer alongside the existing LSP. The LSP still drives
@@ -689,11 +728,24 @@ END employees;
 
         <!-- PellSymbolService project-level facade. Every inspection,
              refactoring, intention, and completion contributor routes
-             symbol lookups through this service. L1: PSI-walk backed.
-             L2: StubIndex backed (perf upgrade, no API change). -->
+             symbol lookups through this service.
+               L1: PSI-walk backed.
+               L2: PellProjectIndex backed (O(1) lookup, refreshed by a
+                   VFS listener; see PellProjectIndex.kt for trade-offs
+                   vs. real disk-persistent StubIndex). -->
         <projectService
             serviceInterface="dev.pell.intellij.symbols.PellSymbolService"
             serviceImplementation="dev.pell.intellij.symbols.PellSymbolServiceImpl" />
+
+        <!-- The index itself. Eagerly initialized on first read.
+             Refreshed per-file by PellProjectIndexInvalidator's VFS
+             listener (registered as a postStartupActivity below). -->
+        <projectService
+            serviceImplementation="dev.pell.intellij.symbols.index.PellProjectIndex" />
+
+        <!-- Wires the VFS listener into the project lifecycle. -->
+        <postStartupActivity
+            implementation="dev.pell.intellij.symbols.index.PellProjectIndexInvalidator" />
 
         <!-- Yellow-squiggle inspection: bare expression-statement whose
              expression is a function call whose return value is discarded.
