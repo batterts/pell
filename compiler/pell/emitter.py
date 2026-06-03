@@ -16,10 +16,15 @@ from . import ast as A
 
 
 class EmitError(Exception):
-    def __init__(self, msg: str, loc: A.Loc):
+    def __init__(self, msg: str, loc: A.Loc, code: str = ""):
         super().__init__(f"{loc}: {msg}")
         self.loc = loc
         self.msg = msg
+        # Stable identifier for tooling (LSP code actions, IDE quickfixes).
+        # Empty string when the error isn't auto-fixable; named codes like
+        # "pell.unused-return" or "pell.unused-value" let the LSP server
+        # offer a precise WorkspaceEdit without parsing the message text.
+        self.code = code
 
 
 # ---------------------------------------------------------------------------
@@ -4223,6 +4228,7 @@ class Emitter:
                 "statement — its value is unused. Bind it with "
                 "`let _ = ...` or use it inside a call/assignment.",
                 s.loc,
+                code="pell.unused-value",
             )
         # Discarded function return: `f();` where f has a non-Unit
         # return type is invalid PL/SQL (PLS-00221 — "is not a procedure
@@ -4279,6 +4285,7 @@ class Emitter:
             "procedure). Bind the result with `let _ = "
             f"{fn_name}(...)` or use it in an expression.",
             loc,
+            code="pell.unused-return",
         )
 
     @staticmethod

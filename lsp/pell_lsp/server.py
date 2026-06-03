@@ -99,12 +99,17 @@ def _validate(uri: str) -> None:
 def _diagnostic_from_error(e: Exception, src: str) -> lsp.Diagnostic:
     loc = getattr(e, "loc", None)
     msg = getattr(e, "msg", str(e))
+    # EmitError carries a stable code (e.g. "pell.unused-return") that
+    # the codeAction handler matches on to offer quickfixes. Empty
+    # string means "no auto-fix available".
+    code = getattr(e, "code", "") or None
     if loc is None:
         return lsp.Diagnostic(
             range=_one_char_range(0, 0),
             message=msg,
             severity=lsp.DiagnosticSeverity.Error,
             source=SERVER_NAME,
+            code=code,
         )
     line = max(loc.line - 1, 0)
     col = max(loc.col - 1, 0)
@@ -118,7 +123,60 @@ def _diagnostic_from_error(e: Exception, src: str) -> lsp.Diagnostic:
         message=msg,
         severity=lsp.DiagnosticSeverity.Error,
         source=SERVER_NAME,
+        code=code,
     )
+
+
+# ---------------------------------------------------------------------------
+# Code actions — IDE quickfixes for diagnostics that carry a known code.
+# Currently fixes two flavors:
+#   pell.unused-return  — fn call whose return is discarded
+#   pell.unused-value   — bare expression with no side effect
+# Both are fixed identically: insert `let _ = ` at the start of the
+# offending expression. The user can then rename `_` to a real binding.
+# ---------------------------------------------------------------------------
+
+
+_QUICKFIX_CODES = {"pell.unused-return", "pell.unused-value"}
+
+
+@server.feature(
+    lsp.TEXT_DOCUMENT_CODE_ACTION,
+    lsp.CodeActionOptions(code_action_kinds=[lsp.CodeActionKind.QuickFix]),
+)
+def on_code_action(
+    params: lsp.CodeActionParams,
+) -> Optional[list[lsp.CodeAction]]:
+    actions: list[lsp.CodeAction] = []
+    uri = params.text_document.uri
+    for diag in params.context.diagnostics:
+        if diag.code not in _QUICKFIX_CODES:
+            continue
+        # WorkspaceEdit: pure-insert at diag.range.start. An empty
+        # range means "insert here" — no characters are replaced.
+        edit = lsp.WorkspaceEdit(
+            changes={
+                uri: [
+                    lsp.TextEdit(
+                        range=lsp.Range(
+                            start=diag.range.start,
+                            end=diag.range.start,
+                        ),
+                        new_text="let _ = ",
+                    )
+                ]
+            }
+        )
+        actions.append(
+            lsp.CodeAction(
+                title="Bind result with `let _ = `",
+                kind=lsp.CodeActionKind.QuickFix,
+                diagnostics=[diag],
+                edit=edit,
+                is_preferred=True,
+            )
+        )
+    return actions or None
 
 
 def _end_of_token(src: str, line: int, col: int) -> int:
