@@ -14,7 +14,7 @@
 
 plugins {
     java
-    id("org.jetbrains.kotlin.jvm") version "2.0.21"
+    id("org.jetbrains.kotlin.jvm") version "1.9.24"
     id("org.jetbrains.intellij.platform") version "2.2.1"
     // >>> PSI TRACK >>>
     // Grammar-Kit generates the parser from src/main/grammar/Pell.bnf;
