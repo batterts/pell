@@ -19,7 +19,7 @@ from lsprotocol import types as lsp
 
 # Imports from the compiler package — wrapper script puts compiler/ on PYTHONPATH.
 from pell import ast as A
-from pell.emitter import EmitError, emit, lower_type
+from pell.emitter import EmitError, emit, lower_type, scan_project_records
 from pell.lexer import LexError
 from pell.parser import ParseError, parse
 
@@ -41,6 +41,49 @@ server = LanguageServer(SERVER_NAME, SERVER_VERSION)
 # Cache of parsed modules per URI — lets hover/symbols/completion reuse the AST.
 _cache: dict[str, Optional[A.Module]] = {}
 
+# Cached cross-package context — scanned lazily on first validate, then
+# reused until any .pell file is saved (didSave invalidates). Avoids
+# walking the project tree on every keystroke.
+#   _project_ctx[root_path] -> (signatures_dict, records_dict)
+_project_ctx: dict[str, tuple[dict, dict]] = {}
+
+
+def _project_root_for(doc_path: Optional[str]) -> str:
+    """Locate the project root for a doc URI: nearest ancestor that
+    contains a `runtime/` or `pyproject.toml` or `.git/`. Falls back
+    to the doc's directory. Used as both the scan root and the
+    cache key — multi-root workspaces get distinct entries.
+    """
+    from pathlib import Path as _Path
+    if not doc_path:
+        return ""
+    here = _Path(doc_path).resolve().parent
+    for p in (here, *here.parents):
+        if (p / ".git").exists() or (p / "pyproject.toml").exists() \
+                or (p / "runtime").is_dir():
+            return str(p)
+    return str(here)
+
+
+def _get_project_ctx(doc_path: Optional[str]) -> tuple[dict, dict]:
+    """Lazy/cached project scan. Returns (signatures, records); empty
+    dicts if anything goes wrong (so emit still runs with local-only
+    resolution and the user sees the existing unknown-type errors)."""
+    root = _project_root_for(doc_path)
+    if root in _project_ctx:
+        return _project_ctx[root]
+    try:
+        from pell.repl import scan_project_signatures as _scan_sigs
+        sigs = _scan_sigs(root=__import__("pathlib").Path(root)) if root else {}
+    except Exception:
+        sigs = {}
+    try:
+        recs = scan_project_records(__import__("pathlib").Path(root)) if root else {}
+    except Exception:
+        recs = {}
+    _project_ctx[root] = (sigs, recs)
+    return _project_ctx[root]
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle: parse on open, change, save
@@ -59,6 +102,10 @@ def on_change(params: lsp.DidChangeTextDocumentParams) -> None:
 
 @server.feature(lsp.TEXT_DOCUMENT_DID_SAVE)
 def on_save(params: lsp.DidSaveTextDocumentParams) -> None:
+    # Any save can change the set of pub records / signatures another
+    # file depends on — invalidate the project context cache so the
+    # next validate pulls fresh.
+    _project_ctx.clear()
     _validate(params.text_document.uri)
 
 
@@ -74,7 +121,11 @@ def _validate(uri: str) -> None:
         # cross-package signature errors, ...) surface as red squiggles
         # too. Without this the IDE only sees parse-level issues and
         # happily shows "No problems found" on code that won't compile.
-        emit(module, source_text=src, source_path=doc.path or uri)
+        # Pass the cached project context so cross-package record
+        # constructors (`pkg::Record { … }`) and fn calls resolve.
+        sigs, recs = _get_project_ctx(doc.path)
+        emit(module, source_text=src, source_path=doc.path or uri,
+             project_signatures=sigs, project_records=recs)
     except (LexError, ParseError) as e:
         diagnostics.append(_diagnostic_from_error(e, src))
     except EmitError as e:
