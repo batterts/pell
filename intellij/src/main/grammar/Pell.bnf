@@ -231,8 +231,19 @@ private errorBody ::= LBRACE fieldDefList ? RBRACE
 
 seqDef ::= KW_SEQ seqName SEMI { pin = 1 }
 
-enumDef ::= KW_ENUM enumName LBRACE (enumVariant (COMMA enumVariant) * COMMA ?) ? RBRACE { pin = 1 }
-enumVariant ::= enumVariantName (EQ STRING) ?
+// Enum variants are separated by *optional* commas. The pell parser
+// loops `while not at(RBRACE)` and `eat(COMMA)` after each variant,
+// so both styles are legal:
+//     enum Status { Active = "A", Inactive = "I" }   // commas
+//     enum Day {                                      // no commas
+//         Mon
+//         Tue
+//         Wed
+//     }
+// Earlier BNF required commas, which produced spurious squiggles on
+// the no-comma style. Mirrors the same fix applied to match arms.
+enumDef ::= KW_ENUM enumName LBRACE enumVariant* RBRACE { pin = 1 }
+enumVariant ::= enumVariantName (EQ STRING)? COMMA?
 
 // --- type / sealed type --------------------------------------------
 
