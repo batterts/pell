@@ -380,7 +380,24 @@ def cmd_sql(args: argparse.Namespace) -> int:
             try:
                 with conn.raw.cursor() as cur:
                     cur.execute(driver._strip_terminator(stmt))
+                    # Snapshot cur.warning BEFORE doing anything else on
+                    # this cursor — every cur.execute / cur.callproc
+                    # (including the ones DBMS_OUTPUT drain uses) resets
+                    # the attribute. CREATE OR REPLACE always succeeds
+                    # at the SQL level even when the body has compile
+                    # errors; the warning carries DPY-7000 / ORA-24344
+                    # in that case. We then pull the actual error rows
+                    # from USER_ERRORS and surface them so `pell sql`
+                    # doesn't report ok on a broken PACKAGE BODY.
+                    dirty = cur.warning is not None
                     output = driver._drain_dbms_output(cur)
+                    if dirty:
+                        obj = driver._parse_create_object(stmt)
+                        if obj is not None:
+                            name, obj_type = obj
+                            errors = driver._user_errors_for(cur, name, obj_type)
+                            if errors:
+                                raise driver.InstallError(name, obj_type, errors)
                 print(f"{label}  ok")
                 for ln in output:
                     print(f"  {ln}")
