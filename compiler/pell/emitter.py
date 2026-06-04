@@ -418,10 +418,30 @@ class Emitter:
         # FOREIGN collection type (avoids the PLS-00382 nominal-type
         # clash on cross-package list returns).
         self._project_signatures: dict[str, A.TypeRef] = {}
+        # Cross-package record registry. Populated externally by the
+        # build/exec/repl entry points so the emitter can lower
+        # `pkg::Record { … }` to a per-field assign on a foreign-typed
+        # temp local. Two indices:
+        #   _project_records[("pkg", "Record")] -> RecordDef
+        #   _project_records_by_name["Record"] -> list[("pkg", RecordDef)]
+        # Bare-name lookups (`let a: Summary` without qualifier) succeed
+        # when exactly one project module exposes that name; ambiguous
+        # cases raise a helpful EmitError pointing at the candidates.
+        self._project_records: dict[tuple[str, str], A.RecordDef] = {}
+        self._project_records_by_name: dict[str, list[tuple[str, A.RecordDef]]] = {}
         # convenience wrapper that threads self.target through type lowering
-        self._lt = lambda t, *, param=False, sql_context=False: lower_type(
-            t, param=param, target=self.target, sql_context=sql_context
-        )
+        # AND resolves cross-package record references so they emit as
+        # `<pkg>.t_<record>` instead of the unqualified `t_<record>` that
+        # would refer to a local-only type.
+        def _lt(t, *, param: bool = False, sql_context: bool = False) -> str:
+            if isinstance(t, A.NamedType):
+                rec, pkg = self._lookup_record_with_pkg(t.name)
+                if rec is not None and pkg is not None:
+                    return f"{pkg}.{_record_type_name(rec.name)}"
+            return lower_type(
+                t, param=param, target=self.target, sql_context=sql_context,
+            )
+        self._lt = _lt
         self._pipelined_fn_names: set[str] = {
             f.name for f in self._fns
             if any(a.name == "pipelined" for a in f.annotations)
@@ -588,10 +608,46 @@ class Emitter:
         return None
 
     def _lookup_record(self, name: str) -> Optional[A.RecordDef]:
+        """Resolve a record reference. Handles three call sites:
+
+          * Bare local: `Summary` matches a record in this module.
+          * Qualified foreign: `collections_linked_list::Summary` looks
+            up in the project registry, regardless of imports.
+          * Bare cross-package: `Summary` falls back to the registry
+            when it's unique across all scanned modules.
+
+        Returns the RecordDef or None. Use _lookup_record_with_pkg when
+        the caller also needs the owning PL/SQL package name (e.g. to
+        qualify the lowered type as `<pkg>.t_<record>`).
+        """
+        rec, _ = self._lookup_record_with_pkg(name)
+        return rec
+
+    def _lookup_record_with_pkg(
+        self, name: str,
+    ) -> tuple[Optional[A.RecordDef], Optional[str]]:
+        """Same as _lookup_record but also returns the owning PL/SQL
+        package name (None when the record is local). The returned
+        package name is already the lowered identifier — e.g.
+        `collections_linked_list`, not `collections.linked_list`."""
+        # Qualified path: `pkg::Record` — split, look up directly.
+        if "::" in name:
+            pkg, _, rec_name = name.rpartition("::")
+            pkg = pkg.replace("::", "_").replace(".", "_")
+            rec = self._project_records.get((pkg, rec_name))
+            if rec is not None:
+                return rec, pkg
+            return None, None
+        # Local module records take priority.
         for r in self._records:
             if r.name == name:
-                return r
-        return None
+                return r, None
+        # Fall back to project registry by bare name.
+        matches = self._project_records_by_name.get(name, [])
+        if len(matches) == 1:
+            pkg, rec = matches[0]
+            return rec, pkg
+        return None, None
 
     def _emit_header(self) -> str:
         from . import __version__ as _PELL_VERSION
@@ -5541,12 +5597,92 @@ def _jq_literal_pl_type(lit: object) -> str:
 def emit(module: A.Module, target: str = "23", *,
          source_text: Optional[str] = None,
          source_path: Optional[str] = None,
-         reproducible: bool = False) -> str:
-    return Emitter(
+         reproducible: bool = False,
+         project_signatures: Optional[dict[str, "A.TypeRef"]] = None,
+         project_records: Optional[
+             dict[tuple[str, str], "A.RecordDef"]
+         ] = None) -> str:
+    """Compile `module` to PL/SQL.
+
+    `project_signatures` and `project_records` thread cross-package
+    context — pub fn return types and pub record definitions from
+    sibling .pell files. When provided, cross-package fn calls get
+    real type inference and cross-package `pkg::Record { … }` struct
+    literals lower to the foreign package's PL/SQL record type
+    instead of falling through to broken `t_record` references.
+
+    Callers that don't bother scanning (older callers, anon block
+    paths that don't need it) can omit both — the emitter falls
+    back to local-only resolution and prints the usual EmitError
+    when a cross-package reference can't be resolved.
+    """
+    e = Emitter(
         module, target=target,
         source_text=source_text, source_path=source_path,
         reproducible=reproducible,
-    ).emit()
+    )
+    if project_signatures:
+        e._project_signatures = dict(project_signatures)
+    if project_records:
+        e._project_records = dict(project_records)
+        for (pkg, name), rec in project_records.items():
+            e._project_records_by_name.setdefault(name, []).append((pkg, rec))
+    return e.emit()
+
+
+def scan_project_records(
+    root: Optional["Path"] = None,
+) -> dict[tuple[str, str], "A.RecordDef"]:
+    """Walk `root` (default: cwd) + the pell runtime/ dir, parsing every
+    *.pell file, and collect every `pub record` keyed by
+    `(pkg_pl_sql_name, record_name)`. The package name is the lowered
+    PL/SQL identifier — `collections.linked_list` becomes
+    `collections_linked_list`. Identical-named records in two
+    different modules both end up in the registry; bare-name
+    resolution in the emitter rejects the ambiguity.
+
+    Mirrors `scan_project_signatures` (which lives in repl.py for
+    historical reasons) so the build path can do the same lookup.
+    Best-effort: parse errors on individual files are ignored.
+    """
+    from pathlib import Path as _Path
+    from .parser import parse as _parse
+    records: dict[tuple[str, str], A.RecordDef] = {}
+    seen: set[_Path] = set()
+
+    # Build-output / vendor dirs to skip. Match only against path
+    # components *relative to the scan root* — otherwise a repo
+    # named e.g. "plsql" or "built" excludes itself.
+    _SKIP = {"built", "out", ".git", "node_modules", "expected",
+             "plsql", "dist", "build", ".venv", "venv"}
+
+    def _walk(base: _Path) -> None:
+        base = base.resolve()
+        if not base.is_dir() or base in seen:
+            return
+        seen.add(base)
+        for path in base.rglob("*.pell"):
+            try:
+                rel_parts = path.resolve().relative_to(base).parts
+            except ValueError:
+                rel_parts = path.parts
+            # rel_parts ends with "<file>.pell" — only the *directory*
+            # components matter for the skip check.
+            if any(p in _SKIP for p in rel_parts[:-1]):
+                continue
+            try:
+                mod = _parse(path.read_text(encoding="utf-8"), str(path))
+            except Exception:
+                continue
+            pkg = mod.name.replace(".", "_").replace("::", "_")
+            for item in mod.items:
+                if isinstance(item, A.RecordDef) and item.is_pub:
+                    records[(pkg, item.name)] = item
+
+    _walk(_Path(root) if root else _Path.cwd())
+    runtime = _Path(__file__).resolve().parent.parent / "runtime"
+    _walk(runtime)
+    return records
 
 
 def emit_anon_block(

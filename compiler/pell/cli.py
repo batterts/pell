@@ -29,6 +29,18 @@ def cmd_build(args: argparse.Namespace) -> int:
     if args.output and len(inputs) > 1:
         print("pell: -o requires a single input file (or a directory output)", file=sys.stderr)
         return 2
+    # Scan sibling .pell files for cross-package context — pub fn
+    # signatures (so call-site type inference works) and pub records
+    # (so `pkg::Record { … }` struct lits lower correctly). Best-effort:
+    # any failure falls back to local-only resolution.
+    try:
+        from .repl import scan_project_signatures
+        from .emitter import scan_project_records as _scan_records
+        project_signatures = scan_project_signatures()
+        project_records = _scan_records()
+    except Exception:
+        project_signatures = {}
+        project_records = {}
     failures = 0
     for src_path in inputs:
         try:
@@ -36,7 +48,9 @@ def cmd_build(args: argparse.Namespace) -> int:
             module = parse(src, str(src_path))
             sql = emit(module, target=args.target,
                        source_text=src, source_path=str(src_path),
-                       reproducible=getattr(args, "reproducible", False))
+                       reproducible=getattr(args, "reproducible", False),
+                       project_signatures=project_signatures,
+                       project_records=project_records)
         except (LexError, ParseError, EmitError) as e:
             print(f"pell: {e}", file=sys.stderr)
             failures += 1
@@ -244,6 +258,16 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir) if args.out_dir else (default_root / "plsql")
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"pell deploy: build → {out_dir}")
+    # Same cross-package scan as cmd_build so deploys handle
+    # `pkg::Record { … }` and cross-pkg fn type inference correctly.
+    try:
+        from .repl import scan_project_signatures
+        from .emitter import scan_project_records as _scan_records
+        project_signatures = scan_project_signatures()
+        project_records = _scan_records()
+    except Exception:
+        project_signatures = {}
+        project_records = {}
     built_files: list[Path] = []
     uses_re = False
     uses_logger = False
@@ -254,7 +278,9 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             src = src_path.read_text()
             module = parse(src, str(src_path))
             sql = emit(module, target=args.target, source_text=src,
-                       source_path=str(src_path), reproducible=args.reproducible)
+                       source_path=str(src_path), reproducible=args.reproducible,
+                       project_signatures=project_signatures,
+                       project_records=project_records)
         except (LexError, ParseError, EmitError) as e:
             print(f"  ✗ {src_path.name}: {e}", file=sys.stderr)
             failures += 1

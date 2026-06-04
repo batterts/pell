@@ -598,6 +598,17 @@ class Parser:
             name = cur.value
             loc = cur.loc
             self.pos += 1
+            # `pkg::Record` qualified type — accumulate the prefix into
+            # the name so the emitter can route it to the project
+            # registry. Stop at `::<` (turbofish on generics, handled
+            # downstream by the call-position parser).
+            while (self._at("COLONCOLON")
+                   and self._peek(1).kind != "LT"):
+                self._eat("COLONCOLON")
+                nxt = self._expect(
+                    "IDENT", "expected identifier after `::` in type"
+                )
+                name = f"{name}::{nxt.value}"
             base: A.TypeRef
             # generic?
             if self._eat("LT"):
