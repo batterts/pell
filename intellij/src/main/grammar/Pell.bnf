@@ -336,9 +336,20 @@ private ifElseTail ::= KW_ELSE (ifStmt | block)
 forStmt    ::= KW_FOR    loopVarName KW_IN expr block { pin = 1 }
 forallStmt ::= KW_FORALL loopVarName KW_IN expr block { pin = 1 }
 
-matchStmt ::= KW_MATCH expr LBRACE (matchArm (COMMA matchArm) * COMMA ?) ? RBRACE { pin = 1 }
+// Match arms are separated by *optional* commas. The pell parser
+// loops `while not at(RBRACE)` and `eat(COMMA)` after each arm — so
+// arms can be written either as
+//     match x { A -> a, B -> b, C -> c }
+// or with no commas at all (the common style for block bodies):
+//     match cur {
+//         Cons { head: h, tail: t } -> { acc = ...; cur = t; }
+//         Nil { } -> { }
+//     }
+// The earlier BNF required commas between arms, so the second style
+// failed with "',' or '}' expected, got Nil".
+matchStmt ::= KW_MATCH expr LBRACE matchArm* RBRACE { pin = 1 }
 
-matchArm ::= pattern ARROW (block | expr)
+matchArm ::= pattern ARROW (block | expr) COMMA?
 
 transactionStmt ::= KW_TRANSACTION block { pin = 1 }
 yieldStmt ::= KW_YIELD expr SEMI { pin = 1 }
@@ -473,7 +484,4 @@ fieldInit ::= IDENT (COLON expr) ? { pin = 1 }
 
 ifExpr ::= KW_IF expr block (KW_ELSE block) ? { pin = 1 }
 
-matchExpr ::= KW_MATCH expr LBRACE
-              (matchArm (COMMA matchArm) * COMMA ?) ?
-              RBRACE
-           { pin = 1 }
+matchExpr ::= KW_MATCH expr LBRACE matchArm* RBRACE { pin = 1 }
