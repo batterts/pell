@@ -19,7 +19,10 @@ from lsprotocol import types as lsp
 
 # Imports from the compiler package — wrapper script puts compiler/ on PYTHONPATH.
 from pell import ast as A
-from pell.emitter import EmitError, emit, lower_type, scan_project_records
+from pell.emitter import (
+    EmitError, emit, lower_type, scan_project_records,
+    _render_type,
+)
 from pell.lexer import LexError
 from pell.parser import ParseError, parse
 
@@ -579,6 +582,55 @@ def _completions_for_line_prefix(
             )
             for name, detail in methods
         ]
+
+    # `pkg::partial` context — restrict to that package's exposed
+    # surface (pub fns + pub records). Triggers on both ":" and "::"
+    # since the IDE sometimes re-queries mid-word.
+    qual_match = re.search(r"(\w+)::(\w*)$", line)
+    if qual_match is not None:
+        pkg, partial = qual_match.group(1), qual_match.group(2)
+        # Derive a filesystem path from the URI. `file:///foo` → `/foo`.
+        doc_path = uri[len("file://"):] if uri.startswith("file://") else uri
+        sigs, recs = _get_project_ctx(doc_path)
+        partial_len = len(partial)
+        replace_start = lsp.Position(
+            line=line_no, character=char_no - partial_len
+        )
+        replace_end = lsp.Position(line=line_no, character=char_no)
+        out: list[lsp.CompletionItem] = []
+        # Fns from project_signatures keyed by `pkg::name`.
+        prefix = f"{pkg}::"
+        for key, ret_type in sigs.items():
+            if not key.startswith(prefix):
+                continue
+            fname = key[len(prefix):]
+            if "::" in fname:
+                continue  # deeper qualification (foo::bar::baz) — skip
+            out.append(lsp.CompletionItem(
+                label=fname,
+                kind=lsp.CompletionItemKind.Function,
+                detail=f"fn -> {_render_type(ret_type)}",
+                filter_text=fname,
+                text_edit=lsp.TextEdit(
+                    range=lsp.Range(start=replace_start, end=replace_end),
+                    new_text=fname,
+                ),
+            ))
+        # Records from project_records keyed by (pkg, name).
+        for (rec_pkg, rec_name) in recs.keys():
+            if rec_pkg != pkg:
+                continue
+            out.append(lsp.CompletionItem(
+                label=rec_name,
+                kind=lsp.CompletionItemKind.Struct,
+                detail="record",
+                filter_text=rec_name,
+                text_edit=lsp.TextEdit(
+                    range=lsp.Range(start=replace_start, end=replace_end),
+                    new_text=rec_name,
+                ),
+            ))
+        return out
 
     # No trigger — keyword and in-scope identifier completions
     items: list[lsp.CompletionItem] = []

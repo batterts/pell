@@ -90,10 +90,16 @@ def scan_project_signatures(root: Optional[Path] = None) -> dict[str, A.TypeRef]
             fq_pkg = mod.name.replace(".", "::")
             short_pkg = mod.name.split(".")[-1] if "." in mod.name else mod.name
             for item in mod.items:
-                if isinstance(item, A.FnDef) and item.is_pub and item.return_type is not None:
-                    sigs[f"{fq_pkg}::{item.name}"] = item.return_type
-                    if short_pkg != fq_pkg:
-                        sigs[f"{short_pkg}::{item.name}"] = item.return_type
+                if not (isinstance(item, A.FnDef) and item.is_pub):
+                    continue
+                # Procedures (no `-> T`) get a synthesized Unit type so
+                # they still show up in completion menus and type-inference
+                # lookups (where the receiver code treats Unit specially
+                # for "discard the result" checks).
+                ret = item.return_type or A.PrimType(loc=item.loc, name="Unit")
+                sigs[f"{fq_pkg}::{item.name}"] = ret
+                if short_pkg != fq_pkg:
+                    sigs[f"{short_pkg}::{item.name}"] = ret
 
     _scan(root or Path.cwd())
     # The pell repo's runtime/ dir, sibling to this package. Walks
