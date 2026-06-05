@@ -3302,6 +3302,44 @@ class Emitter:
                 temp_name, decl_type, assigns = temp
                 self._decl(f"{temp_name} {decl_type};")
                 return prefix + assigns + [f"{indent}RETURN {temp_name};"]
+        # `return foreign_pkg::fn();` where the fn returns `list<T>` —
+        # the foreign return type is `<pkg>.t_<T>_list`, which is
+        # nominally a *different* VARRAY type from our local
+        # `t_<T>_list` even though both are `VARRAY OF <elem>`. PL/SQL
+        # rejects the direct return with PLS-00382. Adapt by declaring
+        # a transit local of the foreign type and an element-copy loop
+        # into a local-typed return temp.
+        if (self._current_fn is not None
+                and isinstance(self._current_fn.return_type, A.GenericType)
+                and self._current_fn.return_type.base == "list"
+                and isinstance(s.value, A.Call)
+                and isinstance(s.value.callee, A.Ident)
+                and "::" in s.value.callee.name
+                and s.value.callee.name in self._project_signatures):
+            sig = self._project_signatures[s.value.callee.name]
+            if (isinstance(sig, A.GenericType)
+                    and sig.base == "list"
+                    and len(sig.params) == 1
+                    and len(self._current_fn.return_type.params) == 1
+                    and _render_type(sig.params[0])
+                        == _render_type(self._current_fn.return_type.params[0])):
+                elem_t = self._current_fn.return_type.params[0]
+                elem_sql = self._lt(elem_t)
+                elem_name = _render_type(elem_t)
+                list_type = f"t_{_safe(elem_name)}_list"
+                if list_type not in self._list_types_emitted:
+                    self._list_type_decls.append(
+                        f"  TYPE {list_type} IS TABLE OF {elem_sql} "
+                        f"INDEX BY PLS_INTEGER;"
+                    )
+                    self._list_types_emitted.add(list_type)
+                self._sql_var_counter += 1
+                ret_local = f"l_pell_ret_{self._sql_var_counter}"
+                self._decl(f"{ret_local} {list_type};")
+                adapter = self._emit_cross_pkg_list_adapter(
+                    ret_local, s.value, list_type, indent,
+                )
+                return prefix + adapter + [f"{indent}RETURN {ret_local};"]
         # `return sql!{...}.collect()` / `.one()` / `.first()` — these
         # patterns need a SELECT INTO / BULK COLLECT INTO temp; you
         # can't put them inline as expressions. Synthesize:
