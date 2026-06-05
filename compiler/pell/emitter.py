@@ -1380,6 +1380,25 @@ class Emitter:
                 self._list_locals[p.name] = p.type_ref.params[0].name
 
         self._check_annotation_conflicts(fn)
+        # Static check: every path of a non-Unit fn must end in
+        # `return`. PL/SQL accepts a function body that falls through
+        # and then throws ORA-06503 at runtime ("function returned
+        # without value"). Catch it at compile time instead.
+        # Pipelined fns are excluded — they `yield` values, no `return`.
+        if (fn.return_type is not None
+                and not _is_unit_like(fn.return_type)
+                and not any(a.name == "pipelined" for a in fn.annotations)
+                and not _body_always_returns(fn.body)):
+            raise EmitError(
+                f"function `{fn.name}` declared `-> "
+                f"{_render_type(fn.return_type)}` has a path that "
+                "doesn't return. PL/SQL would throw ORA-06503 at "
+                "runtime. Add an explicit `return …;` at the missing "
+                "path (or `raise <Error>;` if that path is "
+                "unreachable in practice).",
+                fn.loc,
+                code="pell.missing-return",
+            )
 
         # walk body to collect declarations and assemble statements
         sig = self._fn_signature(fn)
@@ -5551,6 +5570,55 @@ class Emitter:
                     return self._loop_var_override.get(name, name)
             return local_name(name)
         return re.sub(r"(?<![A-Za-z0-9_]):([A-Za-z_][A-Za-z0-9_]*)", repl, sql)
+
+
+def _stmt_always_returns(s: A.Stmt) -> bool:
+    """Does this statement guarantee that control leaves the enclosing
+    fn (either via `return …;` or via raising)? Conservative: when in
+    doubt, returns False. Used by the missing-return check, so a False
+    negative just means we don't flag a fn that's actually fine — a
+    False positive would refuse to compile a fn that's actually OK.
+
+    Cases we recognize:
+      * ReturnStmt          → True
+      * IfStmt              → both then_body AND else_body always return
+      * MatchStmt           → every arm body always returns
+      * TransactionStmt     → inner block always returns
+      * Bare ExprStmt where expr is a raise-style call (RAISE / RaiseStmt)
+        — not handled; we lack a dedicated raise node in v0.
+
+    Everything else (assignment, let, for/forall loops, bare calls,
+    ExprStmt with QuestionMark, yield) returns False.
+    """
+    if isinstance(s, A.ReturnStmt):
+        return True
+    if isinstance(s, A.IfStmt):
+        if not s.else_body:
+            return False
+        return _body_always_returns(s.then_body) \
+            and _body_always_returns(s.else_body)
+    if isinstance(s, A.MatchStmt):
+        if not s.arms:
+            return False
+        return all(
+            (_body_always_returns(arm.body)
+             if isinstance(arm.body, list)
+             else isinstance(arm.body, A.Expr) and False)
+            for arm in s.arms
+        )
+    if isinstance(s, A.TransactionStmt):
+        return _body_always_returns(s.body)
+    return False
+
+
+def _body_always_returns(body: list["A.Stmt"]) -> bool:
+    """A statement list always returns iff its LAST stmt always returns.
+    (Anything before the last is irrelevant — only the trailing
+    fall-through matters.) Empty list → False.
+    """
+    if not body:
+        return False
+    return _stmt_always_returns(body[-1])
 
 
 def _is_unit_like(t: A.TypeRef) -> bool:
