@@ -12,6 +12,7 @@ def compile_to_sql(src: str) -> str:
 def test_hello_world():
     sql = compile_to_sql("""
         module hello;
+        import std::logger;
         pub fn greet(name: text) {
           logger::info(name);
         }
@@ -155,6 +156,7 @@ def test_rowcount():
 def test_for_loop_over_sql():
     sql = compile_to_sql("""
         module m;
+        import std::logger;
         pub fn run() {
           for r in sql! { select id from t } {
             logger::info(r.id);
@@ -204,6 +206,7 @@ def test_rowtype_lowers_to_percent_rowtype():
 def test_rowtype_in_param_position():
     sql = compile_to_sql("""
         module m;
+        import std::logger;
         pub fn process(r: rowtype<accounts>) {
           logger::info(r.id);
         }
@@ -358,6 +361,7 @@ def test_pipeline_pipe_operator():
 def test_bulk_rowcount_and_total():
     sql = compile_to_sql("""
         module m;
+        import std::logger;
         pub fn run() {
           let xs: list<number> = [1, 2, 3];
           forall x in xs {
@@ -393,6 +397,7 @@ def test_list_accessor_methods():
 def test_for_indices_loop():
     sql = compile_to_sql("""
         module m;
+        import std::logger;
         pub fn run() {
           let xs: list<number> = [1, 2, 3];
           for i in xs.indices() {
@@ -406,6 +411,7 @@ def test_for_indices_loop():
 def test_interpolation_supports_method_calls():
     sql = compile_to_sql("""
         module m;
+        import std::logger;
         pub fn run() {
           let xs: list<number> = [1];
           logger::info("len is {xs.len()}");
@@ -433,6 +439,7 @@ def test_forall_rejects_non_dml_body():
     with pytest.raises(EmitError):
         compile_to_sql("""
             module m;
+        import std::logger;
             pub fn run() {
               let xs: list<number> = [1, 2];
               forall x in xs {
@@ -481,6 +488,7 @@ def test_list_literal_and_loop():
 def test_finally_block_emitted():
     sql = compile_to_sql("""
         module m;
+        import std::logger;
         pub fn charge(id: number) {
           sql! { insert into audit(id) values (:id) };
         } finally {
@@ -499,6 +507,7 @@ def test_finally_block_emitted():
 def test_no_finally_no_wrapping():
     sql = compile_to_sql("""
         module m;
+        import std::logger;
         pub fn simple() { logger::info("hi"); }
     """)
     assert "pell_finally_body" not in sql
@@ -543,6 +552,7 @@ def test_for_update_nowait_skip_locked():
 def test_string_interpolation():
     sql = compile_to_sql("""
         module m;
+        import std::logger;
         pub fn greet(name: text) {
           logger::info("hello {name}");
         }
@@ -553,6 +563,7 @@ def test_string_interpolation():
 def test_string_interpolation_field_access():
     sql = compile_to_sql("""
         module m;
+        import std::logger;
         pub record P { id: number, name: text }
         pub fn show(p: P) {
           logger::info("id={p.id}");
@@ -564,6 +575,7 @@ def test_string_interpolation_field_access():
 def test_string_no_interpolation_unchanged():
     sql = compile_to_sql("""
         module m;
+        import std::logger;
         pub fn p() {
           logger::info("no braces here");
         }
@@ -1928,6 +1940,7 @@ def test_auto_stringify_date_in_interpolation():
 def test_auto_stringify_log_info_number():
     sql = compile_to_sql("""
         module m;
+        import std::logger;
         pub fn f(n: number) { logger::info(n); }
     """)
     assert "logger.info(TO_CHAR(p_n))" in sql
@@ -1936,6 +1949,7 @@ def test_auto_stringify_log_info_number():
 def test_auto_stringify_log_info_json():
     sql = compile_to_sql("""
         module m;
+        import std::logger;
         pub fn f(j: json) { logger::info(j); }
     """)
     assert "logger.info(JSON_SERIALIZE(p_j))" in sql
@@ -1944,6 +1958,7 @@ def test_auto_stringify_log_info_json():
 def test_auto_stringify_dbms_output_put_line_number():
     sql = compile_to_sql("""
         module m;
+        import dbms_output;
         pub fn f(n: number) { dbms_output::put_line(n); }
     """)
     assert "dbms_output.put_line(TO_CHAR(p_n))" in sql
@@ -1953,6 +1968,7 @@ def test_auto_stringify_text_passthrough():
     """text args should NOT be wrapped."""
     sql = compile_to_sql("""
         module m;
+        import std::logger;
         pub fn f(s: text) { logger::info(s); }
     """)
     assert "logger.info(p_s)" in sql

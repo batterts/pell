@@ -162,6 +162,7 @@ def test_transaction():
 def test_match_with_variants():
     m = parse('''
         module m;
+        import std::logger;
         fn f() {
           match x {
             Some(v) -> logger::info(v),
@@ -169,7 +170,7 @@ def test_match_with_variants():
           }
         }
     ''')
-    ms = m.items[0].body[0]
+    ms = next(i for i in m.items if hasattr(i, 'body')).body[0]
     assert isinstance(ms, A.MatchStmt)
     assert len(ms.arms) == 2
 
@@ -203,13 +204,14 @@ def test_into_type_args():
 def test_for_loop_over_sql():
     m = parse('''
         module m;
+        import std::logger;
         fn f() {
           for r in sql! { select id from t } {
             logger::info(r.id);
           }
         }
     ''')
-    fs = m.items[0].body[0]
+    fs = next(i for i in m.items if hasattr(i, 'body')).body[0]
     assert isinstance(fs, A.ForStmt)
     assert fs.var_name == "r"
     assert isinstance(fs.iterable, A.SqlBlock)

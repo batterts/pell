@@ -191,7 +191,7 @@ def _diagnostic_from_error(e: Exception, src: str) -> lsp.Diagnostic:
 # ---------------------------------------------------------------------------
 
 
-_QUICKFIX_CODES = {"pell.unused-return", "pell.unused-value"}
+_LET_UNDERSCORE_CODES = {"pell.unused-return", "pell.unused-value"}
 
 
 @server.feature(
@@ -204,33 +204,86 @@ def on_code_action(
     actions: list[lsp.CodeAction] = []
     uri = params.text_document.uri
     for diag in params.context.diagnostics:
-        if diag.code not in _QUICKFIX_CODES:
-            continue
-        # WorkspaceEdit: pure-insert at diag.range.start. An empty
-        # range means "insert here" — no characters are replaced.
-        edit = lsp.WorkspaceEdit(
-            changes={
-                uri: [
-                    lsp.TextEdit(
-                        range=lsp.Range(
-                            start=diag.range.start,
-                            end=diag.range.start,
-                        ),
-                        new_text="let _ = ",
-                    )
-                ]
-            }
-        )
-        actions.append(
-            lsp.CodeAction(
-                title="Bind result with `let _ = `",
-                kind=lsp.CodeActionKind.QuickFix,
-                diagnostics=[diag],
-                edit=edit,
-                is_preferred=True,
-            )
-        )
+        if diag.code in _LET_UNDERSCORE_CODES:
+            actions.append(_let_underscore_action(uri, diag))
+        elif diag.code == "pell.missing-import":
+            action = _missing_import_action(uri, diag)
+            if action is not None:
+                actions.append(action)
     return actions or None
+
+
+def _let_underscore_action(
+    uri: str, diag: lsp.Diagnostic,
+) -> lsp.CodeAction:
+    # WorkspaceEdit: pure-insert at diag.range.start. An empty
+    # range means "insert here" — no characters are replaced.
+    edit = lsp.WorkspaceEdit(
+        changes={
+            uri: [
+                lsp.TextEdit(
+                    range=lsp.Range(
+                        start=diag.range.start,
+                        end=diag.range.start,
+                    ),
+                    new_text="let _ = ",
+                )
+            ]
+        }
+    )
+    return lsp.CodeAction(
+        title="Bind result with `let _ = `",
+        kind=lsp.CodeActionKind.QuickFix,
+        diagnostics=[diag],
+        edit=edit,
+        is_preferred=True,
+    )
+
+
+def _missing_import_action(
+    uri: str, diag: lsp.Diagnostic,
+) -> Optional[lsp.CodeAction]:
+    """Insert `import <pkg>;` at the top of the file (after `module …;`).
+    The package name is parsed out of the diagnostic message — the
+    emitter formats it as "package `pkg` is not imported. Add `import
+    pkg;` …", so we extract from the backticks."""
+    m = re.search(r"`(import [^`]+;)`", diag.message)
+    if m is None:
+        return None
+    import_line = m.group(1)
+    # Find insertion point: the line right after the `module ...;`.
+    # Read the doc source to locate it.
+    try:
+        doc = server.workspace.get_text_document(uri)
+    except Exception:
+        return None
+    src = doc.source
+    insert_line = 0
+    for i, line in enumerate(src.splitlines()):
+        s = line.strip()
+        if s.startswith("module ") and s.endswith(";"):
+            insert_line = i + 1
+            break
+    edit = lsp.WorkspaceEdit(
+        changes={
+            uri: [
+                lsp.TextEdit(
+                    range=lsp.Range(
+                        start=lsp.Position(line=insert_line, character=0),
+                        end=lsp.Position(line=insert_line, character=0),
+                    ),
+                    new_text=f"{import_line}\n",
+                )
+            ]
+        }
+    )
+    return lsp.CodeAction(
+        title=f"Add `{import_line}`",
+        kind=lsp.CodeActionKind.QuickFix,
+        diagnostics=[diag],
+        edit=edit,
+        is_preferred=True,
+    )
 
 
 def _end_of_token(src: str, line: int, col: int) -> int:

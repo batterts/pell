@@ -429,12 +429,37 @@ class Emitter:
         # cases raise a helpful EmitError pointing at the candidates.
         self._project_records: dict[tuple[str, str], A.RecordDef] = {}
         self._project_records_by_name: dict[str, list[tuple[str, A.RecordDef]]] = {}
+        # Packages currently in scope for cross-package references. Always
+        # includes the local module so self-qualified refs work. Each
+        # import contributes BOTH the fully-qualified form (`std_logger`)
+        # and the short form (`logger`) since pell registers both shapes
+        # in scan_project_signatures. Cross-pkg refs to packages not in
+        # this set raise pell.missing-import.
+        self._imported_packages: set[str] = set()
+        _local_full = module.name.replace(".", "_").replace("::", "_")
+        _local_short = module.name.split(".")[-1].split("::")[-1]
+        self._imported_packages.add(_local_full)
+        self._imported_packages.add(_local_short)
+        for _it in module.items:
+            if isinstance(_it, A.ImportStmt):
+                _full = _it.path.replace("::", "_").replace(".", "_")
+                _short = _it.path.replace("::", ".").rsplit(".", 1)[-1]
+                self._imported_packages.add(_full)
+                self._imported_packages.add(_short)
         # convenience wrapper that threads self.target through type lowering
         # AND resolves cross-package record references so they emit as
         # `<pkg>.t_<record>` instead of the unqualified `t_<record>` that
         # would refer to a local-only type.
         def _lt(t, *, param: bool = False, sql_context: bool = False) -> str:
             if isinstance(t, A.NamedType):
+                # Qualified `pkg::Type` — verify the package is imported.
+                # The error fires here so the squiggle lands on the type
+                # annotation token, not on whatever statement happened to
+                # be doing the lookup.
+                if "::" in t.name:
+                    pkg = t.name.rsplit("::", 1)[0]
+                    pkg_key = pkg.replace("::", "_").replace(".", "_")
+                    self._check_pkg_imported(pkg_key, t.loc)
                 rec, pkg = self._lookup_record_with_pkg(t.name)
                 if rec is not None and pkg is not None:
                     return f"{pkg}.{_record_type_name(rec.name)}"
@@ -629,7 +654,14 @@ class Emitter:
         """Same as _lookup_record but also returns the owning PL/SQL
         package name (None when the record is local). The returned
         package name is already the lowered identifier — e.g.
-        `collections_linked_list`, not `collections.linked_list`."""
+        `collections_linked_list`, not `collections.linked_list`.
+
+        Import gating is enforced by callers via _check_pkg_imported;
+        the lookup itself returns whatever it finds in the registry,
+        even if the package isn't currently imported. This separation
+        lets callers attach a precise source loc to the resulting
+        pell.missing-import error.
+        """
         # Qualified path: `pkg::Record` — split, look up directly.
         if "::" in name:
             pkg, _, rec_name = name.rpartition("::")
@@ -642,12 +674,69 @@ class Emitter:
         for r in self._records:
             if r.name == name:
                 return r, None
-        # Fall back to project registry by bare name.
+        # Fall back to project registry by bare name, filtered to the
+        # set of imported packages. Bare `Summary` only matches when
+        # `import collections_linked_list;` is in effect.
         matches = self._project_records_by_name.get(name, [])
-        if len(matches) == 1:
-            pkg, rec = matches[0]
+        imported = [
+            (pkg, rec) for (pkg, rec) in matches
+            if pkg in self._imported_packages
+        ]
+        if len(imported) == 1:
+            pkg, rec = imported[0]
             return rec, pkg
         return None, None
+
+    # Intrinsic / built-in namespaces that don't require an `import`
+    # because they aren't real pell modules — they lower to inline
+    # PL/SQL or Oracle-stdlib pass-throughs. Anything listed here
+    # bypasses the pkg-import check in _emit_call_expr.
+    _INTRINSIC_NAMESPACES = frozenset({
+        "json", "jq", "re", "sql", "pell", "pivot", "bulk",
+        "std", "self",
+    })
+
+    def _is_intrinsic_call(self, callee_name: str) -> bool:
+        """True when the leading `::`-segment is one of the emitter's
+        synthetic namespaces. `json::get_text(...)` and friends never
+        need an `import json;` line — they're macro-flavoured surface
+        the emitter handles directly."""
+        first = callee_name.split("::", 1)[0]
+        return first in self._INTRINSIC_NAMESPACES
+
+    def _resolve_struct_lit_record(
+        self, sl: A.StructLit,
+    ) -> Optional[A.RecordDef]:
+        """Look up the record for a struct literal, gating on imports.
+        For qualified type names (`pkg::Summary`), raises pell.missing-
+        import if pkg isn't imported. For bare names, the lookup is
+        already import-filtered (see _lookup_record_with_pkg).
+
+        Centralizes what every StructLit emit site otherwise has to do
+        twice — call sites become a single `rec = self._resolve_struct
+        _lit_record(sl)`.
+        """
+        if "::" in sl.type_name:
+            pkg = sl.type_name.rsplit("::", 1)[0]
+            pkg_key = pkg.replace("::", "_").replace(".", "_")
+            self._check_pkg_imported(pkg_key, sl.loc)
+        return self._lookup_record(sl.type_name)
+
+    def _check_pkg_imported(self, pkg: str, loc: A.Loc) -> None:
+        """Raise pell.missing-import if `pkg` is not in the local
+        module's import set. Callers pass the source loc of the
+        cross-package reference so the squiggle lands precisely on
+        the qualifier (e.g. on `catalog` in `catalog::list_tables()`).
+        Pure no-op when the package IS imported.
+        """
+        if pkg in self._imported_packages:
+            return
+        raise EmitError(
+            f"package `{pkg}` is not imported. Add `import {pkg};` "
+            "to the top of this file.",
+            loc,
+            code="pell.missing-import",
+        )
 
     def _emit_header(self) -> str:
         from . import __version__ as _PELL_VERSION
@@ -1868,7 +1957,7 @@ class Emitter:
         # field-by-field assign to the (already-declared) target. OBJECT-type
         # struct-lits flow through _emit_expr → _emit_obj_constructor instead.
         if isinstance(expr, A.StructLit) and expr.type_name not in self._type_names:
-            rec = self._lookup_record(expr.type_name)
+            rec = self._resolve_struct_lit_record(expr)
             if rec is not None:
                 provided = {f.name: f.value for f in expr.fields}
                 lines: list[str] = []
@@ -2130,7 +2219,7 @@ class Emitter:
             if method == "split":
                 return "t_text_list"
             recv = call.callee.obj
-            if method in ("one", "first", "one_or_none"):
+            if method in ("one", "first", "one_or_none", "scalar"):
                 _, sql = self._strip_lock_modifiers(recv)
                 if sql is not None:
                     rt = self._row_type_from_fn_return()
@@ -2144,7 +2233,7 @@ class Emitter:
             if method == "into" and call.type_args:
                 return self._lt(call.type_args[0])
             # chained call: t = (sql!{...}.returning::<T>()).one()
-            if method in ("one", "first", "one_or_none") and isinstance(recv, A.Call):
+            if method in ("one", "first", "one_or_none", "scalar") and isinstance(recv, A.Call):
                 inner_ty = self._infer_call_type(recv)
                 if inner_ty is not None:
                     return inner_ty
@@ -3114,11 +3203,14 @@ class Emitter:
             if sql is not None and not sql.is_dml:
                 return self._emit_bulk_collect_into(target, sql, indent)
         # .one() with no ? — same select-into but on NO_DATA_FOUND we raise a generic invariant? For v0, leave it as raise.
-        if isinstance(call.callee, A.MemberAccess) and call.callee.field in ("one", "first"):
+        # .scalar() — single-row, single-column SELECT INTO; the receiver SELECT
+        # already projects exactly one column, so the same INTO splice as .one()
+        # is correct (target is a scalar local, not a record).
+        if isinstance(call.callee, A.MemberAccess) and call.callee.field in ("one", "first", "scalar"):
             recv = call.callee.obj
             _, sql_with_locks = self._strip_lock_modifiers(recv)
             if sql_with_locks is not None:
-                if call.callee.field == "one":
+                if call.callee.field in ("one", "scalar"):
                     return self._emit_select_into(target, sql_with_locks, indent, expect_exactly_one=True)
                 else:
                     return self._emit_first_loop(target, sql_with_locks, indent, propagate_none=False)
@@ -3389,8 +3481,8 @@ class Emitter:
                     ret_local, s.value, list_type, indent,
                 )
                 return prefix + adapter + [f"{indent}RETURN {ret_local};"]
-        # `return sql!{...}.collect()` / `.one()` / `.first()` — these
-        # patterns need a SELECT INTO / BULK COLLECT INTO temp; you
+        # `return sql!{...}.collect()` / `.one()` / `.first()` / `.scalar()` —
+        # these patterns need a SELECT INTO / BULK COLLECT INTO temp; you
         # can't put them inline as expressions. Synthesize:
         #   let _ret_<n>: <fn_return_type> = <expr>;
         #   RETURN _ret_<n>;
@@ -3398,7 +3490,7 @@ class Emitter:
         if (isinstance(s.value, A.Call)
                 and isinstance(s.value.callee, A.MemberAccess)
                 and isinstance(s.value.callee.obj, A.SqlBlock)
-                and s.value.callee.field in ("collect", "one", "first")
+                and s.value.callee.field in ("collect", "one", "first", "scalar")
                 and self._current_fn is not None
                 and self._current_fn.return_type is not None):
             self._sql_var_counter += 1
@@ -3417,14 +3509,23 @@ class Emitter:
         """Build (temp_name, decl_type, [assign_lines]) for a record StructLit
         used in a return position. Returns None if `sl.type_name` is not a
         known record (caller falls back to the default emit path).
+
+        Routes through _resolve_struct_lit_record so the import check
+        fires for `return pkg::Record { ... }` when pkg isn't imported.
         """
-        rec = self._lookup_record(sl.type_name)
+        rec = self._resolve_struct_lit_record(sl)
         if rec is None:
             return None
         provided = {f.name: f.value for f in sl.fields}
         self._sql_var_counter += 1
         temp_name = f"l_ret_{self._sql_var_counter}"
-        decl_type = _record_type_name(sl.type_name)
+        # Qualify the PL/SQL record type when it's foreign so the
+        # cross-package record path uses `<pkg>.t_<record>`.
+        _, owning_pkg = self._lookup_record_with_pkg(sl.type_name)
+        if owning_pkg is not None:
+            decl_type = f"{owning_pkg}.{_record_type_name(rec.name)}"
+        else:
+            decl_type = _record_type_name(sl.type_name)
         lines: list[str] = []
         for f in rec.fields:
             if f.name in provided:
@@ -4773,6 +4874,19 @@ class Emitter:
                 f"with `.` instead of `::`. did you mean `{right}`?",
                 e.loc,
             )
+
+        # Import gate for cross-package calls: `pkg::fn(...)` requires
+        # the local module to `import pkg;`. The pell::* internal helpers
+        # (json::*, re::*, jq::*, sql!, exec_dyn, etc.) are exempt — they
+        # lower to inline PL/SQL or Oracle stdlib and aren't real pell
+        # modules. The exemption list mirrors the macro/intrinsic surface
+        # the emitter already special-cases.
+        if (isinstance(e.callee, A.Ident)
+                and "::" in e.callee.name
+                and not self._is_intrinsic_call(e.callee.name)):
+            pkg = e.callee.name.rsplit("::", 1)[0]
+            pkg_key = pkg.replace("::", "_").replace(".", "_")
+            self._check_pkg_imported(pkg_key, e.loc)
 
         # Print aliases — rewrite to dbms_output.put_line, auto-stringify
         # the single argument so any type prints with the same format as
