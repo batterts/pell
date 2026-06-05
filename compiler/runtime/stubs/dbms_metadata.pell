@@ -1,0 +1,26 @@
+// Stub signatures for Oracle's DBMS_METADATA package. Not deployed —
+// these are pell-side type/completion hints so consumers can write
+// `import dbms_metadata;` and get tab-completion + type checking.
+//
+// Fetches DDL / XML metadata for Oracle objects. Most useful as
+// `get_ddl('TABLE', 'EMPLOYEES')` to round-trip CREATE statements.
+module dbms_metadata;
+
+// Get the DDL for a single object as a CLOB.
+//   object_type: 'TABLE', 'VIEW', 'PACKAGE', 'INDEX', ...
+//   name:        the object name (case sensitive — usually UPPER).
+//   schema:      owner; default user.
+pub fn get_ddl(object_type: text, name: text, schema: text) -> bigtext { }
+
+// DDL of every object that depends on `base_object_name`
+// (e.g. all INDEX/TRIGGER/CONSTRAINT for a TABLE).
+pub fn get_dependent_ddl(object_type: text, base_object_name: text, base_object_schema: text) -> bigtext { }
+
+// DDL for granted privileges on/to an object/grantee.
+pub fn get_granted_ddl(object_type: text, grantee: text) -> bigtext { }
+
+// XML form (lower-level — get_ddl uses this internally then transforms).
+pub fn get_xml(object_type: text, name: text, schema: text) -> bigtext { }
+
+// Configurable transforms — toggle storage/segment clauses on/off.
+pub fn set_transform_param(transform_handle: number, name: text, value: bool, object_type: text) { }

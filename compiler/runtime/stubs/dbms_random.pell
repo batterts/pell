@@ -1,0 +1,30 @@
+// Stub signatures for Oracle's DBMS_RANDOM package. Not deployed —
+// these are pell-side type/completion hints so consumers can write
+// `import dbms_random;` and get tab-completion + type checking.
+//
+// Note: DBMS_RANDOM is not cryptographically secure. Use
+// DBMS_CRYPTO.RANDOMBYTES if you need that.
+module dbms_random;
+
+// Initialize the seed (number) or seed string.
+pub fn seed(val: number) { }
+pub fn seed_text(val: text) { }
+
+// Pseudo-random VALUE in [0.0, 1.0).
+pub fn value() -> number { }
+
+// VALUE in [low, high).
+pub fn value_in(low: number, high: number) -> number { }
+
+// Random NUMBER drawn from a normal distribution (mean=0, stddev=1).
+pub fn normal() -> number { }
+
+// Random NUMBER in PLS_INTEGER range.
+pub fn random() -> number { }
+
+// Random string. `opt` selects the alphabet:
+//   'u' uppercase, 'l' lowercase, 'a' mixed, 'x' upper+digits, 'p' printable.
+pub fn string(opt: text, len: number) -> text { }
+
+// Terminate the random number generator (frees resources).
+pub fn terminate() { }

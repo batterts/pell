@@ -1,0 +1,42 @@
+// Stub signatures for Oracle's UTL_RAW package. Not deployed —
+// these are pell-side type/completion hints so consumers can write
+// `import utl_raw;` and get tab-completion + type checking.
+//
+// Byte-level RAW manipulation: concat, substr, cast between RAW
+// and VARCHAR2 / NUMBER, bitwise ops.
+module utl_raw;
+
+// Concatenate up to 12 RAW values (Oracle's signature is variadic;
+// we expose the common 2-arg form).
+pub fn concat(r1: bytes, r2: bytes) -> bytes { }
+
+// Length in bytes.
+pub fn length(r: bytes) -> number { }
+
+// Substring (1-based positions).
+pub fn substr(r: bytes, pos: number, len: number) -> bytes { }
+
+// Casts.
+pub fn cast_to_raw(c: text) -> bytes { }
+pub fn cast_to_varchar2(r: bytes) -> text { }
+pub fn cast_to_nvarchar2(r: bytes) -> text { }
+pub fn cast_to_number(r: bytes) -> number { }
+pub fn cast_from_number(n: number) -> bytes { }
+pub fn cast_to_binary_integer(r: bytes, endianess: number) -> number { }
+pub fn cast_from_binary_integer(n: number, endianess: number) -> bytes { }
+
+// Bitwise.
+pub fn bit_and(r1: bytes, r2: bytes) -> bytes { }
+pub fn bit_or(r1: bytes, r2: bytes) -> bytes { }
+pub fn bit_xor(r1: bytes, r2: bytes) -> bytes { }
+pub fn bit_complement(r: bytes) -> bytes { }
+
+// Hex round-trip.
+pub fn copies(r: bytes, n: number) -> bytes { }
+pub fn xrange(start_byte: bytes, end_byte: bytes) -> bytes { }
+pub fn reverse(r: bytes) -> bytes { }
+pub fn compare(r1: bytes, r2: bytes, pad: bytes) -> number { }
+pub fn convert(r: bytes, to_charset: text, from_charset: text) -> bytes { }
+pub fn translate(r: bytes, from_set: bytes, to_set: bytes) -> bytes { }
+pub fn transliterate(r: bytes, from_set: bytes, to_set: bytes, pad: bytes) -> bytes { }
+pub fn overlay(overlay_str: bytes, target: bytes, pos: number, len: number, pad: bytes) -> bytes { }

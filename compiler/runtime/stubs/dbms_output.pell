@@ -1,0 +1,15 @@
+// Stub signatures for Oracle's DBMS_OUTPUT package. Not deployed —
+// these are pell-side type/completion hints so consumers can write
+// `import dbms_output;` and get tab-completion + type checking.
+//
+// Reference: Oracle Database PL/SQL Packages and Types Reference,
+// DBMS_OUTPUT. Bodies are empty `{ }` so the file parses but
+// emits no PL/SQL — the canonical implementation is the SYS package.
+module dbms_output;
+
+pub fn put_line(msg: text) { }
+pub fn put(msg: text) { }
+pub fn new_line() { }
+pub fn enable(buffer_size: number) { }
+pub fn disable() { }
+pub fn get_line(out line: text, out status: number) { }
