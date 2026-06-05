@@ -1543,6 +1543,13 @@ class Emitter:
         if isinstance(s, A.LetStmt):
             return self._emit_let(s, indent)
         if isinstance(s, A.AssignStmt):
+            # `a = catalog::list_tables();` where `a` is a *locally*-
+            # typed list — same nominal mismatch as the return case.
+            # Reuse the foreign-list adapter so the assignment becomes
+            # a transit local + element copy.
+            xpkg = self._cross_pkg_list_assign(s, indent)
+            if xpkg is not None:
+                return xpkg
             tgt = self._emit_expr(s.target)
             val = self._emit_expr(s.value)
             return [f"{indent}{tgt} := {val};"]
@@ -1739,6 +1746,48 @@ class Emitter:
             f"{indent}  END LOOP;",
             f"{indent}END;",
         ]
+
+    def _cross_pkg_list_assign(
+        self, s: A.AssignStmt, indent: str,
+    ) -> Optional[list[str]]:
+        """If `s` is `a = pkg::fn();` where `pkg::fn` returns a
+        `list<T>` AND `a` is typed as the *local* `t_<T>_list`,
+        adapter-copy the foreign result into `a` instead of emitting
+        a raw assignment (which would fail with PLS-00382 nominal
+        type clash). Returns None when the assignment doesn't match
+        the pattern — caller falls through to the default emit.
+
+        Mirrors the same lowering shipped for return-position in
+        _emit_return; same shape, different caller site.
+        """
+        if not isinstance(s.target, A.Ident):
+            return None
+        if not isinstance(s.value, A.Call):
+            return None
+        if not isinstance(s.value.callee, A.Ident):
+            return None
+        fn_name = s.value.callee.name
+        if "::" not in fn_name:
+            return None
+        sig = self._project_signatures.get(fn_name)
+        if not (isinstance(sig, A.GenericType)
+                and sig.base == "list"
+                and len(sig.params) == 1):
+            return None
+        # Target must be a list-typed local. The local-types entry is
+        # the PL/SQL form (e.g. `t_text_list`). If it already carries
+        # a dot, it's foreign-typed and a direct assign works — bail.
+        local_pl_type = self._local_types.get(s.target.name)
+        if not local_pl_type or "." in local_pl_type:
+            return None
+        elem_name = _render_type(sig.params[0])
+        if local_pl_type != f"t_{_safe(elem_name)}_list":
+            return None
+        list_type = local_pl_type
+        target_pl = local_name(s.target.name)
+        return self._emit_cross_pkg_list_adapter(
+            target_pl, s.value, list_type, indent,
+        )
 
     def _emit_list_let(self, s: A.LetStmt, nm: str, indent: str) -> list[str]:
         """Lower `let xs: list<T> = [v1, v2, ...];` to:
