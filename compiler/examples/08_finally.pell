@@ -4,6 +4,8 @@
 
 module audit.charges;
 
+
+import dbms_output;
 // note: avoiding `logger::info` here because Oracle's built-in LOG() math
 // function shadows user packages named `log` — known v0 issue.
 import std::logger;

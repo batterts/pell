@@ -1,5 +1,7 @@
 module agg_library;
 
+
+import dbms_utility;
 // A small library of aggregate functions that fill gaps in standard SQL.
 // Each one demonstrates a different shape of accumulator and lowers cleanly
 // to Oracle's ODCIAggregate machinery.

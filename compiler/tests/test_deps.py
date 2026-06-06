@@ -84,6 +84,7 @@ def test_collect_packages_from_qualified_calls():
     from pell.deps import collect_module_deps
     m = parse("""
         module m;
+        import std::logger;
         pub fn f(x: text) -> number {
             let h = dbms_utility::get_hash_value(x, 0, 1073741824);
             logger::info("hashed");

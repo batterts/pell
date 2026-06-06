@@ -1,4 +1,4 @@
-module collections.linked_list;
+module collections_linked_list;
 
 // ---------------------------------------------------------------------------
 // Linked list of numbers, built from a `sealed type` with Cons / Nil cases.

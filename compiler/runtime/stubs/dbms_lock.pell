@@ -1,0 +1,23 @@
+// Stub signatures for Oracle's DBMS_LOCK package. Not deployed —
+// these are pell-side type/completion hints so consumers can write
+// `import dbms_lock;` and get tab-completion + type checking.
+//
+// Provides user-defined locks (allocate_unique / request / release)
+// and the well-known sleep() for delays.
+module dbms_lock;
+
+// Sleep for `seconds` (fractional values supported).
+pub fn sleep(seconds: number) { }
+
+// Allocate / look up a user-defined lock handle by name.
+pub fn allocate_unique(lockname: text, out lockhandle: text, expiration_secs: number) { }
+
+// Acquire a lock. lockmode follows Oracle's lock-mode constants
+// (e.g. x_mode=6 for exclusive). Returns 0 on success.
+pub fn request(lockhandle: text, lockmode: number, timeout: number, release_on_commit: bool) -> number { }
+
+// Release a previously acquired lock. Returns 0 on success.
+pub fn release(lockhandle: text) -> number { }
+
+// Convert a lock id (1073741824..1999999999 user range) — alternate API.
+pub fn convert(lockhandle: text, lockmode: number, timeout: number) -> number { }

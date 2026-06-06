@@ -1,7 +1,18 @@
 module hello;
 
 import std::logger;
+import collections_linked_list;
 
-pub fn greet(name: text) {
+pub fn greet(name: text) -> text {
   logger::info(name);
+  logger::err("test");
+
+    let a: Summary = Summary {
+        count: 0,
+        total: 0,
+        contains_zero: false,
+    };
+
+    return "{a.count}";
+
 }

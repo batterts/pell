@@ -1,0 +1,29 @@
+// Stub signatures for Oracle's DBMS_SESSION package. Not deployed —
+// these are pell-side type/completion hints so consumers can write
+// `import dbms_session;` and get tab-completion + type checking.
+//
+// Session-scoped state: contexts, package globals, NLS settings.
+module dbms_session;
+
+// Application contexts (key/value pairs scoped to a namespace).
+pub fn set_context(namespace: text, attribute: text, value: text) { }
+pub fn set_identifier(client_id: text) { }
+pub fn clear_context(namespace: text, client_identifier: text, attribute: text) { }
+pub fn clear_identifier() { }
+pub fn clear_all_context(namespace: text) { }
+
+// Reset package globals — `modify_package_state(free_all_resources)`
+// wipes all package-level variables in the session. Cheap state reset.
+pub fn modify_package_state(action_flags: number) { }
+pub fn reset_package() { }
+
+// Role manipulation.
+pub fn set_role(role_cmd: text) { }
+pub fn is_role_enabled(rolename: text) -> bool { }
+
+// NLS / session parameters.
+pub fn set_nls(param: text, value: text) { }
+pub fn set_sql_trace(sql_trace: bool) { }
+
+// Session id / audit id.
+pub fn unique_session_id() -> text { }

@@ -1,5 +1,8 @@
 module repl_demo;
 
+
+import dbms_output;
+import catalog;
 // ---------------------------------------------------------------------------
 // REPL demo — companion file for `pell repl`.
 //
@@ -67,11 +70,13 @@ pub fn audit_msg(action: text, target: text) -> text {
 
 
 pub fn display_tables() -> list<text> {
-    return catalog::tables();
+    return catalog::list_tables();
 }
 
 pub fn display_tree(name: text) -> list<text> {
-    return catalog::deps_tree(name);
+    let a : list<text>;
+    a = catalog::list_tables();
+    return a;
 }
 
 pub fn zxh(emp: Employee) -> text {
