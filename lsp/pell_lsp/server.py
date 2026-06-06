@@ -227,7 +227,180 @@ def on_code_action(
             action = _missing_import_action(uri, diag)
             if action is not None:
                 actions.append(action)
+        elif diag.code == "pell.dot-vs-colon":
+            action = _dot_vs_colon_action(uri, diag)
+            if action is not None:
+                actions.append(action)
+        elif diag.code == "pell.missing-return":
+            action = _missing_return_action(uri, diag)
+            if action is not None:
+                actions.append(action)
+        elif diag.code == "pell.unknown-struct-type":
+            action = _unknown_struct_type_action(uri, diag)
+            if action is not None:
+                actions.append(action)
     return actions or None
+
+
+def _dot_vs_colon_action(
+    uri: str, diag: lsp.Diagnostic,
+) -> Optional[lsp.CodeAction]:
+    """Rewrite `pkg.fn(...)` -> `pkg::fn(...)` based on the
+    emitter's suggestion. The diagnostic message contains both
+    forms wrapped in backticks: `wrong` ... `right`."""
+    m = re.search(r"`([\w.]+\([^)]*\))`.*`([\w:]+\([^)]*\))`", diag.message)
+    if m is None:
+        # Less ambitious form — just swap the first `.` between
+        # word chars on the diagnostic's range.
+        return None
+    wrong, right = m.group(1), m.group(2)
+    try:
+        doc = server.workspace.get_text_document(uri)
+    except Exception:
+        return None
+    src = doc.source
+    # Find the wrong text near the diagnostic range and replace.
+    lines = src.splitlines()
+    if diag.range.start.line >= len(lines):
+        return None
+    line = lines[diag.range.start.line]
+    idx = line.find(wrong)
+    if idx < 0:
+        return None
+    edit = lsp.WorkspaceEdit(changes={uri: [lsp.TextEdit(
+        range=lsp.Range(
+            start=lsp.Position(line=diag.range.start.line, character=idx),
+            end=lsp.Position(line=diag.range.start.line, character=idx + len(wrong)),
+        ),
+        new_text=right,
+    )]})
+    return lsp.CodeAction(
+        title=f"Rewrite as `{right}`",
+        kind=lsp.CodeActionKind.QuickFix,
+        diagnostics=[diag],
+        edit=edit,
+        is_preferred=True,
+    )
+
+
+# Zero-value literals per pell type — feeds the missing-return quickfix.
+_ZERO_VALUES = {
+    "text": '""',
+    "number": "0",
+    "bool": "false",
+    "date": "sql! { select sysdate from dual }.scalar()",
+    "timestamp": "sql! { select systimestamp from dual }.scalar()",
+    "json": 'json::parse("null")',
+    "bytes": "hextoraw('')",
+}
+
+
+def _missing_return_action(
+    uri: str, diag: lsp.Diagnostic,
+) -> Optional[lsp.CodeAction]:
+    """Insert `    return <zero-value>;` at the bottom of the fn body
+    (right before the closing `}`). We don't know the type from the
+    diagnostic alone, so the message-parser pulls it from the
+    "declared `-> <type>`" phrase in the emitter's error text."""
+    m = re.search(r"declared `-> ([\w<>\s,]+)`", diag.message)
+    inferred = m.group(1).strip() if m else ""
+    # list<T> -> []
+    if inferred.startswith("list<"):
+        zero = "[]"
+    elif inferred.startswith("Option<"):
+        zero = "None"
+    elif inferred.startswith("cursor<"):
+        zero = "sql! { select null from dual where 1 = 0 }"
+    else:
+        zero = _ZERO_VALUES.get(inferred, f"{inferred} {{ }}")
+    try:
+        doc = server.workspace.get_text_document(uri)
+    except Exception:
+        return None
+    src = doc.source
+    lines = src.splitlines()
+    # diag.range points at the fn decl line ('pub fn foo(...) ->
+    # Type {'). Walk forward to find the matching `}` at the same
+    # indentation as the opening — that's where to insert.
+    start = diag.range.start.line
+    if start >= len(lines):
+        return None
+    depth = 0
+    end_line = start
+    started = False
+    for i in range(start, len(lines)):
+        for ch in lines[i]:
+            if ch == "{":
+                depth += 1
+                started = True
+            elif ch == "}":
+                depth -= 1
+                if started and depth == 0:
+                    end_line = i
+                    break
+        else:
+            continue
+        break
+    if not started:
+        return None
+    # Insert just before the closing brace's line.
+    indent = "    "
+    edit = lsp.WorkspaceEdit(changes={uri: [lsp.TextEdit(
+        range=lsp.Range(
+            start=lsp.Position(line=end_line, character=0),
+            end=lsp.Position(line=end_line, character=0),
+        ),
+        new_text=f"{indent}return {zero};\n",
+    )]})
+    return lsp.CodeAction(
+        title=f"Add `return {zero};`",
+        kind=lsp.CodeActionKind.QuickFix,
+        diagnostics=[diag],
+        edit=edit,
+        is_preferred=True,
+    )
+
+
+def _unknown_struct_type_action(
+    uri: str, diag: lsp.Diagnostic,
+) -> Optional[lsp.CodeAction]:
+    """Insert the suggested `record Foo { … }` definition near the top
+    of the file (after `module ...;` and any `import`s). The emitter's
+    error message includes "did you mean: record Foo { ... }" — we
+    pull the literal record decl out and insert it."""
+    m = re.search(r"did you mean: (record [^\n]+\})", diag.message)
+    if m is None:
+        return None
+    record_decl = m.group(1)
+    try:
+        doc = server.workspace.get_text_document(uri)
+    except Exception:
+        return None
+    src = doc.source
+    lines = src.splitlines()
+    # Insert after the last `import ...;` line — if none, after the
+    # `module ...;`. Look at the top 20 lines only.
+    insert_line = 0
+    for i, line in enumerate(lines[:20]):
+        s = line.strip()
+        if s.startswith("module ") and s.endswith(";"):
+            insert_line = max(insert_line, i + 1)
+        if s.startswith("import ") and s.endswith(";"):
+            insert_line = max(insert_line, i + 1)
+    edit = lsp.WorkspaceEdit(changes={uri: [lsp.TextEdit(
+        range=lsp.Range(
+            start=lsp.Position(line=insert_line, character=0),
+            end=lsp.Position(line=insert_line, character=0),
+        ),
+        new_text=f"\npub {record_decl}\n",
+    )]})
+    return lsp.CodeAction(
+        title="Create record definition",
+        kind=lsp.CodeActionKind.QuickFix,
+        diagnostics=[diag],
+        edit=edit,
+        is_preferred=True,
+    )
 
 
 def _let_underscore_action(

@@ -3784,12 +3784,14 @@ class Emitter:
             f"Use `for i in 1..=10`, `for row in sql!{{...}}`, or "
             f"`for x in <list-typed-variable>`."
         )
+        code = ""
         if suggestion is not None:
             msg = (
                 f"`{suggestion[0]}` looks like a cross-package call written "
                 f"with `.` instead of `::`. did you mean `{suggestion[1]}`?"
             )
-        raise EmitError(msg, s.loc)
+            code = "pell.dot-vs-colon"
+        raise EmitError(msg, s.loc, code=code)
 
     # The set of pell-surface primitive type names. Field access on
     # any of these is a user error (text has no `.name`, number has no
@@ -4650,6 +4652,7 @@ class Emitter:
                 f"  did you mean: {suggested}\n"
                 f"  known records: {known_recs}; known types: {known_types}",
                 e.loc,
+                code="pell.unknown-struct-type",
             )
         if isinstance(e, A.SqlBlock):
             # TODO #1: bare sql block in expression position. The
@@ -4873,6 +4876,7 @@ class Emitter:
                 f"`{wrong}` looks like a cross-package call written "
                 f"with `.` instead of `::`. did you mean `{right}`?",
                 e.loc,
+                code="pell.dot-vs-colon",
             )
 
         # Import gate for cross-package calls: `pkg::fn(...)` requires
