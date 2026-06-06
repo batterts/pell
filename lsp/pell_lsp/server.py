@@ -21,6 +21,7 @@ from lsprotocol import types as lsp
 from pell import ast as A
 from pell.emitter import (
     EmitError, emit, lower_type, scan_project_records,
+    scan_project_definitions, scan_project_references,
     _render_type,
 )
 from pell.lexer import LexError
@@ -47,8 +48,10 @@ _cache: dict[str, Optional[A.Module]] = {}
 # Cached cross-package context — scanned lazily on first validate, then
 # reused until any .pell file is saved (didSave invalidates). Avoids
 # walking the project tree on every keystroke.
-#   _project_ctx[root_path] -> (signatures_dict, records_dict)
-_project_ctx: dict[str, tuple[dict, dict]] = {}
+#   _project_ctx[root_path] -> (signatures, records, definitions, references)
+# where definitions: (pkg, name) -> Loc  (goto-def target)
+#       references:  (pkg, name) -> list[Loc]  (find-usages results)
+_project_ctx: dict[str, tuple[dict, dict, dict, dict]] = {}
 
 
 def _project_root_for(doc_path: Optional[str]) -> str:
@@ -68,23 +71,37 @@ def _project_root_for(doc_path: Optional[str]) -> str:
     return str(here)
 
 
-def _get_project_ctx(doc_path: Optional[str]) -> tuple[dict, dict]:
-    """Lazy/cached project scan. Returns (signatures, records); empty
-    dicts if anything goes wrong (so emit still runs with local-only
-    resolution and the user sees the existing unknown-type errors)."""
+def _get_project_ctx(
+    doc_path: Optional[str],
+) -> tuple[dict, dict, dict, dict]:
+    """Lazy/cached project scan. Returns (signatures, records,
+    definitions, references); empty dicts if anything goes wrong (so
+    emit still runs with local-only resolution and the user sees the
+    existing unknown-type errors). All four are computed in one
+    scan-trigger so we never pay for the file walk twice."""
     root = _project_root_for(doc_path)
     if root in _project_ctx:
         return _project_ctx[root]
+    from pathlib import Path as _Path
+    root_path = _Path(root) if root else None
     try:
         from pell.repl import scan_project_signatures as _scan_sigs
-        sigs = _scan_sigs(root=__import__("pathlib").Path(root)) if root else {}
+        sigs = _scan_sigs(root=root_path) if root_path else {}
     except Exception:
         sigs = {}
     try:
-        recs = scan_project_records(__import__("pathlib").Path(root)) if root else {}
+        recs = scan_project_records(root_path) if root_path else {}
     except Exception:
         recs = {}
-    _project_ctx[root] = (sigs, recs)
+    try:
+        defs = scan_project_definitions(root_path) if root_path else {}
+    except Exception:
+        defs = {}
+    try:
+        refs = scan_project_references(root_path) if root_path else {}
+    except Exception:
+        refs = {}
+    _project_ctx[root] = (sigs, recs, defs, refs)
     return _project_ctx[root]
 
 
@@ -126,7 +143,7 @@ def _validate(uri: str) -> None:
         # happily shows "No problems found" on code that won't compile.
         # Pass the cached project context so cross-package record
         # constructors (`pkg::Record { … }`) and fn calls resolve.
-        sigs, recs = _get_project_ctx(doc.path)
+        sigs, recs, _defs, _refs = _get_project_ctx(doc.path)
         emit(module, source_text=src, source_path=doc.path or uri,
              project_signatures=sigs, project_records=recs)
     except (LexError, ParseError) as e:
@@ -644,7 +661,7 @@ def _completions_for_line_prefix(
         pkg, partial = qual_match.group(1), qual_match.group(2)
         # Derive a filesystem path from the URI. `file:///foo` → `/foo`.
         doc_path = uri[len("file://"):] if uri.startswith("file://") else uri
-        sigs, recs = _get_project_ctx(doc_path)
+        sigs, recs, _defs, _refs = _get_project_ctx(doc_path)
         partial_len = len(partial)
         replace_start = lsp.Position(
             line=line_no, character=char_no - partial_len
@@ -730,17 +747,109 @@ def _completions_for_line_prefix(
 def on_definition(params: lsp.DefinitionParams) -> Optional[lsp.Location]:
     uri = params.text_document.uri
     module = _cache.get(uri)
-    if module is None:
-        return None
     doc = server.workspace.get_text_document(uri)
     src = doc.source
     word, _ = _word_at(src, params.position)
     if word is None:
         return None
-    for item in module.items:
-        if isinstance(item, (A.FnDef, A.RecordDef, A.ErrorDef)) and item.name == word:
-            return lsp.Location(uri=uri, range=_range_from_loc(item.loc, src))
+    # Local-module lookup first — same-file goto stays fastest.
+    if module is not None:
+        for item in module.items:
+            if isinstance(item, (A.FnDef, A.RecordDef, A.ErrorDef)) \
+                    and item.name == word:
+                return lsp.Location(
+                    uri=uri, range=_range_from_loc(item.loc, src),
+                )
+    # Cross-file: extract the qualifier (if any) and consult the
+    # project definitions index. For bare `name`, we look up every
+    # registered (pkg, name) and return the unique match if one
+    # exists — same conservative bare-name rule as the emitter.
+    pkg = _qualifier_before(src, params.position)
+    _, _, defs, _ = _get_project_ctx(doc.path)
+    if pkg is not None:
+        loc = defs.get((pkg, word))
+        if loc is not None:
+            return _location_from_loc(loc)
+    else:
+        matches = [v for k, v in defs.items() if k[1] == word]
+        if len(matches) == 1:
+            return _location_from_loc(matches[0])
     return None
+
+
+def _qualifier_before(src: str, pos: lsp.Position) -> Optional[str]:
+    """If the position sits inside `<qualifier>::<word>`, return the
+    qualifier (lowered to PL/SQL-safe form). Otherwise None."""
+    lines = src.splitlines()
+    if pos.line >= len(lines):
+        return None
+    line = lines[pos.line]
+    col = min(pos.character, len(line))
+    # Walk left to the start of the current word.
+    left = col
+    while left > 0 and (line[left - 1].isalnum() or line[left - 1] == "_"):
+        left -= 1
+    # Expect `::` immediately before that.
+    if left < 2 or line[left - 2:left] != "::":
+        return None
+    # Walk further left to capture the qualifier word.
+    qend = left - 2
+    qstart = qend
+    while qstart > 0 and (line[qstart - 1].isalnum() or line[qstart - 1] == "_"):
+        qstart -= 1
+    if qstart == qend:
+        return None
+    return line[qstart:qend].replace("::", "_").replace(".", "_")
+
+
+def _location_from_loc(loc: "A.Loc") -> lsp.Location:
+    """Build an LSP Location from a pell Loc, reading the file lazily
+    to convert (line, col) → a precise Range covering the symbol."""
+    from pathlib import Path as _Path
+    file_path = loc.file
+    file_uri = f"file://{file_path}"
+    try:
+        src = _Path(file_path).read_text(encoding="utf-8")
+    except Exception:
+        src = ""
+    return lsp.Location(uri=file_uri, range=_range_from_loc(loc, src))
+
+
+# ---------------------------------------------------------------------------
+# Find Usages — cross-project references to a `pkg::name` symbol.
+# ---------------------------------------------------------------------------
+
+
+@server.feature(lsp.TEXT_DOCUMENT_REFERENCES)
+def on_references(
+    params: lsp.ReferenceParams,
+) -> Optional[list[lsp.Location]]:
+    uri = params.text_document.uri
+    doc = server.workspace.get_text_document(uri)
+    src = doc.source
+    word, _ = _word_at(src, params.position)
+    if word is None:
+        return None
+    pkg = _qualifier_before(src, params.position)
+    _, _, defs, refs = _get_project_ctx(doc.path)
+    # If no explicit qualifier, look up the package via the
+    # definitions index — if the symbol is uniquely owned by one
+    # package, use that. Otherwise we can't reliably distinguish.
+    if pkg is None:
+        owners = [k[0] for k in defs.keys() if k[1] == word]
+        if len(set(owners)) != 1:
+            return None
+        pkg = owners[0]
+    sites = refs.get((pkg, word), [])
+    out: list[lsp.Location] = []
+    for loc in sites:
+        out.append(_location_from_loc(loc))
+    # Optionally include the declaration site too — most IDEs expect it.
+    if params.context.include_declaration:
+        decl = defs.get((pkg, word))
+        if decl is not None:
+            out.append(_location_from_loc(decl))
+    return out or None
 
 
 # ---------------------------------------------------------------------------

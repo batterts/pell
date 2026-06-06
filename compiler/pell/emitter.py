@@ -5954,6 +5954,122 @@ def scan_project_records(
     return records
 
 
+def scan_project_definitions(
+    root: Optional["Path"] = None,
+) -> dict[tuple[str, str], "A.Loc"]:
+    """Walk the project (same exclusion rules as scan_project_records)
+    and produce a `(pkg, name) -> Loc` map covering every pub `fn`,
+    `record`, `error`, and `aggregate` definition. The Loc is what the
+    LSP uses to teleport to the source for cross-file goto-definition.
+
+    Records are already available via scan_project_records (with the
+    full AST node), but goto-def needs uniform navigation across all
+    item kinds, so we collect everything here in one pass.
+    """
+    from pathlib import Path as _Path
+    from .parser import parse as _parse
+    out: dict[tuple[str, str], A.Loc] = {}
+    seen: set[_Path] = set()
+    _SKIP = {"built", "out", ".git", "node_modules", "expected",
+             "plsql", "dist", "build", ".venv", "venv"}
+
+    def _walk(base: _Path) -> None:
+        base = base.resolve()
+        if not base.is_dir() or base in seen:
+            return
+        seen.add(base)
+        for path in base.rglob("*.pell"):
+            try:
+                rel_parts = path.resolve().relative_to(base).parts
+            except ValueError:
+                rel_parts = path.parts
+            if any(p in _SKIP for p in rel_parts[:-1]):
+                continue
+            try:
+                mod = _parse(path.read_text(encoding="utf-8"), str(path))
+            except Exception:
+                continue
+            pkg = mod.name.replace(".", "_").replace("::", "_")
+            short = mod.name.split(".")[-1].split("::")[-1]
+            for item in mod.items:
+                kinds = (A.FnDef, A.RecordDef, A.ErrorDef, A.AggregateDef)
+                if not isinstance(item, kinds):
+                    continue
+                if not getattr(item, "is_pub", False):
+                    continue
+                out[(pkg, item.name)] = item.loc
+                # Also under the short form for dotted modules so
+                # `logger::info` from `std::logger` finds the same loc.
+                if short != pkg:
+                    out[(short, item.name)] = item.loc
+
+    _walk(_Path(root) if root else _Path.cwd())
+    runtime = _Path(__file__).resolve().parent.parent / "runtime"
+    _walk(runtime)
+    return out
+
+
+def scan_project_references(
+    root: Optional["Path"] = None,
+) -> dict[tuple[str, str], list["A.Loc"]]:
+    """Walk the project and collect every reference site of every
+    `pkg::name` symbol. Bare references (where the package isn't
+    explicit) are NOT included — the resolver can't know which
+    package they target without re-doing the import-aware lookup.
+    For find-usages on a project symbol, we care primarily about
+    explicit qualified calls + struct-lits, which this catches.
+
+    Returns `(pkg, name) -> [Loc, Loc, ...]` of reference sites.
+
+    Best-effort regex pass over the source text (no AST walk) since
+    we want every textual occurrence including ones the AST drops
+    (comments don't count, but the regex is anchored on the `::`
+    syntax which doesn't appear in comments by convention).
+    """
+    import re as _re
+    from pathlib import Path as _Path
+    refs: dict[tuple[str, str], list[A.Loc]] = {}
+    seen: set[_Path] = set()
+    _SKIP = {"built", "out", ".git", "node_modules", "expected",
+             "plsql", "dist", "build", ".venv", "venv"}
+    # Match `pkg::name` — the pkg can be a multi-segment qualifier
+    # (`std::logger::info`), in which case we record refs under the
+    # last segment as pkg + `info` as name (matching how the project
+    # registries normalize).
+    pat = _re.compile(r"\b([A-Za-z_][\w]*)::([A-Za-z_][\w]*)")
+
+    def _walk(base: _Path) -> None:
+        base = base.resolve()
+        if not base.is_dir() or base in seen:
+            return
+        seen.add(base)
+        for path in base.rglob("*.pell"):
+            try:
+                rel_parts = path.resolve().relative_to(base).parts
+            except ValueError:
+                rel_parts = path.parts
+            if any(p in _SKIP for p in rel_parts[:-1]):
+                continue
+            try:
+                src = path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            for line_no, line in enumerate(src.splitlines(), start=1):
+                for m in pat.finditer(line):
+                    pkg, name = m.group(1), m.group(2)
+                    loc = A.Loc(
+                        file=str(path),
+                        line=line_no,
+                        col=m.start(2) + 1,
+                    )
+                    refs.setdefault((pkg, name), []).append(loc)
+
+    _walk(_Path(root) if root else _Path.cwd())
+    runtime = _Path(__file__).resolve().parent.parent / "runtime"
+    _walk(runtime)
+    return refs
+
+
 def emit_anon_block(
     items: list[A.Item],
     stmts: list[A.Stmt],

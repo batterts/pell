@@ -14,14 +14,27 @@ import re
 from pathlib import Path
 
 from pell.parser import parse
-from pell.emitter import emit
+from pell.emitter import emit, scan_project_records
+from pell.repl import scan_project_signatures
 
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
 
+# Scan once for the whole sanity-test module — same shape that
+# `pell build` uses. Lets cross-package examples (those that
+# `import collections_linked_list` / `import catalog` / etc.)
+# resolve under the post-Week-1 import-scoped rules.
+_PROJECT_SIGS = scan_project_signatures()
+_PROJECT_RECS = scan_project_records()
+
 
 def _emit(path: Path) -> str:
-    return emit(parse(path.read_text(), str(path)))
+    return emit(
+        parse(path.read_text(), str(path)),
+        source_path=str(path),
+        project_signatures=_PROJECT_SIGS,
+        project_records=_PROJECT_RECS,
+    )
 
 
 def _strip_comments(sql: str) -> str:
