@@ -7,17 +7,22 @@
 module dbms_lock;
 
 // Sleep for `seconds` (fractional values supported).
+@stub
 pub fn sleep(seconds: number) { }
 
 // Allocate / look up a user-defined lock handle by name.
+@stub
 pub fn allocate_unique(lockname: text, out lockhandle: text, expiration_secs: number) { }
 
 // Acquire a lock. lockmode follows Oracle's lock-mode constants
 // (e.g. x_mode=6 for exclusive). Returns 0 on success.
+@stub
 pub fn request(lockhandle: text, lockmode: number, timeout: number, release_on_commit: bool) -> number { }
 
 // Release a previously acquired lock. Returns 0 on success.
+@stub
 pub fn release(lockhandle: text) -> number { }
 
 // Convert a lock id (1073741824..1999999999 user range) — alternate API.
+@stub
 pub fn convert(lockhandle: text, lockmode: number, timeout: number) -> number { }

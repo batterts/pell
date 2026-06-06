@@ -8,31 +8,49 @@
 module dbms_sql;
 
 // Cursor lifecycle.
+@stub
 pub fn open_cursor() -> number { }
+@stub
 pub fn close_cursor(inout c: number) { }
 
 // Parsing and execution.
+@stub
 pub fn parse(c: number, statement: text, language_flag: number) { }
+@stub
 pub fn execute(c: number) -> number { }
+@stub
 pub fn execute_and_fetch(c: number, exact: bool) -> number { }
+@stub
 pub fn fetch_rows(c: number) -> number { }
 
 // REF CURSOR interop.
+@stub
 pub fn to_cursor_number(rc: cursor<dyn>) -> number { }
+@stub
 pub fn to_refcursor(inout c: number) -> cursor<dyn> { }
 
 // Column introspection / binding.
+@stub
 pub fn describe_columns(c: number, out col_cnt: number, out desc_t: text) { }
+@stub
 pub fn define_column(c: number, position: number, column: text, column_size: number) { }
+@stub
 pub fn column_value(c: number, position: number, out value: text) { }
 
 // Bind variables.
+@stub
 pub fn bind_variable(c: number, name: text, value: text) { }
+@stub
 pub fn bind_variable_number(c: number, name: text, value: number) { }
+@stub
 pub fn bind_variable_date(c: number, name: text, value: date) { }
 
 // Diagnostics.
+@stub
 pub fn last_row_count() -> number { }
+@stub
 pub fn last_error_position() -> number { }
+@stub
 pub fn last_sql_function_code() -> number { }
+@stub
 pub fn is_open(c: number) -> bool { }

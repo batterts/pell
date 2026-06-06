@@ -1,8 +1,8 @@
 module repl_demo;
+import catalog;
 
 
 import dbms_output;
-import catalog;
 // ---------------------------------------------------------------------------
 // REPL demo — companion file for `pell repl`.
 //
@@ -80,5 +80,6 @@ pub fn display_tree(name: text) -> list<text> {
 }
 
 pub fn zxh(emp: Employee) -> text {
+    let _ = display_tables();
     return "hello, {emp.name}!";
 }

@@ -475,6 +475,13 @@ class Emitter:
     # ---- entry point ----------------------------------------------------
 
     def emit(self) -> str:
+        # `@stub` modules — every pub fn is a stub, no real implementation
+        # to lower. These exist purely to feed signatures + completion into
+        # the project registries; deploying them would `CREATE OR REPLACE
+        # PACKAGE x AS ...` and clobber the real Oracle SYS package. Emit
+        # an empty-output marker so CLI knows to skip file generation.
+        if self._is_stub_module():
+            return ""
         # Pre-walk fns so schema-level types (for @pipelined returns) get
         # registered before the package header is emitted.
         for fn in self._fns:
@@ -499,6 +506,22 @@ class Emitter:
         chunks.append("")
         chunks.append(self._emit_body())
         return "\n".join(chunks)
+
+    @staticmethod
+    def _is_stub_fn(fn: A.FnDef) -> bool:
+        """True iff `fn` carries the `@stub` annotation. Stub fns are
+        signature-only — emitter skips them in both spec + body, deploy
+        skips the resulting module entirely. Used for the SYS-package
+        shims in runtime/stubs/."""
+        return any(a.name == "stub" for a in fn.annotations)
+
+    def _is_stub_module(self) -> bool:
+        """True iff the module has at least one fn and every fn is `@stub`.
+        A module with mixed stub + real fns emits normally (with stubs
+        skipped) — that's an unusual but legitimate shape."""
+        if not self._fns:
+            return False
+        return all(self._is_stub_fn(fn) for fn in self._fns)
 
     def emit_anon(self) -> str:
         """Emit the module as a self-contained DECLARE/BEGIN/END block.
@@ -918,9 +941,10 @@ class Emitter:
         # list types referenced by public fn signatures
         for line in spec_list_types:
             out.append(line)
-        # public fn signatures
+        # public fn signatures (stub fns are scanner-visible but never
+        # emitted into the package — see _is_stub_fn).
         for fn in self._fns:
-            if fn.is_pub:
+            if fn.is_pub and not self._is_stub_fn(fn):
                 out.append("  " + self._fn_signature(fn) + ";")
         out.append(f"END {self.pkg};")
         out.append("/")
@@ -943,6 +967,8 @@ class Emitter:
         # walk fns first so list-type declarations get registered
         fn_chunks: list[str] = []
         for fn in self._fns:
+            if self._is_stub_fn(fn):
+                continue
             fn_chunks.append(self._fn_body(fn))
         out: list[str] = []
         out.append(f"CREATE OR REPLACE PACKAGE BODY {self._q(self.pkg)} AS")
@@ -1474,15 +1500,13 @@ class Emitter:
         # and then throws ORA-06503 at runtime ("function returned
         # without value"). Catch it at compile time instead.
         # Pipelined fns are excluded — they `yield` values, no `return`.
-        # Empty-bodied fns are stubs (signature-only declarations used
-        # for cross-package type inference + completion). Don't fire
-        # missing-return on them — they intentionally don't emit
-        # runnable code. Pell deploy's allow-list keeps them out of
-        # the install order, and the LSP never tries to invoke them.
+        # Stubs (annotated `@stub`) are signature-only declarations —
+        # they never emit a body, so missing-return doesn't apply. Same
+        # exemption for `@pipelined` (yields, not returns).
         if (fn.return_type is not None
                 and not _is_unit_like(fn.return_type)
+                and not self._is_stub_fn(fn)
                 and not any(a.name == "pipelined" for a in fn.annotations)
-                and fn.body
                 and not _body_always_returns(fn.body)):
             raise EmitError(
                 f"function `{fn.name}` declared `-> "

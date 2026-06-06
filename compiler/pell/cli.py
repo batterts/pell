@@ -58,6 +58,11 @@ def cmd_build(args: argparse.Namespace) -> int:
         except ValueError as e:
             print(f"pell: {e}", file=sys.stderr)
             return 2
+        # `@stub` modules emit nothing — signature-only, never deployed.
+        # Skip the destination write entirely (don't litter empty .sql files).
+        if not sql.strip():
+            print(f"  ({src_path.name}: @stub module — no SQL emitted)")
+            continue
         # destination
         if args.output:
             out_path = Path(args.output)
@@ -286,6 +291,11 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             failures += 1
             if not args.keep_going:
                 return 1
+            continue
+        # @stub modules emit empty SQL — never deploy them (they'd clobber
+        # the real Oracle SYS package they describe).
+        if not sql.strip():
+            print(f"  ⊘ {src_path.name}: @stub module — skipped")
             continue
         if "pell_re." in sql:
             uses_re = True

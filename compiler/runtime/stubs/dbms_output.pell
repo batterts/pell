@@ -7,9 +7,15 @@
 // emits no PL/SQL — the canonical implementation is the SYS package.
 module dbms_output;
 
+@stub
 pub fn put_line(msg: text) { }
+@stub
 pub fn put(msg: text) { }
+@stub
 pub fn new_line() { }
+@stub
 pub fn enable(buffer_size: number) { }
+@stub
 pub fn disable() { }
+@stub
 pub fn get_line(out line: text, out status: number) { }

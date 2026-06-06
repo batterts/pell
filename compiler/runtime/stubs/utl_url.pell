@@ -7,7 +7,9 @@ module utl_url;
 
 // Percent-encode `url`. If escape_reserved is true, also
 // escapes RFC 3986 reserved characters (:/?#[]@!$&'()*+,;=).
+@stub
 pub fn escape(url: text, escape_reserved: bool, url_charset: text) -> text { }
 
 // Reverse of escape.
+@stub
 pub fn unescape(url: text, url_charset: text) -> text { }
