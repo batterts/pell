@@ -687,13 +687,20 @@ END employees;
             language="pell"
             implementation="dev.pell.intellij.psi.PellReferenceContributor" />
 
-        <!-- Find Usages (Cmd-G / Edit ▸ Find Usages) — enables it for
-             every PellNamedElement; uses a DefaultWordsScanner over IDENT
-             tokens for the cheap first-pass scan, then PSI resolution
-             confirms each candidate. -->
+        <!-- Find Usages (Cmd-G / Edit ▸ Find Usages) — temporarily
+             disabled so LSP4IJ's references bridge becomes the only
+             Find Usages source. The PSI-side scanner currently returns
+             zero results even on same-file usages; the LSP server's
+             textDocument/references handler returns the right set.
+             Re-enable after fixing PellFindUsagesProvider in Week 2
+             (probable cause: DefaultWordsScanner / PsiReference
+             equality mismatch with PellProjectIndex entries). -->
+        <!--
         <lang.findUsagesProvider
             language="pell"
             implementationClass="dev.pell.intellij.codeInsight.PellFindUsagesProvider" />
+        -->
+
 
         <!-- Names validator — used by Rename (Phase 5) and by Inspections
              to reject names that would collide with pell keywords or
