@@ -589,6 +589,232 @@ def cmd_exec(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# pell stubgen — connect via PELL_DB_URL, introspect a SYS / user package
+# via ALL_ARGUMENTS, and write a `@stub module pkg;` file with pub fn
+# declarations matching the database's actual signatures.
+# ---------------------------------------------------------------------------
+
+
+# Oracle DATA_TYPE -> pell surface type. Conservative: unmapped types
+# fall through to a `text` placeholder with a TODO comment so the
+# generated file parses but flags itself for review.
+_ORACLE_TYPE_TO_PELL: dict[str, str] = {
+    "VARCHAR2": "text",
+    "VARCHAR": "text",
+    "NVARCHAR2": "text",
+    "CHAR": "text",
+    "NCHAR": "text",
+    "CLOB": "bigtext",
+    "NCLOB": "bigtext",
+    "LONG": "text",
+    "NUMBER": "number",
+    "INTEGER": "number",
+    "PLS_INTEGER": "number",
+    "BINARY_INTEGER": "number",
+    "BINARY_FLOAT": "number",
+    "BINARY_DOUBLE": "number",
+    "FLOAT": "number",
+    "DATE": "date",
+    "TIMESTAMP": "timestamp",
+    "TIMESTAMP WITH TIME ZONE": "timestamp",
+    "TIMESTAMP WITH LOCAL TIME ZONE": "timestamp",
+    "BOOLEAN": "bool",
+    "PL/SQL BOOLEAN": "bool",
+    "RAW": "bytes",
+    "LONG RAW": "bytes",
+    "BLOB": "bytes",
+    "REF CURSOR": "cursor<dyn>",
+    "PL/SQL REF CURSOR": "cursor<dyn>",
+    "PL/SQL RECORD": "json",  # opaque; user can refine
+}
+
+
+# Pell reserved words — when Oracle's argument name collides, stubgen
+# appends an underscore so the file parses.
+_PELL_RESERVED = frozenset({
+    "module", "import", "pub", "fn", "let", "var", "return", "yield",
+    "if", "else", "for", "forall", "in", "match", "transaction",
+    "record", "error", "true", "false", "some", "none", "ok", "err",
+    "unsafe", "finally", "and", "or", "not",
+    "type", "sealed", "aggregate", "case", "self",
+    "seq", "out", "inout", "enum",
+})
+
+
+def _safe_param_name(name: str) -> str:
+    """Rename `type` → `type_` etc. so generated stubs parse."""
+    if name.lower() in _PELL_RESERVED:
+        return name + "_"
+    return name
+
+
+def _oracle_to_pell_type(data_type: str) -> tuple[str, str]:
+    """Return (pell_type, optional_TODO_marker). Empty marker means
+    a confident mapping; non-empty means we punted to a placeholder."""
+    if not data_type:
+        return "text", "  // TODO: Oracle reported empty data_type"
+    pell = _ORACLE_TYPE_TO_PELL.get(data_type.upper())
+    if pell is None:
+        return "text", f"  // TODO: unmapped Oracle type {data_type!r}"
+    return pell, ""
+
+
+def cmd_stubgen(args: argparse.Namespace) -> int:
+    """Generate a pell stub file by introspecting an Oracle package."""
+    try:
+        from . import driver
+    except ImportError as e:
+        print(
+            f"pell: `pell stubgen` needs the optional driver dependency; "
+            f"install with: pip install -e .[repl]\n  ({e})",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        conn = driver.connect(args.connect)
+    except Exception as e:
+        print(f"pell: connection failed: {e}", file=sys.stderr)
+        return 1
+    pkg = args.package.upper()
+    owner = args.owner.upper() if args.owner else "SYS"
+    try:
+        rows = conn.run_query(
+            """
+            SELECT object_name,
+                   subprogram_id,
+                   sequence,
+                   argument_name,
+                   position,
+                   data_type,
+                   in_out,
+                   overload
+              FROM all_arguments
+             WHERE owner = :o AND package_name = :p
+             ORDER BY object_name, subprogram_id, sequence
+            """,
+            {"o": owner, "p": pkg},
+        )
+        # ALL_ARGUMENTS only lists procedures that HAVE arguments. Zero-arg
+        # procedures (e.g. dbms_output.disable, dbms_output.new_line) need
+        # a second pass against ALL_PROCEDURES to catch them.
+        proc_rows = conn.run_query(
+            """
+            SELECT procedure_name AS object_name,
+                   subprogram_id
+              FROM all_procedures
+             WHERE owner = :o AND object_name = :p
+               AND procedure_name IS NOT NULL
+            """,
+            {"o": owner, "p": pkg},
+        )
+    finally:
+        conn.close()
+    if not rows:
+        print(
+            f"pell stubgen: no arguments found for {owner}.{pkg}. "
+            f"check the package exists and you have privileges on "
+            f"ALL_ARGUMENTS.",
+            file=sys.stderr,
+        )
+        return 1
+    # Group rows into subprograms. ALL_ARGUMENTS represents return
+    # values as the row with position=0 (or argument_name IS NULL on
+    # some versions). Group by (object_name, subprogram_id) to handle
+    # overloads as distinct entries.
+    from collections import defaultdict
+    grouped: dict[tuple[str, int], list[dict]] = defaultdict(list)
+    for r in rows:
+        grouped[(r["object_name"], r["subprogram_id"] or 0)].append(r)
+    # Fold in zero-arg procedures from ALL_PROCEDURES — they have no
+    # ALL_ARGUMENTS rows so the loop above misses them. Insert empty
+    # arg lists for any (name, subprogram_id) tuple not already grouped.
+    for pr in proc_rows:
+        key = (pr["object_name"], pr["subprogram_id"] or 0)
+        if key not in grouped:
+            grouped[key] = []
+    seen_names: set[str] = set()
+    body_lines: list[str] = []
+    skipped_overloads: list[str] = []
+    todo_count = 0
+    for (proc_name, _sid), proc_rows in sorted(grouped.items()):
+        # Overload handling: pell has no overloading in v0. Keep the
+        # FIRST signature we see for each proc_name; report skipped
+        # overloads in a comment block at the bottom.
+        if proc_name in seen_names:
+            skipped_overloads.append(proc_name)
+            continue
+        seen_names.add(proc_name)
+        return_row = next(
+            (r for r in proc_rows if (r["position"] or 0) == 0), None,
+        )
+        param_rows = [r for r in proc_rows if (r["position"] or 0) > 0]
+        param_rows.sort(key=lambda r: r["position"])
+        params: list[str] = []
+        for r in param_rows:
+            pname = _safe_param_name((r["argument_name"] or "arg").lower())
+            ptype, marker = _oracle_to_pell_type(r["data_type"])
+            if marker:
+                todo_count += 1
+            mode = ""
+            if r["in_out"] == "OUT":
+                mode = "out "
+            elif r["in_out"] == "IN/OUT":
+                mode = "inout "
+            params.append(f"{mode}{pname}: {ptype}")
+        sig_params = ", ".join(params)
+        if return_row is not None:
+            ret_type, _ = _oracle_to_pell_type(return_row["data_type"])
+            body_lines.append(
+                f"pub fn {proc_name.lower()}({sig_params}) -> {ret_type} {{ }}"
+            )
+        else:
+            body_lines.append(f"pub fn {proc_name.lower()}({sig_params}) {{ }}")
+    # Compose the file.
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+    header = [
+        f"// Stub for {owner}.{pkg}.",
+        f"// Generated by `pell stubgen` from ALL_ARGUMENTS on {now}.",
+        "// Signature-only — not deployed. `@stub` skips emit, but the",
+        "// scanner picks these up so `import` resolution and completion",
+        "// work.",
+    ]
+    if skipped_overloads:
+        header.append(
+            "// NOTE: skipped overloads (pell has no overloading in v0): "
+            + ", ".join(sorted(set(skipped_overloads)))
+        )
+    if todo_count:
+        header.append(
+            f"// NOTE: {todo_count} unmapped Oracle type(s) — review TODOs."
+        )
+    file_text = (
+        "\n".join(header)
+        + "\n\n@stub\n"
+        + f"module {pkg.lower()};\n\n"
+        + "\n".join(body_lines)
+        + "\n"
+    )
+    # Destination
+    if args.output:
+        dest = Path(args.output)
+    else:
+        out_dir = Path(args.dir_output) if args.dir_output else Path("runtime/stubs")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dest = out_dir / f"{pkg.lower()}.pell"
+    dest.write_text(file_text)
+    print(
+        f"pell stubgen: {owner}.{pkg} → {dest}  "
+        f"({len(seen_names)} fn(s), "
+        f"{len(skipped_overloads)} overload(s) skipped, "
+        f"{todo_count} TODO(s))"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="pell", description=f"pell compiler v{__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -692,6 +918,35 @@ def main(argv: list[str] | None = None) -> int:
     mig.add_argument("--dry-run", action="store_true",
                      help="show what would change without touching disk")
     mig.set_defaults(func=cmd_migrate)
+
+    sg = sub.add_parser(
+        "stubgen",
+        help="connect via PELL_DB_URL and generate a `@stub module pkg;` "
+             "file by introspecting Oracle's ALL_ARGUMENTS for the package",
+    )
+    sg.add_argument(
+        "package",
+        help="Oracle package name (e.g. dbms_output, utl_url, your_pkg)",
+    )
+    sg.add_argument(
+        "--owner",
+        default="SYS",
+        help="schema that owns the package (default: SYS)",
+    )
+    sg.add_argument(
+        "-c", "--connect",
+        help="user/pass@host:port/service (or set PELL_DB_URL)",
+    )
+    sg.add_argument(
+        "-o", "--output",
+        help="write to this specific path instead of the default runtime/stubs/<pkg>.pell",
+    )
+    sg.add_argument(
+        "-d", "--dir-output",
+        help="write into this directory (filename derived from package). "
+             "Default: runtime/stubs/",
+    )
+    sg.set_defaults(func=cmd_stubgen)
 
     args = p.parse_args(argv)
     return args.func(args)
