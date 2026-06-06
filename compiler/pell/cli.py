@@ -660,75 +660,99 @@ def _oracle_to_pell_type(data_type: str) -> tuple[str, str]:
     return pell, ""
 
 
-def cmd_stubgen(args: argparse.Namespace) -> int:
-    """Generate a pell stub file by introspecting an Oracle package."""
-    try:
-        from . import driver
-    except ImportError as e:
-        print(
-            f"pell: `pell stubgen` needs the optional driver dependency; "
-            f"install with: pip install -e .[repl]\n  ({e})",
-            file=sys.stderr,
-        )
-        return 2
-    try:
-        conn = driver.connect(args.connect)
-    except Exception as e:
-        print(f"pell: connection failed: {e}", file=sys.stderr)
-        return 1
-    pkg = args.package.upper()
-    owner = args.owner.upper() if args.owner else "SYS"
-    try:
-        rows = conn.run_query(
-            """
-            SELECT object_name,
-                   subprogram_id,
-                   sequence,
-                   argument_name,
-                   position,
-                   data_type,
-                   in_out,
-                   overload
-              FROM all_arguments
-             WHERE owner = :o AND package_name = :p
-             ORDER BY object_name, subprogram_id, sequence
-            """,
-            {"o": owner, "p": pkg},
-        )
-        # ALL_ARGUMENTS only lists procedures that HAVE arguments. Zero-arg
-        # procedures (e.g. dbms_output.disable, dbms_output.new_line) need
-        # a second pass against ALL_PROCEDURES to catch them.
-        proc_rows = conn.run_query(
-            """
-            SELECT procedure_name AS object_name,
-                   subprogram_id
-              FROM all_procedures
-             WHERE owner = :o AND object_name = :p
-               AND procedure_name IS NOT NULL
-            """,
-            {"o": owner, "p": pkg},
-        )
-    finally:
-        conn.close()
-    if not rows:
-        print(
-            f"pell stubgen: no arguments found for {owner}.{pkg}. "
-            f"check the package exists and you have privileges on "
-            f"ALL_ARGUMENTS.",
-            file=sys.stderr,
-        )
-        return 1
-    # Group rows into subprograms. ALL_ARGUMENTS represents return
-    # values as the row with position=0 (or argument_name IS NULL on
-    # some versions). Group by (object_name, subprogram_id) to handle
-    # overloads as distinct entries.
+def _stubgen_one(
+    conn, owner: str, pkg: str, dest: "Path",
+) -> tuple[bool, int, int, int]:
+    """Generate stub for a single Oracle package, writing to `dest`.
+
+    Returns (success, fn_count, overload_skip_count, todo_count). Success
+    is False when the package has no introspectable surface (privileges
+    or empty package).
+    """
+    rows = conn.run_query(
+        """
+        SELECT object_name,
+               subprogram_id,
+               sequence,
+               argument_name,
+               position,
+               data_type,
+               in_out,
+               overload
+          FROM all_arguments
+         WHERE owner = :o AND package_name = :p
+         ORDER BY object_name, subprogram_id, sequence
+        """,
+        {"o": owner, "p": pkg},
+    )
+    # ALL_ARGUMENTS misses zero-arg procedures — pull from ALL_PROCEDURES.
+    proc_rows = conn.run_query(
+        """
+        SELECT procedure_name AS object_name,
+               subprogram_id
+          FROM all_procedures
+         WHERE owner = :o AND object_name = :p
+           AND procedure_name IS NOT NULL
+        """,
+        {"o": owner, "p": pkg},
+    )
+    if not rows and not proc_rows:
+        return False, 0, 0, 0
+    # Package-spec PL/SQL TYPE declarations (ALL_PLSQL_TYPES). Each row
+    # describes one record/varray/nested-table. We translate records to
+    # `pub record` and collections to a list-type alias comment (pell
+    # doesn't have type aliases; collections still surface as `list<T>`
+    # at use sites, but the declaration is documented).
+    type_rows = conn.run_query(
+        """
+        SELECT type_name, typecode
+          FROM all_plsql_types
+         WHERE owner = :o AND package_name = :p
+         ORDER BY type_name
+        """,
+        {"o": owner, "p": pkg},
+    )
+    # Per-type attributes for record types.
+    type_attr_rows = conn.run_query(
+        """
+        SELECT type_name, attr_name, attr_type_name, length, precision
+          FROM all_plsql_type_attrs
+         WHERE owner = :o AND package_name = :p
+         ORDER BY type_name, attr_no
+        """,
+        {"o": owner, "p": pkg},
+    ) if type_rows else []
+    # Build record decls
     from collections import defaultdict
+    record_decls: list[str] = []
+    todo_count = 0
+    type_attr_by_type: dict[str, list[dict]] = defaultdict(list)
+    for ar in type_attr_rows:
+        type_attr_by_type[ar["type_name"]].append(ar)
+    for tr in type_rows:
+        if tr["typecode"] != "PL/SQL RECORD":
+            continue
+        attrs = type_attr_by_type.get(tr["type_name"], [])
+        if not attrs:
+            continue
+        fields: list[str] = []
+        for a in attrs:
+            fname = _safe_param_name(a["attr_name"].lower())
+            ftype, marker = _oracle_to_pell_type(a["attr_type_name"] or "")
+            if marker:
+                todo_count += 1
+            fields.append(f"  {fname}: {ftype},")
+        record_decls.append(
+            f"pub record {tr['type_name']} {{\n"
+            + "\n".join(fields)
+            + "\n}"
+        )
+    # Group fn rows by (object_name, subprogram_id) — overloads stay
+    # distinct so we can pick one per name + report the rest.
     grouped: dict[tuple[str, int], list[dict]] = defaultdict(list)
     for r in rows:
         grouped[(r["object_name"], r["subprogram_id"] or 0)].append(r)
-    # Fold in zero-arg procedures from ALL_PROCEDURES — they have no
-    # ALL_ARGUMENTS rows so the loop above misses them. Insert empty
-    # arg lists for any (name, subprogram_id) tuple not already grouped.
+    # Fold in zero-arg procedures.
     for pr in proc_rows:
         key = (pr["object_name"], pr["subprogram_id"] or 0)
         if key not in grouped:
@@ -736,20 +760,18 @@ def cmd_stubgen(args: argparse.Namespace) -> int:
     seen_names: set[str] = set()
     body_lines: list[str] = []
     skipped_overloads: list[str] = []
-    todo_count = 0
-    for (proc_name, _sid), proc_rows in sorted(grouped.items()):
-        # Overload handling: pell has no overloading in v0. Keep the
-        # FIRST signature we see for each proc_name; report skipped
-        # overloads in a comment block at the bottom.
+    for (proc_name, _sid), arg_rows in sorted(grouped.items()):
         if proc_name in seen_names:
             skipped_overloads.append(proc_name)
             continue
         seen_names.add(proc_name)
         return_row = next(
-            (r for r in proc_rows if (r["position"] or 0) == 0), None,
+            (r for r in arg_rows if (r["position"] or 0) == 0), None,
         )
-        param_rows = [r for r in proc_rows if (r["position"] or 0) > 0]
-        param_rows.sort(key=lambda r: r["position"])
+        param_rows = sorted(
+            [r for r in arg_rows if (r["position"] or 0) > 0],
+            key=lambda r: r["position"],
+        )
         params: list[str] = []
         for r in param_rows:
             pname = _safe_param_name((r["argument_name"] or "arg").lower())
@@ -770,7 +792,7 @@ def cmd_stubgen(args: argparse.Namespace) -> int:
             )
         else:
             body_lines.append(f"pub fn {proc_name.lower()}({sig_params}) {{ }}")
-    # Compose the file.
+    # Header + assembly.
     import datetime
     now = datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y-%m-%d %H:%M:%S UTC"
@@ -791,26 +813,127 @@ def cmd_stubgen(args: argparse.Namespace) -> int:
         header.append(
             f"// NOTE: {todo_count} unmapped Oracle type(s) — review TODOs."
         )
-    file_text = (
-        "\n".join(header)
-        + "\n\n@stub\n"
-        + f"module {pkg.lower()};\n\n"
-        + "\n".join(body_lines)
-        + "\n"
-    )
-    # Destination
+    sections = ["\n".join(header), "@stub", f"module {pkg.lower()};"]
+    if record_decls:
+        sections.append("\n\n".join(record_decls))
+    if body_lines:
+        sections.append("\n".join(body_lines))
+    file_text = "\n\n".join(sections) + "\n"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(file_text)
+    return True, len(seen_names), len(skipped_overloads), todo_count
+
+
+def cmd_stubgen(args: argparse.Namespace) -> int:
+    """Generate pell stub files by introspecting Oracle packages.
+
+    Two modes:
+      * Single package — `pell stubgen <pkg>` introspects that one
+        package and writes runtime/stubs/<pkg>.pell.
+      * Whole schema — `pell stubgen --all` queries ALL_OBJECTS for
+        every PACKAGE under the owner and stubs each in turn.
+    """
+    if not args.all and not args.package:
+        print(
+            "pell stubgen: provide a package name or use --all to stub "
+            "every package in the owner's schema.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        from . import driver
+    except ImportError as e:
+        print(
+            f"pell: `pell stubgen` needs the optional driver dependency; "
+            f"install with: pip install -e .[repl]\n  ({e})",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        conn = driver.connect(args.connect)
+    except Exception as e:
+        print(f"pell: connection failed: {e}", file=sys.stderr)
+        return 1
+    owner = args.owner.upper() if args.owner else "SYS"
+    if args.all:
+        # Enumerate every package in the owner's schema.
+        try:
+            pkg_rows = conn.run_query(
+                """
+                SELECT object_name
+                  FROM all_objects
+                 WHERE owner = :o AND object_type = 'PACKAGE'
+                 ORDER BY object_name
+                """,
+                {"o": owner},
+            )
+        except Exception as e:
+            conn.close()
+            print(f"pell stubgen: failed to list packages: {e}", file=sys.stderr)
+            return 1
+        if not pkg_rows:
+            conn.close()
+            print(
+                f"pell stubgen: no packages found in {owner}. check the "
+                f"owner spelling and that you have privileges on ALL_OBJECTS.",
+                file=sys.stderr,
+            )
+            return 1
+        out_dir = Path(args.dir_output) if args.dir_output else Path("runtime/stubs")
+        ok = skip = fail = 0
+        total_fns = 0
+        try:
+            for r in pkg_rows:
+                pkg = r["object_name"]
+                dest = out_dir / f"{pkg.lower()}.pell"
+                try:
+                    success, fns, overloads, todos = _stubgen_one(
+                        conn, owner, pkg, dest,
+                    )
+                except Exception as e:
+                    fail += 1
+                    print(f"  ✗ {owner}.{pkg}: {e}", file=sys.stderr)
+                    continue
+                if not success:
+                    skip += 1
+                    print(f"  ⊘ {owner}.{pkg}: no introspectable surface")
+                    continue
+                ok += 1
+                total_fns += fns
+                print(
+                    f"  ✓ {owner}.{pkg} → {dest}  "
+                    f"({fns} fn(s), {overloads} overload(s), {todos} TODO(s))"
+                )
+        finally:
+            conn.close()
+        print(
+            f"\npell stubgen --all: {ok} pkg(s) generated, "
+            f"{skip} skipped, {fail} failed, {total_fns} total fns."
+        )
+        return 0 if fail == 0 else 1
+    # Single-package mode.
+    pkg = args.package.upper()
     if args.output:
         dest = Path(args.output)
+    elif args.dir_output:
+        dest = Path(args.dir_output) / f"{pkg.lower()}.pell"
     else:
-        out_dir = Path(args.dir_output) if args.dir_output else Path("runtime/stubs")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        dest = out_dir / f"{pkg.lower()}.pell"
-    dest.write_text(file_text)
+        dest = Path("runtime/stubs") / f"{pkg.lower()}.pell"
+    try:
+        success, fns, overloads, todos = _stubgen_one(conn, owner, pkg, dest)
+    finally:
+        conn.close()
+    if not success:
+        print(
+            f"pell stubgen: no arguments found for {owner}.{pkg}. "
+            f"check the package exists and you have privileges on "
+            f"ALL_ARGUMENTS.",
+            file=sys.stderr,
+        )
+        return 1
     print(
         f"pell stubgen: {owner}.{pkg} → {dest}  "
-        f"({len(seen_names)} fn(s), "
-        f"{len(skipped_overloads)} overload(s) skipped, "
-        f"{todo_count} TODO(s))"
+        f"({fns} fn(s), {overloads} overload(s) skipped, {todos} TODO(s))"
     )
     return 0
 
@@ -921,17 +1044,27 @@ def main(argv: list[str] | None = None) -> int:
 
     sg = sub.add_parser(
         "stubgen",
-        help="connect via PELL_DB_URL and generate a `@stub module pkg;` "
-             "file by introspecting Oracle's ALL_ARGUMENTS for the package",
+        help="connect via PELL_DB_URL and generate `@stub module pkg;` "
+             "files by introspecting Oracle's ALL_ARGUMENTS / "
+             "ALL_PLSQL_TYPES. Use --all to bulk-stub a schema.",
     )
     sg.add_argument(
         "package",
-        help="Oracle package name (e.g. dbms_output, utl_url, your_pkg)",
+        nargs="?",
+        help="Oracle package name (e.g. dbms_output, utl_url, your_pkg). "
+             "Omit when using --all.",
+    )
+    sg.add_argument(
+        "--all",
+        action="store_true",
+        help="stub every package in the owner's schema. Writes to "
+             "runtime/stubs/<pkg>.pell per package.",
     )
     sg.add_argument(
         "--owner",
         default="SYS",
-        help="schema that owns the package (default: SYS)",
+        help="schema that owns the package (default: SYS). For legacy "
+             "user code, set to your app schema: --owner=APP_SCHEMA --all",
     )
     sg.add_argument(
         "-c", "--connect",
@@ -939,7 +1072,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     sg.add_argument(
         "-o", "--output",
-        help="write to this specific path instead of the default runtime/stubs/<pkg>.pell",
+        help="write to this specific path (single-pkg mode only)",
     )
     sg.add_argument(
         "-d", "--dir-output",
