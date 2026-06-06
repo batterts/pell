@@ -4,48 +4,37 @@
 //
 // Grab-bag of utility functions. Most useful members are the
 // timing / error-formatting helpers.
+@stub
 module dbms_utility;
 
 // Hundredths of a second since an arbitrary epoch. Diff two
 // calls to measure elapsed time.
-@stub
 pub fn get_time() -> number { }
 
 // High-resolution time (nanoseconds, Oracle 18c+).
-@stub
 pub fn get_cpu_time() -> number { }
 
 // Format the current call stack (one entry per line).
-@stub
 pub fn format_call_stack() -> text { }
 
 // Format the current PL/SQL error stack — chain of raised errors.
-@stub
 pub fn format_error_stack() -> text { }
 
 // Format a backtrace: line / package of the original RAISE.
 // Far more useful than SQLERRM for diagnostics.
-@stub
 pub fn format_error_backtrace() -> text { }
 
 // Comma-separated string ↔ collection of strings.
-@stub
 pub fn comma_to_table(list: text, out tablen: number, out tab: text) { }
-@stub
 pub fn table_to_comma(tab: text, out tablen: number, out list: text) { }
 
 // Hash a string to PLS_INTEGER (range = base..base + hash_size - 1).
-@stub
 pub fn get_hash_value(name: text, base: number, hash_size: number) -> number { }
 
 // Get current schema / DB version info.
-@stub
 pub fn current_user() -> text { }
-@stub
 pub fn db_version(out version: text, out compatibility: text) { }
 
 // Validate / compile an object by name.
-@stub
 pub fn validate(schema: text, object_name: text) { }
-@stub
 pub fn compile_schema(schema: text, compile_all: bool) { }

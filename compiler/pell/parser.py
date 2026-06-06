@@ -114,17 +114,25 @@ class Parser:
     # ---- top-level ------------------------------------------------------
 
     def parse_module(self) -> A.Module:
+        # Optional module-level annotations: `@stub`, etc., before
+        # `module foo;`. Stored on Module.annotations; the emitter
+        # consults them for whole-module behavior switches.
+        module_annotations = self._parse_annotations()
         # module foo.bar;
-        self._eat_keyword("module") or self._expect("KW_MODULE", "expected `module` at top of file")
-        # Above is a little redundant; simpler form:
-        first = self.toks[0]
+        first = self._peek()
         loc = first.loc
+        self._eat_keyword("module") or self._expect(
+            "KW_MODULE", "expected `module` at top of file"
+        )
         name = self._parse_dotted_ident()
         self._expect("SEMI", "expected `;` after module name")
         items: list[A.Item] = []
         while not self._at("EOF"):
             items.append(self._parse_item())
-        return A.Module(loc=loc, name=name, items=items)
+        return A.Module(
+            loc=loc, name=name, items=items,
+            annotations=module_annotations,
+        )
 
     def _parse_dotted_ident(self) -> str:
         parts = [self._expect("IDENT").value]

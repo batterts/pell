@@ -3,39 +3,28 @@
 // `import dbms_session;` and get tab-completion + type checking.
 //
 // Session-scoped state: contexts, package globals, NLS settings.
+@stub
 module dbms_session;
 
 // Application contexts (key/value pairs scoped to a namespace).
-@stub
 pub fn set_context(namespace: text, attribute: text, value: text) { }
-@stub
 pub fn set_identifier(client_id: text) { }
-@stub
 pub fn clear_context(namespace: text, client_identifier: text, attribute: text) { }
-@stub
 pub fn clear_identifier() { }
-@stub
 pub fn clear_all_context(namespace: text) { }
 
 // Reset package globals — `modify_package_state(free_all_resources)`
 // wipes all package-level variables in the session. Cheap state reset.
-@stub
 pub fn modify_package_state(action_flags: number) { }
-@stub
 pub fn reset_package() { }
 
 // Role manipulation.
-@stub
 pub fn set_role(role_cmd: text) { }
-@stub
 pub fn is_role_enabled(rolename: text) -> bool { }
 
 // NLS / session parameters.
-@stub
 pub fn set_nls(param: text, value: text) { }
-@stub
 pub fn set_sql_trace(sql_trace: bool) { }
 
 // Session id / audit id.
-@stub
 pub fn unique_session_id() -> text { }

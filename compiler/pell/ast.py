@@ -576,6 +576,12 @@ class Module:
     loc: Loc
     name: str  # e.g. hr.employees
     items: list[Item] = field(default_factory=list)
+    # Module-level annotations: `@stub` before `module foo;` marks the
+    # whole module as signature-only (no SQL emitted, never deployed,
+    # but still registered for completion + goto-def + Find Usages).
+    # Other module-level annotations (e.g. `@deprecated`, `@since`)
+    # can land here later without parser changes.
+    annotations: list["Annotation"] = field(default_factory=list)
 
     @property
     def schema(self) -> Optional[str]:

@@ -507,21 +507,28 @@ class Emitter:
         chunks.append(self._emit_body())
         return "\n".join(chunks)
 
-    @staticmethod
-    def _is_stub_fn(fn: A.FnDef) -> bool:
-        """True iff `fn` carries the `@stub` annotation. Stub fns are
-        signature-only — emitter skips them in both spec + body, deploy
-        skips the resulting module entirely. Used for the SYS-package
-        shims in runtime/stubs/."""
+    def _is_stub_fn(self, fn: A.FnDef) -> bool:
+        """True iff `fn` is a stub. Either the fn itself is annotated
+        `@stub`, or the enclosing module is annotated `@stub` (one
+        marker for the whole file instead of one per fn). Used for the
+        SYS-package shims in runtime/stubs/."""
+        if self._is_stub_module():
+            return True
         return any(a.name == "stub" for a in fn.annotations)
 
     def _is_stub_module(self) -> bool:
-        """True iff the module has at least one fn and every fn is `@stub`.
-        A module with mixed stub + real fns emits normally (with stubs
-        skipped) — that's an unusual but legitimate shape."""
+        """True iff `@stub` annotates the module itself (preferred:
+        one marker, applies to every item) OR every pub fn is
+        individually `@stub`-annotated (legacy). A module with mixed
+        stub + real fns emits normally with stubs skipped."""
+        if any(a.name == "stub" for a in self.module.annotations):
+            return True
         if not self._fns:
             return False
-        return all(self._is_stub_fn(fn) for fn in self._fns)
+        return all(
+            any(a.name == "stub" for a in fn.annotations)
+            for fn in self._fns
+        )
 
     def emit_anon(self) -> str:
         """Emit the module as a self-contained DECLARE/BEGIN/END block.

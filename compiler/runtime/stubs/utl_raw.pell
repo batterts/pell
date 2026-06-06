@@ -4,61 +4,40 @@
 //
 // Byte-level RAW manipulation: concat, substr, cast between RAW
 // and VARCHAR2 / NUMBER, bitwise ops.
+@stub
 module utl_raw;
 
 // Concatenate up to 12 RAW values (Oracle's signature is variadic;
 // we expose the common 2-arg form).
-@stub
 pub fn concat(r1: bytes, r2: bytes) -> bytes { }
 
 // Length in bytes.
-@stub
 pub fn length(r: bytes) -> number { }
 
 // Substring (1-based positions).
-@stub
 pub fn substr(r: bytes, pos: number, len: number) -> bytes { }
 
 // Casts.
-@stub
 pub fn cast_to_raw(c: text) -> bytes { }
-@stub
 pub fn cast_to_varchar2(r: bytes) -> text { }
-@stub
 pub fn cast_to_nvarchar2(r: bytes) -> text { }
-@stub
 pub fn cast_to_number(r: bytes) -> number { }
-@stub
 pub fn cast_from_number(n: number) -> bytes { }
-@stub
 pub fn cast_to_binary_integer(r: bytes, endianess: number) -> number { }
-@stub
 pub fn cast_from_binary_integer(n: number, endianess: number) -> bytes { }
 
 // Bitwise.
-@stub
 pub fn bit_and(r1: bytes, r2: bytes) -> bytes { }
-@stub
 pub fn bit_or(r1: bytes, r2: bytes) -> bytes { }
-@stub
 pub fn bit_xor(r1: bytes, r2: bytes) -> bytes { }
-@stub
 pub fn bit_complement(r: bytes) -> bytes { }
 
 // Hex round-trip.
-@stub
 pub fn copies(r: bytes, n: number) -> bytes { }
-@stub
 pub fn xrange(start_byte: bytes, end_byte: bytes) -> bytes { }
-@stub
 pub fn reverse(r: bytes) -> bytes { }
-@stub
 pub fn compare(r1: bytes, r2: bytes, pad: bytes) -> number { }
-@stub
 pub fn convert(r: bytes, to_charset: text, from_charset: text) -> bytes { }
-@stub
 pub fn translate(r: bytes, from_set: bytes, to_set: bytes) -> bytes { }
-@stub
 pub fn transliterate(r: bytes, from_set: bytes, to_set: bytes, pad: bytes) -> bytes { }
-@stub
 pub fn overlay(overlay_str: bytes, target: bytes, pos: number, len: number, pad: bytes) -> bytes { }
