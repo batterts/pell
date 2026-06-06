@@ -1474,9 +1474,15 @@ class Emitter:
         # and then throws ORA-06503 at runtime ("function returned
         # without value"). Catch it at compile time instead.
         # Pipelined fns are excluded — they `yield` values, no `return`.
+        # Empty-bodied fns are stubs (signature-only declarations used
+        # for cross-package type inference + completion). Don't fire
+        # missing-return on them — they intentionally don't emit
+        # runnable code. Pell deploy's allow-list keeps them out of
+        # the install order, and the LSP never tries to invoke them.
         if (fn.return_type is not None
                 and not _is_unit_like(fn.return_type)
                 and not any(a.name == "pipelined" for a in fn.annotations)
+                and fn.body
                 and not _body_always_returns(fn.body)):
             raise EmitError(
                 f"function `{fn.name}` declared `-> "
@@ -6015,32 +6021,37 @@ def scan_project_definitions(
 
 def scan_project_references(
     root: Optional["Path"] = None,
-) -> dict[tuple[str, str], list["A.Loc"]]:
-    """Walk the project and collect every reference site of every
-    `pkg::name` symbol. Bare references (where the package isn't
-    explicit) are NOT included — the resolver can't know which
-    package they target without re-doing the import-aware lookup.
-    For find-usages on a project symbol, we care primarily about
-    explicit qualified calls + struct-lits, which this catches.
+) -> dict[tuple[Optional[str], str], list["A.Loc"]]:
+    """Walk the project and collect reference sites for every project
+    symbol. Two flavors of entries land in the same dict:
 
-    Returns `(pkg, name) -> [Loc, Loc, ...]` of reference sites.
+    * `(pkg, name)` — explicit qualified call site, like
+      `catalog::list_tables(...)`. Always recorded.
+    * `(None, name)` — bare call site, like `display_tables()` with no
+      qualifier. on_references merges these in when the symbol is
+      unique by name across the project; otherwise they're ignored
+      (ambiguous bare calls can't be safely attributed).
 
-    Best-effort regex pass over the source text (no AST walk) since
-    we want every textual occurrence including ones the AST drops
-    (comments don't count, but the regex is anchored on the `::`
-    syntax which doesn't appear in comments by convention).
+    Returns `(pkg_or_None, name) -> [Loc, ...]`. Best-effort regex
+    pass over source text; doesn't try to skip declaration sites
+    (the caller deduplicates against the definitions index).
     """
     import re as _re
     from pathlib import Path as _Path
-    refs: dict[tuple[str, str], list[A.Loc]] = {}
+    refs: dict[tuple[Optional[str], str], list[A.Loc]] = {}
     seen: set[_Path] = set()
     _SKIP = {"built", "out", ".git", "node_modules", "expected",
              "plsql", "dist", "build", ".venv", "venv"}
-    # Match `pkg::name` — the pkg can be a multi-segment qualifier
-    # (`std::logger::info`), in which case we record refs under the
-    # last segment as pkg + `info` as name (matching how the project
-    # registries normalize).
-    pat = _re.compile(r"\b([A-Za-z_][\w]*)::([A-Za-z_][\w]*)")
+    # Match `pkg::name`. The pkg can be a multi-segment qualifier
+    # (`std::logger::info`); we record refs under the last segment
+    # as pkg + `info` as name (matching how the project registries
+    # normalize names).
+    qual_pat = _re.compile(r"\b([A-Za-z_][\w]*)::([A-Za-z_][\w]*)")
+    # Bare call-position identifier: `name(` not preceded by `::` or
+    # `.` (would be a method call) or a word char (continuation of
+    # a longer name). Captures fn calls + struct lits at any
+    # location, including same-file usages of locally-defined fns.
+    bare_pat = _re.compile(r"(?<![\w:.])([A-Za-z_][\w]*)\s*\(")
 
     def _walk(base: _Path) -> None:
         base = base.resolve()
@@ -6059,7 +6070,7 @@ def scan_project_references(
             except Exception:
                 continue
             for line_no, line in enumerate(src.splitlines(), start=1):
-                for m in pat.finditer(line):
+                for m in qual_pat.finditer(line):
                     pkg, name = m.group(1), m.group(2)
                     loc = A.Loc(
                         file=str(path),
@@ -6067,6 +6078,14 @@ def scan_project_references(
                         col=m.start(2) + 1,
                     )
                     refs.setdefault((pkg, name), []).append(loc)
+                for m in bare_pat.finditer(line):
+                    name = m.group(1)
+                    loc = A.Loc(
+                        file=str(path),
+                        line=line_no,
+                        col=m.start(1) + 1,
+                    )
+                    refs.setdefault((None, name), []).append(loc)
 
     _walk(_Path(root) if root else _Path.cwd())
     runtime = _Path(__file__).resolve().parent.parent / "runtime"

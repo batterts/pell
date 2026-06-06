@@ -1,4 +1,5 @@
 module logger;
+import dbms_output;
 
 // ---------------------------------------------------------------------------
 // logger — minimal DBMS_OUTPUT-backed logging.

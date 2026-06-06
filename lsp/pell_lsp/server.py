@@ -129,6 +129,17 @@ def on_save(params: lsp.DidSaveTextDocumentParams) -> None:
     _validate(params.text_document.uri)
 
 
+@server.feature(lsp.WORKSPACE_DID_CHANGE_CONFIGURATION)
+def on_did_change_configuration(
+    params: lsp.DidChangeConfigurationParams,
+) -> None:
+    """LSP4IJ pushes a workspace/didChangeConfiguration notification on
+    every connect/save. We don't expose configuration knobs yet — this
+    no-op handler exists solely to silence the pygls "unknown method"
+    warning that otherwise spams the LSP console."""
+    return None
+
+
 def _validate(uri: str) -> None:
     doc = server.workspace.get_text_document(uri)
     src = doc.source
@@ -1013,15 +1024,32 @@ def on_references(
         if len(set(owners)) != 1:
             return None
         pkg = owners[0]
-    sites = refs.get((pkg, word), [])
-    out: list[lsp.Location] = []
-    for loc in sites:
-        out.append(_location_from_loc(loc))
+    sites = list(refs.get((pkg, word), []))
+    # Bare-call references — only safe to include when the symbol is
+    # unique by name across the project (otherwise we'd attribute calls
+    # to the wrong fn). Bare-call scanner over-captures: it matches
+    # locals, params, even keywords like `if (...)`. Filtering against
+    # known def names (which include kind discrimination via _is_pub
+    # at scan time) keeps the noise down.
+    owners_for_name = {k[0] for k in defs.keys() if k[1] == word}
+    if len(owners_for_name) == 1:
+        sites.extend(refs.get((None, word), []))
     # Optionally include the declaration site too — most IDEs expect it.
     if params.context.include_declaration:
         decl = defs.get((pkg, word))
         if decl is not None:
-            out.append(_location_from_loc(decl))
+            sites.append(decl)
+    # Deduplicate by (file, line, col) — bare and qualified scanners
+    # can both hit the same source position when a qualifier sits on
+    # the same line.
+    seen_keys: set[tuple[str, int, int]] = set()
+    out: list[lsp.Location] = []
+    for loc in sites:
+        key = (loc.file, loc.line, loc.col)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        out.append(_location_from_loc(loc))
     return out or None
 
 
