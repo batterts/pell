@@ -954,6 +954,30 @@ def _completions_for_line_prefix(
 # ---------------------------------------------------------------------------
 
 
+def _name_range_for_item(item: "A.Item", src: str) -> lsp.Range:
+    """Resolve the range covering an item's NAME (not its leading
+    keyword). item.loc points at `fn`/`record`/`error`; we scan
+    forward on that line for the identifier so goto-def lands the
+    cursor on the symbol — required so a follow-up Find Usages at
+    that position resolves correctly."""
+    import re
+    name = getattr(item, "name", None)
+    lines = src.splitlines()
+    line_idx = item.loc.line - 1
+    if not name or line_idx < 0 or line_idx >= len(lines):
+        return _range_from_loc(item.loc, src)
+    line = lines[line_idx]
+    start_col = max(item.loc.col - 1, 0)
+    m = re.search(r"\b" + re.escape(name) + r"\b", line[start_col:])
+    if m is None:
+        return _range_from_loc(item.loc, src)
+    name_col = start_col + m.start()
+    return lsp.Range(
+        start=lsp.Position(line=line_idx, character=name_col),
+        end=lsp.Position(line=line_idx, character=name_col + len(name)),
+    )
+
+
 @server.feature(lsp.TEXT_DOCUMENT_DEFINITION)
 def on_definition(params: lsp.DefinitionParams) -> Optional[lsp.Location]:
     uri = params.text_document.uri
@@ -969,7 +993,8 @@ def on_definition(params: lsp.DefinitionParams) -> Optional[lsp.Location]:
             if isinstance(item, (A.FnDef, A.RecordDef, A.ErrorDef)) \
                     and item.name == word:
                 return lsp.Location(
-                    uri=uri, range=_range_from_loc(item.loc, src),
+                    uri=uri,
+                    range=_name_range_for_item(item, src),
                 )
     # Cross-file: extract the qualifier (if any) and consult the
     # project definitions index. For bare `name`, we look up every

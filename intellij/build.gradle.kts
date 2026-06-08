@@ -44,7 +44,11 @@ dependencies {
         instrumentationTools()
         pluginVerifier()
         zipSigner()
+        // Platform test fixtures — enables CodeInsightTestFixture
+        // (myFixture.findUsages, rename, etc.) for headless PSI tests.
+        testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform)
     }
+    testImplementation("junit:junit:4.13.2")
 }
 
 intellijPlatform {
