@@ -1116,6 +1116,22 @@ def on_semantic_tokens_full(params: lsp.SemanticTokensParams) -> lsp.SemanticTok
 
 
 def main() -> None:
+    # Surface the running version on stderr so the IDE's LSP console
+    # banner shows which build is actually attached. Easier than
+    # squinting at the initialize trace's serverInfo JSON.
+    import sys, subprocess, os
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(__file__),
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        sha = "unknown"
+    print(
+        f"[{SERVER_NAME} v{SERVER_VERSION} @ {sha}] starting on stdio",
+        file=sys.stderr, flush=True,
+    )
     logging.basicConfig(level=logging.WARNING)
     server.start_io()
 
