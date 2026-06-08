@@ -603,6 +603,33 @@ def on_hover(params: lsp.HoverParams) -> Optional[lsp.Hover]:
     )
 
 
+def _next_ident_on_line(
+    src: str, pos: lsp.Position,
+) -> tuple[Optional[str], Optional[lsp.Range]]:
+    """Scan forward from `pos` to the next IDENT on the same line.
+    Used as a fallback for Find Usages / Rename when the cursor
+    landed on a keyword (`fn`, `record`, etc.) — we want the
+    declared name, not the keyword."""
+    lines = src.splitlines()
+    if pos.line >= len(lines):
+        return (None, None)
+    line = lines[pos.line]
+    col = min(pos.character, len(line))
+    import re
+    m = re.search(r"[A-Za-z_][A-Za-z0-9_]*", line[col:])
+    if m is None:
+        return (None, None)
+    abs_start = col + m.start()
+    abs_end = col + m.end()
+    return (
+        line[abs_start:abs_end],
+        lsp.Range(
+            start=lsp.Position(line=pos.line, character=abs_start),
+            end=lsp.Position(line=pos.line, character=abs_end),
+        ),
+    )
+
+
 def _word_at(src: str, pos: lsp.Position) -> tuple[Optional[str], Optional[lsp.Range]]:
     lines = src.splitlines()
     if pos.line >= len(lines):
@@ -1012,6 +1039,16 @@ def on_references(
     doc = server.workspace.get_text_document(uri)
     src = doc.source
     word, _ = _word_at(src, params.position)
+    # If the cursor landed on a keyword (`fn`, `record`, etc.), scan
+    # forward to the actual declaration name. IntelliJ jumps cursor to
+    # the goto-def result range and then invokes Find Usages there;
+    # before the scan_project_definitions name-loc fix shipped, the
+    # cursor would land on the keyword. Keep the fallback for users
+    # who manually click on a keyword.
+    _KEYWORDS = {"fn", "pub", "record", "error", "aggregate", "type",
+                 "enum", "sealed", "seq"}
+    if word in _KEYWORDS:
+        word, _ = _next_ident_on_line(src, params.position)
     if word is None:
         return None
     pkg = _qualifier_before(src, params.position)

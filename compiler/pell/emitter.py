@@ -6088,6 +6088,39 @@ def scan_project_records(
     return records
 
 
+def _resolve_name_loc(
+    item: "A.Item", src_lines: list[str],
+) -> "A.Loc":
+    """Given an Item with .loc pointing at the leading keyword (`fn`,
+    `record`, `error`, `aggregate`), return a Loc pointing at the
+    declaration's IDENT. Falls back to item.loc if the name can't
+    be located on that line.
+
+    Used by scan_project_definitions so goto-def lands cursor on the
+    name rather than the keyword — required for subsequent Find
+    Usages to look up the right symbol at the new cursor position.
+    """
+    import re as _re
+    name = getattr(item, "name", None)
+    if not name or item.loc.line - 1 >= len(src_lines):
+        return item.loc
+    line = src_lines[item.loc.line - 1]
+    # The keyword sits at item.loc.col (1-based). Scan forward for
+    # the IDENT matching `name` after that column.
+    start_col = max(item.loc.col - 1, 0)
+    m = _re.search(
+        r"\b" + _re.escape(name) + r"\b",
+        line[start_col:],
+    )
+    if m is None:
+        return item.loc
+    return A.Loc(
+        file=item.loc.file,
+        line=item.loc.line,
+        col=start_col + m.start() + 1,  # back to 1-based
+    )
+
+
 def scan_project_definitions(
     root: Optional["Path"] = None,
 ) -> dict[tuple[str, str], "A.Loc"]:
@@ -6120,9 +6153,11 @@ def scan_project_definitions(
             if any(p in _SKIP for p in rel_parts[:-1]):
                 continue
             try:
-                mod = _parse(path.read_text(encoding="utf-8"), str(path))
+                src = path.read_text(encoding="utf-8")
+                mod = _parse(src, str(path))
             except Exception:
                 continue
+            src_lines = src.splitlines()
             pkg = mod.name.replace(".", "_").replace("::", "_")
             short = mod.name.split(".")[-1].split("::")[-1]
             for item in mod.items:
@@ -6131,11 +6166,18 @@ def scan_project_definitions(
                     continue
                 if not getattr(item, "is_pub", False):
                     continue
-                out[(pkg, item.name)] = item.loc
+                # Resolve the NAME's location, not the keyword's. Parser
+                # stores item.loc on the `fn`/`record`/`error`/`aggregate`
+                # keyword; for navigation we want the cursor to land on
+                # the identifier so Find Usages at that position resolves
+                # to the symbol (IDE jumps cursor to goto-def result, then
+                # subsequent Find Usages searches the name at that position).
+                name_loc = _resolve_name_loc(item, src_lines)
+                out[(pkg, item.name)] = name_loc
                 # Also under the short form for dotted modules so
                 # `logger::info` from `std::logger` finds the same loc.
                 if short != pkg:
-                    out[(short, item.name)] = item.loc
+                    out[(short, item.name)] = name_loc
 
     _walk(_Path(root) if root else _Path.cwd())
     runtime = _Path(__file__).resolve().parent.parent / "runtime"
