@@ -31,7 +31,7 @@ from . import semantic_tokens as _semtok
 
 
 SERVER_NAME = "pell-lsp"
-SERVER_VERSION = "0.0.1"
+SERVER_VERSION = "0.5.0"
 
 logger = logging.getLogger(SERVER_NAME)
 
