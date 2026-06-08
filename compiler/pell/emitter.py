@@ -3232,6 +3232,84 @@ class Emitter:
             return cur, cur
         return None, None
 
+    def _lift_listlit_args(
+        self, call: A.Call, indent: str,
+    ) -> tuple[list[str], A.Call]:
+        """Lift any ListLit argument to a pre-declared local with literal
+        assigns. PL/SQL has no list-literal expression syntax; pell's
+        `foo([1, 2, 3])` would otherwise fall through to the emitter's
+        \"unhandled\" TODO. We synthesize:
+
+            l_pell_arg_N t_number_list;
+            ...
+            l_pell_arg_N(1) := 1;
+            l_pell_arg_N(2) := 2;
+            l_pell_arg_N(3) := 3;
+            target := foo(l_pell_arg_N);
+
+        Returns (pre_statement_lines, call_with_ListLits_replaced_by_idents).
+        When no ListLit args are present, returns ([], call_unchanged) so
+        the caller can use this unconditionally.
+
+        Element type is inferred from the literal values (NumberLit ->
+        number, TextLit -> text, BoolLit -> bool); mixed or empty lists
+        default to text.
+        """
+        if not any(isinstance(a, A.ListLit) for a in call.args):
+            return [], call
+        # Intrinsic callees (json::array, sql!{}, jq! macros, etc.)
+        # *want* the raw ListLit — they have specialized handlers that
+        # inspect the literal elements. Leave their args alone.
+        if isinstance(call.callee, A.Ident) and self._is_intrinsic_call(
+            call.callee.name,
+        ):
+            return [], call
+        pre_lines: list[str] = []
+        new_args: list[A.Expr] = []
+        for arg in call.args:
+            if not isinstance(arg, A.ListLit):
+                new_args.append(arg)
+                continue
+            elem_pell = self._infer_listlit_elem_type(arg)
+            self._sql_var_counter += 1
+            tmp_name = f"pell_arg_{self._sql_var_counter}"
+            elem_sql = self._lt(A.PrimType(loc=arg.loc, name=elem_pell))
+            list_type = f"t_{elem_pell}_list"
+            if list_type not in self._list_types_emitted:
+                self._list_type_decls.append(
+                    f"  TYPE {list_type} IS TABLE OF {elem_sql} "
+                    f"INDEX BY PLS_INTEGER;"
+                )
+                self._list_types_emitted.add(list_type)
+            local_var = local_name(tmp_name)
+            self._decl(f"{local_var} {list_type};")
+            for i, el in enumerate(arg.elements, start=1):
+                pre_lines.append(
+                    f"{indent}{local_var}({i}) := {self._emit_expr(el)};"
+                )
+            new_args.append(A.Ident(loc=arg.loc, name=tmp_name))
+        new_call = A.Call(
+            loc=call.loc,
+            callee=call.callee,
+            args=new_args,
+            type_args=list(call.type_args),
+            kwargs=dict(call.kwargs),
+        )
+        return pre_lines, new_call
+
+    @staticmethod
+    def _infer_listlit_elem_type(lit: A.ListLit) -> str:
+        if not lit.elements:
+            return "text"
+        first = lit.elements[0]
+        if isinstance(first, A.NumberLit):
+            return "number"
+        if isinstance(first, A.TextLit):
+            return "text"
+        if isinstance(first, A.BoolLit):
+            return "bool"
+        return "text"
+
     def _emit_call_assignment(self, target: str, call: A.Call, indent: str) -> list[str]:
         # `.collect()` on a SELECT → BULK COLLECT INTO
         if isinstance(call.callee, A.MemberAccess) and call.callee.field == "collect":
@@ -3261,7 +3339,8 @@ class Emitter:
             recv = call.callee.obj
             if isinstance(recv, A.SqlBlock) and recv.is_dml:
                 return self._emit_dml_with_rowcount(target, recv, indent)
-        return [f"{indent}{target} := {self._emit_expr(call)};"]
+        pre_lines, call = self._lift_listlit_args(call, indent)
+        return pre_lines + [f"{indent}{target} := {self._emit_expr(call)};"]
 
     def _emit_bulk_collect_into(self, target: str, sql: A.SqlBlock, indent: str) -> list[str]:
         """Lower `<sql_select>.collect()` to `SELECT … BULK COLLECT INTO target …`."""
@@ -3540,6 +3619,14 @@ class Emitter:
             )
             let_lines = self._emit_let(let_stmt, indent)
             return prefix + let_lines + [f"{indent}RETURN {local_name(tmp_name)};"]
+        # `return foo([1,2,3]);` — lift ListLit args to pre-declared
+        # locals before emitting the call.
+        if isinstance(s.value, A.Call):
+            pre, call = self._lift_listlit_args(s.value, indent)
+            if pre:
+                return prefix + pre + [
+                    f"{indent}RETURN {self._emit_expr(call)};"
+                ]
         return prefix + [f"{indent}RETURN {self._emit_expr(s.value)};"]
 
     def _record_return_temp(self, sl: A.StructLit) -> Optional[tuple[str, str, list[str]]]:
@@ -4539,7 +4626,13 @@ class Emitter:
         # built-ins, opaque OBJECT methods) stay permissive because we
         # don't have signatures for them.
         self._reject_unused_return(e, s.loc)
-        # Side-effecting expression (Call / pipeline / try-call / etc.)
+        # Side-effecting expression (Call / pipeline / try-call / etc.).
+        # If it's a Call with ListLit args, lift them to pre-declared
+        # locals so the emitter doesn't fall through to /* TODO: ListLit
+        # unhandled */.
+        if isinstance(e, A.Call):
+            pre, e = self._lift_listlit_args(e, indent)
+            return pre + [f"{indent}{self._emit_expr(e)};"]
         return [f"{indent}{self._emit_expr(e)};"]
 
     def _reject_unused_return(self, e: A.Expr, loc: Any) -> None:
