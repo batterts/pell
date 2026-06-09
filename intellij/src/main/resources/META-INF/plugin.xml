@@ -739,11 +739,15 @@ END employees;
         <renamePsiElementProcessor
             implementation="dev.pell.intellij.refactor.PellRenameProcessor" />
 
-        <!-- Extract Method (Cmd-Opt-M). Wraps a contiguous stmt selection
-             in a new pub fn / fn and replaces the selection with a call.
-             Captured locals become parameters. -->
-        <refactoring.extractMethod
-            implementation="dev.pell.intellij.refactor.extract.PellExtractMethodHandler" />
+        <!-- Refactoring support — surfaces Extract Method
+             (Cmd-Alt-M / Refactor ▸ Extract Method…) and drives the
+             "Refactor This" popup + in-place rename availability.
+             Replaces the bogus <refactoring.extractMethod> EP, which
+             doesn't exist and was silently ignored (so Extract Method
+             never appeared in the menu). -->
+        <lang.refactoringSupport
+            language="pell"
+            implementationClass="dev.pell.intellij.refactor.PellRefactoringSupportProvider" />
 
         <!-- PSI-backed autocomplete (Ctrl-Space). Adds primitive types,
              keywords, project pub fn / record names, and in-scope locals

@@ -1,5 +1,6 @@
 package dev.pell.intellij.refactor.move
 
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
@@ -36,6 +37,9 @@ import dev.pell.intellij.symbols.index.PellProjectIndex
  * PSI TRACK — owned by the PSI work stream. See intellij/PSI_TRACK.md.
  */
 class PellMoveSymbolAction : AnAction() {
+
+    override fun getActionUpdateThread(): ActionUpdateThread =
+        ActionUpdateThread.BGT
 
     override fun update(e: AnActionEvent) {
         e.presentation.isEnabledAndVisible = e.getData(CommonDataKeys.PSI_FILE) is PellFile
