@@ -62,7 +62,10 @@ class PellExtractMethodHandler : RefactoringActionHandler {
         // No-op: Extract Method is editor-driven.
     }
 
-    private fun applyExtract(
+    // internal (not private) so headless tests can drive the
+    // transformation directly, bypassing the modal name/visibility
+    // dialogs that invoke() shows.
+    internal fun applyExtract(
         project: Project,
         file: PellFile,
         editor: Editor,
@@ -90,16 +93,20 @@ class PellExtractMethodHandler : RefactoringActionHandler {
             val argList = analysis.capturedParams.joinToString(", ") { it.name }
             val callText = "$name($argList);"
 
-            // Replace the selected stmt range with the call site.
+            // Order matters: insert the extracted fn FIRST, at the end of
+            // the enclosing fn (which is AFTER the selection), so the
+            // selection offsets stay valid. Replacing the selection first
+            // would shrink the document and invalidate enclosingRange.end
+            // (the original IndexOutOfBoundsException).
+            val enclosingRange = analysis.enclosingFnOrMethod.textRange
+            doc.insertString(enclosingRange.endOffset, "\n\n$fnText")
+
+            // Now replace the selected stmt range with the call site.
             doc.replaceString(
                 analysis.selectionRange.startOffset,
                 analysis.selectionRange.endOffset,
                 callText,
             )
-
-            // Insert the extracted fn after the enclosing fn declaration.
-            val enclosingRange = analysis.enclosingFnOrMethod.textRange
-            doc.insertString(enclosingRange.endOffset, "\n\n$fnText")
 
             pm.commitDocument(doc)
         })

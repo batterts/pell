@@ -699,6 +699,17 @@ END employees;
             implementation="dev.pell.intellij.psi.PellReferenceContributor" />
         -->
 
+        <!-- Element manipulators — tell the platform how to rewrite a
+             reference-bearing element's text. Rename's
+             handleElementRename delegates here; without them it throws
+             "No ElementManipulator instance registered". -->
+        <lang.elementManipulator
+            forClass="dev.pell.intellij.psi.impl.PellQualifiedExprMixin"
+            implementationClass="dev.pell.intellij.psi.PellQualifiedExprManipulator" />
+        <lang.elementManipulator
+            forClass="dev.pell.intellij.psi.impl.PellTypeRefMixin"
+            implementationClass="dev.pell.intellij.psi.PellTypeRefManipulator" />
+
         <!-- Find Usages (Cmd-G / Edit ▸ Find Usages). Re-enabled in
              Week 2 — disabling it knee-capped Rename's cross-file
              scope too, since IntelliJ's ReferencesSearch walks the

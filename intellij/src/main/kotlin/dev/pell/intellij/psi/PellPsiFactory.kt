@@ -55,4 +55,21 @@ object PellPsiFactory {
         val file = fileFromText(project, "module x; fn f() { let _ = $type { $body }; }")
         return PsiTreeUtil.findChildOfType(file, PellQualifiedExpr::class.java)
     }
+
+    /** Parse a qualified expression (`foo`, `foo::bar::baz`) from text.
+     *  Used by the rename ElementManipulator to rebuild a reference
+     *  after splicing the new name into its text. */
+    fun createQualifiedExpr(project: Project, exprText: String): PellQualifiedExpr {
+        val file = fileFromText(project, "module x; fn f() { let _ = $exprText; }")
+        return PsiTreeUtil.findChildOfType(file, PellQualifiedExpr::class.java)
+            ?: error("could not parse qualified expr from '$exprText'")
+    }
+
+    /** Parse a type reference (`Foo`, `list<Foo>`, `pkg::Foo`) from
+     *  text. Used by the rename ElementManipulator for type refs. */
+    fun createTypeRef(project: Project, typeText: String): PellTypeRef {
+        val file = fileFromText(project, "module x; fn f(p: $typeText) {}")
+        return PsiTreeUtil.findChildOfType(file, PellTypeRef::class.java)
+            ?: error("could not parse type ref from '$typeText'")
+    }
 }
