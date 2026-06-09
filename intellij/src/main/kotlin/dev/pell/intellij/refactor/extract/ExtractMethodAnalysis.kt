@@ -41,6 +41,10 @@ data class ExtractMethodAnalysis(
     /** Identifiers read inside the selection that resolve to locals
      *  declared OUTSIDE the selection — these become parameters. */
     val capturedParams: List<CapturedParam>,
+    /** Locals DECLARED inside the selection that are read AFTER it —
+     *  these become the extracted fn's return value, and the call site
+     *  rebinds them with `let <name> = <fn>(...)`. */
+    val outputs: List<Output>,
     /** True if a `return` statement appears inside the selection. */
     val containsReturn: Boolean,
     /** True if a `?` operator appears inside the selection (propagation). */
@@ -49,6 +53,10 @@ data class ExtractMethodAnalysis(
     val rejectionReason: String?,
 ) {
     data class CapturedParam(val name: String, val declaration: PsiElement)
+
+    /** A value produced by the selection and consumed after it.
+     *  `typeText` is the declared pell type (or "any" if unannotated). */
+    data class Output(val name: String, val typeText: String)
 
     val isExtractable: Boolean get() = rejectionReason == null
 }
@@ -96,6 +104,7 @@ object ExtractMethodAnalyzer {
         // Identifier analysis: collect every IDENT in the selection that's
         // a free variable (not declared inside the selection).
         val captured = collectCapturedParams(selectedStmts)
+        val outputs = collectOutputs(selectedStmts, enclosingFn, effectiveRange)
         val hasReturn = selectedStmts.any { PsiTreeUtil.findChildOfType(it, PellReturnStmt::class.java) != null }
         val hasQuestion = selectedStmts.any {
             PsiTreeUtil.findChildrenOfType(it, PsiElement::class.java)
@@ -107,16 +116,71 @@ object ExtractMethodAnalyzer {
         if (hasReturn && selectedStmts.size > 1) {
             return ExtractMethodAnalysis(
                 effectiveRange, startBlock, enclosingFn, selectedStmts, captured,
-                hasReturn, hasQuestion,
+                outputs, hasReturn, hasQuestion,
                 rejectionReason = "selection contains `return` and other stmts — split the return into its own extraction",
+            )
+        }
+        // v0 returns at most one value. Multiple outputs would need a
+        // record return — reject with a clear message for now.
+        if (outputs.size > 1) {
+            return ExtractMethodAnalysis(
+                effectiveRange, startBlock, enclosingFn, selectedStmts, captured,
+                outputs, hasReturn, hasQuestion,
+                rejectionReason = "selection produces ${outputs.size} values used later " +
+                    "(${outputs.joinToString(", ") { it.name }}) — v0 can only return one. " +
+                    "Narrow the selection.",
             )
         }
 
         return ExtractMethodAnalysis(
             effectiveRange, startBlock, enclosingFn, selectedStmts, captured,
-            hasReturn, hasQuestion,
+            outputs, hasReturn, hasQuestion,
             rejectionReason = null,
         )
+    }
+
+    /**
+     * Locals declared inside the selection (let/var) that are READ after
+     * the selection, within the enclosing fn. Each becomes the extracted
+     * fn's return value. The declared type annotation (if any) carries
+     * through so the call site rebinds with the right type.
+     */
+    private fun collectOutputs(
+        stmts: List<PellStmt>,
+        enclosingFn: PsiElement,
+        selectionRange: TextRange,
+    ): List<ExtractMethodAnalysis.Output> {
+        // name -> declared type text (or "any"), for let/var declared in selection.
+        val declaredInSelection = LinkedHashMap<String, String>()
+        for (s in stmts) {
+            PsiTreeUtil.findChildrenOfType(s, PellLetStmt::class.java).forEach { l ->
+                l.name?.let { declaredInSelection[it] = letOrVarType(l) }
+            }
+            PsiTreeUtil.findChildrenOfType(s, PellVarStmt::class.java).forEach { v ->
+                v.name?.let { declaredInSelection[it] = letOrVarType(v) }
+            }
+        }
+        if (declaredInSelection.isEmpty()) return emptyList()
+
+        // Which of those names are referenced AFTER the selection?
+        val usedAfter = LinkedHashSet<String>()
+        PsiTreeUtil.findChildrenOfType(enclosingFn, PsiElement::class.java)
+            .filter { it.node?.elementType == PellElementTypes.IDENT }
+            .filter { it.textRange.startOffset >= selectionRange.endOffset }
+            .forEach { if (it.text in declaredInSelection) usedAfter.add(it.text) }
+
+        return usedAfter.map {
+            ExtractMethodAnalysis.Output(it, declaredInSelection[it] ?: "any")
+        }
+    }
+
+    /** The declared type of a `let`/`var` stmt as source text, or "any"
+     *  when the binding is unannotated. */
+    private fun letOrVarType(decl: PsiElement): String {
+        val typeRef = PsiTreeUtil.findChildOfType(
+            decl, dev.pell.intellij.psi.PellTypeRef::class.java,
+        )
+        return typeRef?.text ?: "any"
     }
 
     private fun rejection(file: PellFile, msg: String): ExtractMethodAnalysis = ExtractMethodAnalysis(
@@ -126,6 +190,7 @@ object ExtractMethodAnalyzer {
         enclosingFnOrMethod = file,
         selectedStmts = emptyList(),
         capturedParams = emptyList(),
+        outputs = emptyList(),
         containsReturn = false,
         containsQuestionMark = false,
         rejectionReason = msg,

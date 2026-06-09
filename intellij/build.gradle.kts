@@ -26,7 +26,7 @@ plugins {
 }
 
 group = "dev.pell"
-version = "0.5.1"
+version = "0.5.2"
 
 repositories {
     mavenCentral()

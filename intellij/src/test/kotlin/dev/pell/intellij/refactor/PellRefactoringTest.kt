@@ -118,6 +118,45 @@ class PellRefactoringTest : BasePlatformTestCase() {
         assertTrue("captured x as param", result.contains("printed(x)"))
     }
 
+    /** A local declared in the selection but used after it must be
+     *  RETURNED, and the call site rebinds it. (User-reported bug:
+     *  `let kv = ...` got swallowed into the extracted fn, leaving
+     *  `return kv;` referencing nothing.) */
+    fun testExtractMethodWithOutput() {
+        myFixture.configureByText(
+            "a.pell",
+            """
+            module a;
+
+            pub fn parse_kv(s: text) -> KV {
+                let kv: KV = re::capture::<KV>(s, /x/);
+                return kv;
+            }
+            """.trimIndent(),
+        )
+        val text = myFixture.file.text
+        val start = text.indexOf("    let kv")
+        val end = text.indexOf(";", start) + 1
+        myFixture.editor.selectionModel.setSelection(start, end)
+
+        val file = myFixture.file as PellFile
+        val analysis = ExtractMethodAnalyzer.analyze(file, myFixture.editor)
+        assertTrue("extractable: ${analysis.rejectionReason}", analysis.isExtractable)
+        assertEquals("one output (kv)", 1, analysis.outputs.size)
+        assertEquals("kv", analysis.outputs.first().name)
+        assertEquals("KV", analysis.outputs.first().typeText)
+
+        PellExtractMethodHandler().applyExtract(
+            project, file, myFixture.editor, analysis, "extract_kv", false,
+        )
+        val r = myFixture.file.text
+        // Extracted fn returns KV and ends with `return kv;`.
+        assertTrue("fn returns KV", r.contains("fn extract_kv(s: any) -> KV"))
+        assertTrue("fn returns the output", r.contains("return kv;"))
+        // Call site rebinds kv so `return kv;` in parse_kv still resolves.
+        assertTrue("call rebinds kv", r.contains("let kv: KV = extract_kv(s);"))
+    }
+
     // ---- Parameters to Record ------------------------------------------
 
     fun testParamsToRecord() {
