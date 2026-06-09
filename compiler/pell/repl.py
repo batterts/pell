@@ -427,6 +427,14 @@ class Repl:
         """Populate the project signature + record registries from the cwd."""
         self._project_signatures = scan_project_signatures()
         self._project_records = scan_project_records()
+        # The emitter needs the (pkg, name) -> RecordDef form (distinct
+        # from the completion-oriented name -> fields map above) so that
+        # cross-package record constructors resolve in cells.
+        from .emitter import scan_project_records as _emitter_scan_records
+        try:
+            self._project_records_emit = _emitter_scan_records()
+        except Exception:
+            self._project_records_emit = {}
 
     # -- main loop ---------------------------------------------------------
 
@@ -584,7 +592,8 @@ class Repl:
         if not stmts:
             try:
                 emit_anon_block(self.items, [], target=self.target,
-                                project_signatures=self._project_signatures)
+                                project_signatures=self._project_signatures,
+                                project_records=getattr(self, '_project_records_emit', None))
             except EmitError as e:
                 print(f"  ! compile error: {e}", file=sys.stderr)
             return
@@ -603,7 +612,8 @@ class Repl:
         try:
             block = emit_anon_block(self.items, full_stmts, target=self.target,
                                     source_path=f"<cell {self.cell_number}>",
-                                    project_signatures=self._project_signatures)
+                                    project_signatures=self._project_signatures,
+                                project_records=getattr(self, '_project_records_emit', None))
         except EmitError as e:
             print(f"  ! compile error: {e}", file=sys.stderr)
             return
@@ -976,7 +986,8 @@ class Repl:
             try:
                 replay = self._snapshot_to_stmts()
                 block = emit_anon_block(self.items, replay, target=self.target,
-                                        project_signatures=self._project_signatures)
+                                        project_signatures=self._project_signatures,
+                                project_records=getattr(self, '_project_records_emit', None))
             except EmitError as e:
                 print(f"  ! {e}", file=sys.stderr)
                 return None
@@ -1022,7 +1033,8 @@ class Repl:
         # the running anon block (the user can edit by hand).
         try:
             block = emit_anon_block(self.items, [], target=self.target,
-                                project_signatures=self._project_signatures)
+                                project_signatures=self._project_signatures,
+                                project_records=getattr(self, '_project_records_emit', None))
         except EmitError as e:
             print(f"  ! {e}", file=sys.stderr)
             return

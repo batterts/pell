@@ -2000,10 +2000,27 @@ class Emitter:
                 lines: list[str] = []
                 for f in rec.fields:
                     if f.name in provided:
-                        val = self._emit_expr(provided[f.name])
-                        lines.append(f"{indent}{target}.{f.name.lower()} := {val};")
+                        lines += self._emit_record_field_assign(
+                            f"{target}.{f.name.lower()}", provided[f.name], indent,
+                        )
                 return lines
         return [f"{indent}{target} := {self._emit_expr(expr)};"]
+
+    def _emit_record_field_assign(
+        self, field_target: str, value: A.Expr, indent: str,
+    ) -> list[str]:
+        """Assign `value` to a record field. List-literal values can't be
+        assigned wholesale (PL/SQL has no list literal) — they become
+        index-wise assigns into the field's collection. Everything else
+        is a plain `field := <expr>;`."""
+        if isinstance(value, A.ListLit):
+            lines: list[str] = []
+            for i, el in enumerate(value.elements, start=1):
+                lines.append(
+                    f"{indent}{field_target}({i}) := {self._emit_expr(el)};"
+                )
+            return lines
+        return [f"{indent}{field_target} := {self._emit_expr(value)};"]
 
     def _suggest_record_def(self, sl: A.StructLit) -> str:
         """Build a copy-pasteable `record Foo { ... }` definition by
@@ -3255,7 +3272,13 @@ class Emitter:
         number, TextLit -> text, BoolLit -> bool); mixed or empty lists
         default to text.
         """
-        if not any(isinstance(a, A.ListLit) for a in call.args):
+        def _liftable_struct(a: A.Expr) -> bool:
+            return (isinstance(a, A.StructLit)
+                    and a.type_name not in self._type_names
+                    and self._resolve_struct_lit_record(a) is not None)
+
+        if not any(isinstance(a, A.ListLit) or _liftable_struct(a)
+                   for a in call.args):
             return [], call
         # Intrinsic callees (json::array, sql!{}, jq! macros, etc.)
         # *want* the raw ListLit — they have specialized handlers that
@@ -3267,6 +3290,31 @@ class Emitter:
         pre_lines: list[str] = []
         new_args: list[A.Expr] = []
         for arg in call.args:
+            # Record struct-lit arg: PL/SQL records have no inline
+            # constructor, so lift to a temp local of the record type,
+            # populate field-by-field, and pass the temp.
+            if _liftable_struct(arg):
+                assert isinstance(arg, A.StructLit)
+                rec = self._resolve_struct_lit_record(arg)
+                assert rec is not None
+                _, owning_pkg = self._lookup_record_with_pkg(arg.type_name)
+                rec_type = (
+                    f"{owning_pkg}.{_record_type_name(rec.name)}"
+                    if owning_pkg is not None
+                    else _record_type_name(rec.name)
+                )
+                self._sql_var_counter += 1
+                tmp_name = f"pell_arg_{self._sql_var_counter}"
+                tmp = local_name(tmp_name)
+                self._decl(f"{tmp} {rec_type};")
+                provided = {f.name: f.value for f in arg.fields}
+                for fld in rec.fields:
+                    if fld.name in provided:
+                        pre_lines += self._emit_record_field_assign(
+                            f"{tmp}.{fld.name.lower()}", provided[fld.name], indent,
+                        )
+                new_args.append(A.Ident(loc=arg.loc, name=tmp_name))
+                continue
             if not isinstance(arg, A.ListLit):
                 new_args.append(arg)
                 continue
@@ -3653,8 +3701,9 @@ class Emitter:
         lines: list[str] = []
         for f in rec.fields:
             if f.name in provided:
-                val = self._emit_expr(provided[f.name])
-                lines.append(f"    {temp_name}.{f.name.lower()} := {val};")
+                lines += self._emit_record_field_assign(
+                    f"{temp_name}.{f.name.lower()}", provided[f.name], "    ",
+                )
         return temp_name, decl_type, lines
 
     def _emit_err_return(self, payload_expr: A.Expr, indent: str) -> list[str]:
@@ -6266,6 +6315,7 @@ def emit_anon_block(
     *,
     source_path: Optional[str] = None,
     project_signatures: Optional[dict[str, "A.TypeRef"]] = None,
+    project_records: Optional[dict[tuple[str, str], "A.RecordDef"]] = None,
 ) -> str:
     """Emit a cell (items + top-level statements) as a self-contained
     anonymous PL/SQL block. Used by `pell exec` and the REPL.
@@ -6278,6 +6328,11 @@ def emit_anon_block(
     of pub fns from sibling .pell files in the same project. Lets the
     emitter infer types of cross-package calls without the user
     annotating the let.
+
+    `project_records` is the matching `(pkg, name) → RecordDef` map so
+    cross-package record constructors (`pkg::Args { … }`, or a bare
+    `Args { … }` when `import pkg;` is in the cell) resolve in the REPL
+    and `pell exec` the same way they do in `pell build`.
     """
     loc = A.Loc(file=source_path or "<cell>", line=1, col=1)
     if stmts:
@@ -6305,4 +6360,8 @@ def emit_anon_block(
     )
     if project_signatures:
         emitter._project_signatures = dict(project_signatures)
+    if project_records:
+        emitter._project_records = dict(project_records)
+        for (pkg, name), rec in project_records.items():
+            emitter._project_records_by_name.setdefault(name, []).append((pkg, rec))
     return emitter.emit_anon()
