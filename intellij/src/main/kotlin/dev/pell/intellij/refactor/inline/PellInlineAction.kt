@@ -81,7 +81,18 @@ class PellInlineAction : AnAction() {
             null,
         )
         if (confirm != Messages.YES) return
+        doInlineFn(project, file, fn, name, bodyExprText)
+    }
 
+    // internal so headless tests drive the transformation without the
+    // single-expr check + confirm dialog.
+    internal fun doInlineFn(
+        project: Project,
+        file: PellFile,
+        fn: PellFnDef,
+        name: String,
+        bodyExprText: String,
+    ) {
         WriteCommandAction.runWriteCommandAction(project, "Inline fn `$name`", null, Runnable {
             val pm = PsiDocumentManager.getInstance(project)
             val callOps = PellProjectIndex.getInstance(project).findByName(name)

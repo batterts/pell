@@ -117,4 +117,127 @@ class PellRefactoringTest : BasePlatformTestCase() {
         // `x` is read inside the selection but bound outside → a param.
         assertTrue("captured x as param", result.contains("printed(x)"))
     }
+
+    // ---- Parameters to Record ------------------------------------------
+
+    fun testParamsToRecord() {
+        myFixture.configureByText(
+            "a.pell",
+            """
+            module a;
+
+            pub fn greet(name: text, age: number) -> text {
+                return name;
+            }
+            """.trimIndent(),
+        )
+        val file = myFixture.file as PellFile
+        val fn = com.intellij.psi.util.PsiTreeUtil.findChildOfType(
+            file, dev.pell.intellij.psi.PellFnDef::class.java,
+        )!!
+        val params = com.intellij.psi.util.PsiTreeUtil.findChildrenOfType(
+            fn, dev.pell.intellij.psi.PellParam::class.java,
+        ).toList()
+        dev.pell.intellij.refactor.paramsToRecord.PellParamsToRecordHandler()
+            .applyExtract(project, file, fn, "greet", params, "GreetArgs", "args")
+        val r = myFixture.file.text
+        assertTrue("record synthesized", r.contains("pub record GreetArgs {"))
+        assertTrue("field name", r.contains("name: text"))
+        assertTrue("field age", r.contains("age: number"))
+        assertTrue("signature rewritten", r.contains("args: GreetArgs"))
+        assertTrue("body ref rewritten", r.contains("return args.name"))
+    }
+
+    // ---- Inline --------------------------------------------------------
+
+    fun testInlineFn() {
+        myFixture.configureByText(
+            "a.pell",
+            """
+            module a;
+
+            pub fn one() -> number {
+                return 1;
+            }
+
+            pub fn use_it() -> number {
+                return one() + one();
+            }
+            """.trimIndent(),
+        )
+        val file = myFixture.file as PellFile
+        val fn = com.intellij.psi.util.PsiTreeUtil.findChildrenOfType(
+            file, dev.pell.intellij.psi.PellFnDef::class.java,
+        ).first { it.name == "one" }
+        dev.pell.intellij.refactor.inline.PellInlineAction()
+            .doInlineFn(project, file, fn, "one", "return 1")
+        val r = myFixture.file.text
+        assertFalse("declaration removed", r.contains("pub fn one()"))
+        assertTrue("call sites inlined", r.contains("(return 1)"))
+    }
+
+    // ---- Move ----------------------------------------------------------
+
+    fun testMoveSymbol() {
+        val dest = myFixture.addFileToProject(
+            "dest.pell",
+            """
+            module dest;
+
+            pub fn existing() -> number {
+                return 0;
+            }
+            """.trimIndent(),
+        ) as PellFile
+        myFixture.configureByText(
+            "src.pell",
+            """
+            module src;
+
+            pub fn mover() -> number {
+                return 99;
+            }
+            """.trimIndent(),
+        )
+        val file = myFixture.file as PellFile
+        val target = com.intellij.psi.util.PsiTreeUtil.findChildOfType(
+            file, dev.pell.intellij.psi.PellFnDef::class.java,
+        )!!
+        dev.pell.intellij.refactor.move.PellMoveSymbolAction()
+            .doMove(project, file, target, dest, "dest")
+        assertFalse("removed from source", myFixture.file.text.contains("mover"))
+        assertTrue("added to dest", dest.text.contains("pub fn mover()"))
+    }
+
+    // ---- Change Signature ----------------------------------------------
+
+    fun testChangeSignature() {
+        myFixture.configureByText(
+            "a.pell",
+            """
+            module a;
+
+            pub fn greet(name: text) -> text {
+                return name;
+            }
+            """.trimIndent(),
+        )
+        val file = myFixture.file as PellFile
+        val fn = com.intellij.psi.util.PsiTreeUtil.findChildOfType(
+            file, dev.pell.intellij.psi.PellFnDef::class.java,
+        )!!
+        val body = com.intellij.psi.util.PsiTreeUtil.findChildOfType(
+            fn, dev.pell.intellij.psi.PellBlock::class.java,
+        )!!
+        val sigStart = fn.textRange.startOffset
+        val sigEnd = body.textRange.startOffset
+        dev.pell.intellij.refactor.signature.PellChangeSignatureAction()
+            .doChangeSignature(
+                project, file, sigStart, sigEnd,
+                "pub fn greet(name: text, loud: bool) -> text", true,
+            )
+        val r = myFixture.file.text
+        assertTrue("new param added", r.contains("loud: bool"))
+        assertTrue("body untouched", r.contains("return name;"))
+    }
 }
