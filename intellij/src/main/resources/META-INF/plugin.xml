@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.4.1</version>
+    <version>0.5.2</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,48 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.5.2 — Refactorings actually work now</h3>
+        <p><b>The PSI refactoring + navigation stack is real.</b> Every
+        feature below is covered by headless platform tests that run the
+        true IntelliJ pipelines (ReferencesSearch, rename, extract), so
+        they don't silently rot.</p>
+        <ul>
+          <li><b>Find Usages works</b> — same-file and across files.
+              The root cause was deep: Grammar-Kit's generated PSI
+              elements aren't <code>ContributedReferenceHost</code>, so
+              the reference contributor's references were silently
+              dropped. References are now attached via
+              <code>getReference()</code> mixins, which the platform
+              consults unconditionally.</li>
+          <li><b>All five refactorings work and appear in the Refactor
+              menu:</b>
+              <ul>
+                <li><b>Rename</b> — declaration + every call site,
+                    same-file and cross-file (needed
+                    <code>ElementManipulator</code>s).</li>
+                <li><b>Extract Method</b> — captures inputs as params
+                    AND <i>outputs</i>: a local declared in the
+                    selection but used afterwards is returned from the
+                    new fn and rebound at the call site.</li>
+                <li><b>Parameters → Record</b> — synthesizes the record,
+                    rewrites the signature + body refs + call sites.</li>
+                <li><b>Move Symbol</b> — moves the declaration (with its
+                    leading <code>pub</code> / annotations) to another
+                    module.</li>
+                <li><b>Inline</b> and <b>Change Signature</b>.</li>
+              </ul>
+              Extract Method is now wired through a real
+              <code>RefactoringSupportProvider</code>; the four action
+              refactorings got the required
+              <code>getActionUpdateThread()</code> so they show on
+              modern IntelliJ.</li>
+          <li><b>Go-to-definition</b> lands the cursor on the symbol
+              name, not the leading <code>fn</code>/<code>record</code>
+              keyword — so a follow-up Find Usages resolves correctly.</li>
+          <li><b>Cross-package records</b> resolve from the REPL and
+              <code>pell exec</code> the same as in a build, including
+              dotted modules referred to by their short name.</li>
+        </ul>
         <h3>0.4.1 — Parsed-lookup index (O(1) symbol resolution)</h3>
         <p><b>Performance + architecture cleanup.</b> Every symbol
         lookup (inspections, refactorings, completion, references)
