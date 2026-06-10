@@ -25,12 +25,21 @@ def test_hello_world():
 
 def test_module_name_mangling():
     sql = compile_to_sql("""
+        module hr::employees;
+        pub fn ping() {}
+    """)
+    # Schema is the `::` prefix; the dotted path is the package name.
+    assert "CREATE OR REPLACE PACKAGE hr.employees AS" in sql
+    assert "CREATE OR REPLACE PACKAGE BODY hr.employees AS" in sql
+
+
+def test_dotted_module_no_schema_is_one_package():
+    sql = compile_to_sql("""
         module hr.employees;
         pub fn ping() {}
     """)
-    # First node of the module name is the schema; remainder is the package.
-    assert "CREATE OR REPLACE PACKAGE hr.employees AS" in sql
-    assert "CREATE OR REPLACE PACKAGE BODY hr.employees AS" in sql
+    # No `::` → whole path is one package in the connected schema.
+    assert "CREATE OR REPLACE PACKAGE hr_employees AS" in sql
 
 
 def test_single_node_module_no_schema_qualifier():

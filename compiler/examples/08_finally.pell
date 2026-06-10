@@ -2,8 +2,7 @@
 // PL/SQL `WHEN OTHERS THEN log; RAISE;` idiom that's really "cleanup,
 // not handling" (see design.md §6.3).
 
-module audit.charges;
-
+module audit::charges;
 
 import dbms_output;
 // note: avoiding `logger::info` here because Oracle's built-in LOG() math

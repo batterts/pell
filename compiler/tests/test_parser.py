@@ -11,18 +11,33 @@ def test_module_only():
     assert m.items == []
 
 
-def test_dotted_module():
+def test_schema_qualified_module():
+    # `schema::path` — schema is explicit before `::`; the dotted path
+    # is the package name (no segment is implicitly a schema).
+    m = parse("module hr::employees;")
+    assert m.name == "employees"
+    assert m.schema == "hr"
+    assert m.package_name == "employees"
+    assert m.qualified_name == "hr.employees"
+
+
+def test_dotted_module_is_package_path():
+    # Without `::`, the whole dotted path is the package name in the
+    # CONNECTED schema — no node is treated as a schema.
     m = parse("module hr.employees;")
     assert m.name == "hr.employees"
-    assert m.schema == "hr"                       # first node → schema
-    assert m.package_name == "employees"          # remainder → package
-    assert m.qualified_name == "hr.employees"     # composed for CREATE
+    assert m.schema is None
+    assert m.package_name == "hr_employees"
+    assert m.qualified_name == "hr_employees"
+    assert m.access_domain == "hr"
+    assert m.short_name == "employees"
 
 
-def test_deeply_nested_module():
-    m = parse("module hr_app.shared.utils;")
+def test_schema_with_deep_path():
+    m = parse("module hr_app::shared.utils;")
     assert m.schema == "hr_app"
-    assert m.package_name == "shared_utils"       # deeper nodes joined with _
+    assert m.name == "shared.utils"
+    assert m.package_name == "shared_utils"
     assert m.qualified_name == "hr_app.shared_utils"
 
 

@@ -124,13 +124,26 @@ class Parser:
         self._eat_keyword("module") or self._expect(
             "KW_MODULE", "expected `module` at top of file"
         )
-        name = self._parse_dotted_ident()
+        # `module [schema::] a.b.c;` — an optional `IDENT ::` schema
+        # prefix, then the dotted module path. The `::` gives the schema
+        # its own slot so the dotted path is unambiguously the package
+        # name (no more "is the first dot-segment a schema?").
+        schema: Optional[str] = None
+        first_ident = self._expect("IDENT", "expected module name")
+        if self._eat("COLONCOLON"):
+            schema = first_ident.value
+            name = self._parse_dotted_ident()
+        else:
+            # No `::` — first_ident is the head of the dotted path.
+            name = first_ident.value
+            while self._eat("DOT"):
+                name += "." + self._expect("IDENT").value
         self._expect("SEMI", "expected `;` after module name")
         items: list[A.Item] = []
         while not self._at("EOF"):
             items.append(self._parse_item())
         return A.Module(
-            loc=loc, name=name, items=items,
+            loc=loc, name=name, schema=schema, items=items,
             annotations=module_annotations,
         )
 

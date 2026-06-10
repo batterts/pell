@@ -2,8 +2,7 @@
 // (still SELECT for v0 — for_update modifier is not yet lowered), DML
 // writes, and Err-returns inside a transaction.
 
-module billing.charges;
-
+module billing::charges;
 pub record Account {
   id: number,
   balance: number,
@@ -12,7 +11,13 @@ pub record Account {
 pub error Overdraft { account: number, requested: number, available: number }
 pub error AccountFrozen { account: number }
 
-pub fn transfer(from_id: number, to_id: number, amt: number)
+pub record Transfer {
+    from_id: number,
+    to_id: number,
+    amt: number
+}
+
+pub fn transfer(args: Transfer)
   -> Result<Unit, Overdraft | AccountFrozen>
 {
   transaction {
@@ -20,10 +25,10 @@ pub fn transfer(from_id: number, to_id: number, amt: number)
       select id, balance from accounts where id = :from_id and frozen = 0
     }.one()?;
 
-    if src.balance < amt {
+    if src.balance < args.amt {
       return Err(Overdraft {
-        account: from_id,
-        requested: amt,
+        account: args.from_id,
+        requested: args.amt,
         available: src.balance,
       });
     }

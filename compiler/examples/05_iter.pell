@@ -1,7 +1,6 @@
 // Iterating rows with `for x in sql!{}` — lowers to a cursor FOR loop.
 
-module reports.daily;
-
+module reports::daily;
 import std::logger;
 
 pub record OrderSummary {

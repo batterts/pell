@@ -23,8 +23,7 @@
 //   - `xs.first()` / `xs.last()` → xs.FIRST / xs.LAST
 //   - `let xs: list<T> = sql!{ select … }.collect();` → BULK COLLECT INTO
 
-module bulk.demo;
-
+module bulk::demo;
 import std::logger;
 
 pub fn insert_many() {

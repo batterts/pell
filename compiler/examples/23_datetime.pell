@@ -1,5 +1,4 @@
-module std.datetime;
-
+module std::datetime;
 // ---------------------------------------------------------------------------
 // Date / time / timezone library — wraps Oracle's native types so callers
 // see a friendly API and never need to write EXTRACT / FROM_TZ / AT TIME ZONE

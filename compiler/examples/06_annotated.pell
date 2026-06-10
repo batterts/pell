@@ -1,8 +1,7 @@
 // Annotations: @deterministic, @result_cache, @udf, @autonomous.
 // Each lowers to its PL/SQL pragma/clause counterpart.
 
-module lookups.country;
-
+module lookups::country;
 @deterministic
 @result_cache
 @udf

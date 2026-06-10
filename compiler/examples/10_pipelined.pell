@@ -6,8 +6,7 @@
 //
 // Caller uses `|>` to chain: `<sql source> |> <pipelined fn> |> <terminator>`.
 
-module market.feeds;
-
+module market::feeds;
 pub record Stock  { sym: text, price: number }
 pub record Ticker { sym: text, price: number }
 

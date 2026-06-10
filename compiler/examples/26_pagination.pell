@@ -1,5 +1,4 @@
-module orders.paging;
-
+module orders::paging;
 // ---------------------------------------------------------------------------
 // Server-side pagination over an `orders` table — wraps Oracle 12c+ row
 // limiting clauses (`OFFSET ... FETCH NEXT ... ROWS ONLY`) behind a clean

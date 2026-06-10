@@ -5,8 +5,7 @@
 //   transactions, for-update locking, annotations,
 //   string interpolation, error returns, and field access.
 
-module orders.fulfillment;
-
+module orders::fulfillment;
 import std::logger;
 
 pub record Order {

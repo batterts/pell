@@ -1,5 +1,4 @@
-module data.csv;
-
+module data::csv;
 // ---------------------------------------------------------------------------
 // Tiny CSV parser — splits a single CSV line into fields, then a multi-line
 // CSV document into a list of records.

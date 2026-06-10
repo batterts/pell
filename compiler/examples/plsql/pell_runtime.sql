@@ -9,10 +9,12 @@ CREATE OR REPLACE PACKAGE pell_runtime AS
   PROCEDURE clear_err(p_key IN VARCHAR2);
   FUNCTION  get_err(p_key IN VARCHAR2) RETURN VARCHAR2;
 
-  hr_employees_notfound EXCEPTION;  -- propagate
-  PRAGMA EXCEPTION_INIT(hr_employees_notfound, -20100);
-  hr_employees_policyviolation EXCEPTION;  -- propagate
-  PRAGMA EXCEPTION_INIT(hr_employees_policyviolation, -20101);
+  signups_validate_missingfield EXCEPTION;  -- propagate
+  PRAGMA EXCEPTION_INIT(signups_validate_missingfield, -20100);
+  signups_validate_invalidemail EXCEPTION;  -- propagate
+  PRAGMA EXCEPTION_INIT(signups_validate_invalidemail, -20101);
+  signups_validate_ageoutofrange EXCEPTION;  -- propagate
+  PRAGMA EXCEPTION_INIT(signups_validate_ageoutofrange, -20102);
 END pell_runtime;
 /
 

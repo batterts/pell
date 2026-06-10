@@ -1,5 +1,4 @@
-module signups.validate;
-
+module signups::validate;
 // ---------------------------------------------------------------------------
 // Input validation for a signup form. Demonstrates typed errors composed
 // into a Result<T, E1 | E2 | E3> union, the `?` propagation operator, and
@@ -60,8 +59,13 @@ pub fn require_age(value: number) -> Result<number, AgeOutOfRange> {
 pub fn validate_signup(form: SignupForm)
     -> Result<SignupForm, MissingField | InvalidEmail | AgeOutOfRange>
 {
-    let name: text = require_text("name", form.name)?;
+    let name = get_name(form);
     let email: text = require_email(form.email)?;
     let age: number = require_age(form.age)?;
     return Ok(SignupForm { name: name, email: email, age: age });
 }
+
+fn get_name(form: any) -> text {
+    return require_text("name", form.name)?;
+}
+

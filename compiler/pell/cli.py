@@ -111,7 +111,9 @@ def cmd_runtime(args: argparse.Namespace) -> int:
             print(f"pell: {e}", file=sys.stderr)
             failures += 1
             continue
-        full = module.name.replace(".", "_")
+        # Schema-qualified package name (mangled) keeps the pell_runtime
+        # exception identifiers globally unique across schemas.
+        full = module.qualified_name.replace(".", "_")
         for item in module.items:
             if isinstance(item, A.ErrorDef):
                 errors.append((full, item.name, getattr(item, "category", "propagate")))

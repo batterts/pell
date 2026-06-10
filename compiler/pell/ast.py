@@ -574,43 +574,63 @@ class AggregateDef(Item):
 @dataclass
 class Module:
     loc: Loc
-    name: str  # e.g. hr.employees
+    name: str  # dotted MODULE PATH (no schema), e.g. `app.parsing.lex`
+    # Explicit schema, from the `schema::` prefix of the module decl.
+    # `module demo::app.parsing` → schema='demo', name='app.parsing'.
+    # None means "the connected schema" (`module app.parsing`).
+    #
+    # This `::` separator removes the old ambiguity where the FIRST
+    # dotted node was implicitly the schema — `b.c.d` could mean either
+    # schema `b` package `c_d` OR package `b_c_d` in the current schema.
+    # Now the schema has its own syntactic slot; dots are always the
+    # module path.
+    schema: Optional[str] = None
     items: list[Item] = field(default_factory=list)
     # Module-level annotations: `@stub` before `module foo;` marks the
     # whole module as signature-only (no SQL emitted, never deployed,
     # but still registered for completion + goto-def + Find Usages).
-    # Other module-level annotations (e.g. `@deprecated`, `@since`)
-    # can land here later without parser changes.
     annotations: list["Annotation"] = field(default_factory=list)
 
     @property
-    def schema(self) -> Optional[str]:
-        """Schema name: the first dotted node of the module path, or None for
-        single-node modules.
-        e.g.: `module hr_app.employees` → 'hr_app'
-              `module foo`              → None
-        """
-        parts = self.name.split(".")
-        return parts[0] if len(parts) >= 2 else None
-
-    @property
     def package_name(self) -> str:
-        """The PL/SQL package name *within its schema*. For multi-node module
-        names the first node is the schema and is stripped; the remainder is
-        mangled with underscores.
-            `hr_app.employees`       → 'employees'
-            `hr_app.shared.utils`    → 'shared_utils'
-            `foo`                    → 'foo'
+        """The PL/SQL package name within its schema — the whole dotted
+        module path mangled with underscores. NO segment is treated as
+        a schema anymore (that's the explicit `schema` field).
+            `app.parsing.lex`  → 'app_parsing_lex'
+            `employees`        → 'employees'
         """
-        parts = self.name.split(".")
-        if len(parts) >= 2:
-            return "_".join(parts[1:])
-        return parts[0]
+        return self.name.replace(".", "_")
 
     @property
     def qualified_name(self) -> str:
-        """Schema-qualified form for use in PL/SQL CREATE statements.
-            `hr_app.employees`  →  'hr_app.employees'
-            `foo`               →  'foo'  (unqualified — current schema)
+        """Schema-qualified form for PL/SQL CREATE statements.
+            schema='demo', name='app.parsing' → 'demo.app_parsing'
+            schema=None,   name='employees'   → 'employees'
         """
         return f"{self.schema}.{self.package_name}" if self.schema else self.package_name
+
+    @property
+    def short_name(self) -> str:
+        """The last segment of the module path — the natural short name
+        used at call sites (`lex::fn`).
+            `app.parsing.lex` → 'lex'
+            `employees`       → 'employees'
+        """
+        return self.name.split(".")[-1]
+
+    @property
+    def access_domain(self) -> str:
+        """The top-level segment of the module path — the ACCESSIBLE BY
+        boundary. Everything sharing this (within the same schema) forms
+        one mutually-accessible application; outsiders are walled off.
+            `app.parsing.lex` → 'app'
+            `app`             → 'app'
+        """
+        return self.name.split(".")[0]
+
+    @property
+    def is_root_module(self) -> bool:
+        """True for a top-level module with no dotted sub-path — the
+        PUBLIC application interface. Sub-modules (`app.parsing`) are
+        private to their access domain."""
+        return "." not in self.name

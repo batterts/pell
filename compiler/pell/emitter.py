@@ -280,16 +280,12 @@ class Emitter:
         # working-tree hash) so the emitted SQL is byte-stable across runs from
         # the same source + commit. Used for golden-snapshot tests.
         self.reproducible = reproducible
-        # Schema/package split — first dotted node of the module name becomes the
-        # PL/SQL schema; the rest is mangled into the package name. Single-node
-        # modules (`module foo;`) get no schema qualifier (backwards compat).
-        parts = module.name.split(".")
-        if len(parts) >= 2:
-            self.schema = parts[0]
-            self.pkg = "_".join(parts[1:])
-        else:
-            self.schema = None
-            self.pkg = parts[0]
+        # Schema + package come from the new explicit model: the schema
+        # is the `schema::` prefix (or None = connected schema); the
+        # package name is the whole dotted module path mangled with
+        # underscores. (No dotted segment is implicitly a schema now.)
+        self.schema = module.schema
+        self.pkg = module.package_name
         # collected during emission of a function body
         self._declares: list[str] = []  # PL/SQL declaration lines (no trailing ;)
         self._decl_seen: set[str] = set()
@@ -436,16 +432,16 @@ class Emitter:
         # in scan_project_signatures. Cross-pkg refs to packages not in
         # this set raise pell.missing-import.
         self._imported_packages: set[str] = set()
-        _local_full = module.name.replace(".", "_").replace("::", "_")
-        _local_short = module.name.split(".")[-1].split("::")[-1]
-        self._imported_packages.add(_local_full)
-        self._imported_packages.add(_local_short)
+        self._imported_packages.add(module.package_name)
+        self._imported_packages.add(module.short_name)
         for _it in module.items:
             if isinstance(_it, A.ImportStmt):
-                _full = _it.path.replace("::", "_").replace(".", "_")
-                _short = _it.path.replace("::", ".").rsplit(".", 1)[-1]
-                self._imported_packages.add(_full)
-                self._imported_packages.add(_short)
+                # `import [schema::] a.b.c;` — strip the optional schema
+                # prefix, then register the package name (dotted path
+                # with underscores) and the short name (last segment).
+                _path = _it.path.partition("::")[2] if "::" in _it.path else _it.path
+                self._imported_packages.add(_path.replace(".", "_"))
+                self._imported_packages.add(_path.split(".")[-1])
         # convenience wrapper that threads self.target through type lowering
         # AND resolves cross-package record references so they emit as
         # `<pkg>.t_<record>` instead of the unqualified `t_<record>` that
@@ -880,11 +876,11 @@ class Emitter:
         return "\n".join(lines)
 
     def _exception_name(self, err_name: str) -> str:
-        # Exceptions land in the global pell_runtime package, so they have to
-        # be globally unique. Use the FULL mangled module name (including the
-        # schema prefix) so `hr.employees::NotFound` and `acct.employees::NotFound`
-        # don't collide as `employees_notfound` in pell_runtime.
-        full = self.module.name.replace(".", "_")
+        # Exceptions land in the global pell_runtime package, so they have
+        # to be globally unique. Use the SCHEMA-qualified package name
+        # (schema + package, mangled) so `hr::employees.NotFound` and
+        # `acct::employees.NotFound` don't collide as `employees_notfound`.
+        full = self.module.qualified_name.replace(".", "_")
         return f"{full}_{err_name}".lower()
 
     # ---- spec & body ----------------------------------------------------

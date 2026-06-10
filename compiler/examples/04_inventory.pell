@@ -2,8 +2,7 @@
 // and a row count via `.rowcount()`. Exercises the DmlResult side of
 // `sql!{}`.
 
-module inventory.skus;
-
+module inventory::skus;
 pub record Sku {
   id: number,
   code: text,

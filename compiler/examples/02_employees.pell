@@ -1,8 +1,7 @@
 // Find/promote employees. Exercises records, typed errors, ?
 // propagation, and SELECT INTO via .one()?.
 
-module hr.employees;
-
+module hr::employees;
 import std::logger;
 
 pub record Employee {
