@@ -408,6 +408,39 @@ def test_for_indices_loop():
     assert "FOR i IN l_xs.FIRST .. l_xs.LAST LOOP" in sql
 
 
+def test_for_range_inclusive():
+    sql = compile_to_sql("""
+        module m;
+        pub fn run() {
+          for i in 1..=100 { p(i); }
+        }
+    """)
+    assert "FOR i IN 1 .. 100 LOOP" in sql
+
+
+def test_for_range_exclusive():
+    sql = compile_to_sql("""
+        module m;
+        pub fn run() {
+          for i in 0..10 { p(i); }
+        }
+    """)
+    # exclusive `..` stops one short of the upper bound.
+    assert "FOR i IN 0 .. (10) - 1 LOOP" in sql
+
+
+def test_for_over_list_literal():
+    sql = compile_to_sql("""
+        module m;
+        pub fn run() {
+          for x in [1, 2, 3] { p(x); }
+        }
+    """)
+    # The literal is lifted to a temp list, then iterated.
+    assert "l_pell_iter_1(1) := 1;" in sql
+    assert "WHILE i_x IS NOT NULL LOOP" in sql
+
+
 def test_interpolation_supports_method_calls():
     sql = compile_to_sql("""
         module m;

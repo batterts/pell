@@ -3759,6 +3759,28 @@ class Emitter:
                 and isinstance(s.iterable.callee, A.Ident)
                 and s.iterable.callee.name == "json::get_keys"):
             return self._emit_json_keys_iteration(s, indent)
+        # for x in [a, b, c]: lift the list literal to a temp list local,
+        # then iterate it through the list-variable path below. PL/SQL
+        # can't iterate a literal directly, but a temp + the existing
+        # assoc-array loop handles it transparently.
+        if isinstance(s.iterable, A.ListLit):
+            elem_pell = self._infer_listlit_elem_type(s.iterable)
+            self._sql_var_counter += 1
+            tmp_name = f"pell_iter_{self._sql_var_counter}"
+            let_stmt = A.LetStmt(
+                loc=s.loc, name=tmp_name,
+                type_annot=A.GenericType(
+                    loc=s.loc, base="list",
+                    params=[A.PrimType(loc=s.loc, name=elem_pell)],
+                ),
+                value=s.iterable,
+            )
+            new_for = A.ForStmt(
+                loc=s.loc, var_name=s.var_name,
+                iterable=A.Ident(loc=s.loc, name=tmp_name),
+                body=s.body,
+            )
+            return self._emit_let(let_stmt, indent) + self._emit_for(new_for, indent)
         # for x in <cursor param>: streaming bulk-fetch loop
         if isinstance(s.iterable, A.Ident) and s.iterable.name in self._cursor_params:
             cursor_param = param_name(s.iterable.name)

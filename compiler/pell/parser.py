@@ -837,10 +837,24 @@ class Parser:
         return self._parse_pipeline()
 
     def _parse_pipeline(self) -> A.Expr:
-        left = self._parse_logical_or()
+        left = self._parse_range()
         while self._eat("PIPEGT"):
-            right = self._parse_logical_or()
+            right = self._parse_range()
             left = A.PipelineExpr(loc=left.loc, source=left, target=right)
+        return left
+
+    def _parse_range(self) -> A.Expr:
+        """`lo .. hi` (exclusive) / `lo ..= hi` (inclusive). Non-
+        associative — `a..b..c` is a parse error, not a chain. The
+        emitter lowers a range in for-iterable position to a numeric
+        `FOR i IN lo..hi LOOP` (subtracting 1 from `hi` for the
+        exclusive form)."""
+        left = self._parse_logical_or()
+        if self._at("DOTDOT", "DOTDOTEQ"):
+            op = self._peek().value  # ".." or "..="
+            self.pos += 1
+            right = self._parse_logical_or()
+            return A.BinOp(loc=left.loc, op=op, left=left, right=right)
         return left
 
     def _parse_logical_or(self) -> A.Expr:
