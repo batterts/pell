@@ -6127,9 +6127,17 @@ def scan_project_records(
             except Exception:
                 continue
             pkg = mod.name.replace(".", "_").replace("::", "_")
+            # For dotted modules (`pell_test.hello`), also register under
+            # the short package name (`hello`) so callers that refer to
+            # the package by its bare name — the natural form once
+            # connected to that schema — resolve. Mirrors
+            # scan_project_signatures' dual registration.
+            short = mod.name.split(".")[-1].split("::")[-1]
             for item in mod.items:
                 if isinstance(item, A.RecordDef) and item.is_pub:
                     records[(pkg, item.name)] = item
+                    if short != pkg:
+                        records[(short, item.name)] = item
 
     _walk(_Path(root) if root else _Path.cwd())
     runtime = _Path(__file__).resolve().parent.parent / "runtime"
