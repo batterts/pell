@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.5.3</version>
+    <version>0.6.0</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,36 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.6.0 — Module access domains + smarter refactorings</h3>
+        <p><b>The module hierarchy is now an access-control boundary,
+        enforced by Oracle itself.</b> Plus refactoring polish across
+        the board.</p>
+        <ul>
+          <li><b>New module naming:</b> <code>module schema::a.b.c;</code>
+              — the schema gets its own <code>::</code>-separated slot;
+              the dotted path is unambiguously the package name
+              (lowered to <code>schema.a_b_c</code>). No more
+              "is the first segment a schema?" ambiguity.</li>
+          <li><b>Access domains.</b> Non-root modules
+              (<code>app.parsing</code>) emit
+              <code>ACCESSIBLE BY (…)</code> listing every other package
+              in their domain — Oracle rejects outside callers
+              (PLS-00904), and pell rejects them earlier at compile time
+              with a clear message. Root modules are the public
+              interface. <code>@open</code> opts a module out.</li>
+          <li><b>Move Symbol rewrites references</b> project-wide:
+              qualified callers flip to the new module, bare uses in the
+              old home get qualified, and missing imports are added.</li>
+          <li><b>Extract Method infers param types</b> from the captured
+              locals' declarations — no more <code>any</code> params
+              that fail at deploy.</li>
+          <li><b>Editor grammar parity:</b> <code>schema::</code> module
+              declarations, dotted imports
+              (<code>import app.parsing;</code>), and module-level
+              annotations (<code>@stub</code>, <code>@open</code>) all
+              parse without squiggles. Parser snapshot tests are now
+              committed so grammar drift fails CI.</li>
+        </ul>
         <h3>0.5.3 — Range expressions in the editor</h3>
         <p>The Grammar-Kit grammar now accepts range expressions
         (<code>for i in 1..=10</code>, <code>for i in 0..5</code>) and

@@ -22,6 +22,7 @@ from pell import ast as A
 from pell.emitter import (
     EmitError, emit, lower_type, scan_project_records,
     scan_project_definitions, scan_project_references,
+    scan_project_modules,
     _render_type,
 )
 from pell.lexer import LexError
@@ -31,7 +32,7 @@ from . import semantic_tokens as _semtok
 
 
 SERVER_NAME = "pell-lsp"
-SERVER_VERSION = "0.5.0"
+SERVER_VERSION = "0.6.0"
 
 logger = logging.getLogger(SERVER_NAME)
 
@@ -51,7 +52,7 @@ _cache: dict[str, Optional[A.Module]] = {}
 #   _project_ctx[root_path] -> (signatures, records, definitions, references)
 # where definitions: (pkg, name) -> Loc  (goto-def target)
 #       references:  (pkg, name) -> list[Loc]  (find-usages results)
-_project_ctx: dict[str, tuple[dict, dict, dict, dict]] = {}
+_project_ctx: dict[str, tuple[dict, dict, dict, dict, dict]] = {}
 
 
 def _project_root_for(doc_path: Optional[str]) -> str:
@@ -101,7 +102,11 @@ def _get_project_ctx(
         refs = scan_project_references(root_path) if root_path else {}
     except Exception:
         refs = {}
-    _project_ctx[root] = (sigs, recs, defs, refs)
+    try:
+        mods = scan_project_modules(root_path) if root_path else {}
+    except Exception:
+        mods = {}
+    _project_ctx[root] = (sigs, recs, defs, refs, mods)
     return _project_ctx[root]
 
 
@@ -154,9 +159,10 @@ def _validate(uri: str) -> None:
         # happily shows "No problems found" on code that won't compile.
         # Pass the cached project context so cross-package record
         # constructors (`pkg::Record { … }`) and fn calls resolve.
-        sigs, recs, _defs, _refs = _get_project_ctx(doc.path)
+        sigs, recs, _defs, _refs, _mods = _get_project_ctx(doc.path)
         emit(module, source_text=src, source_path=doc.path or uri,
-             project_signatures=sigs, project_records=recs)
+             project_signatures=sigs, project_records=recs,
+             project_modules=_mods)
     except (LexError, ParseError) as e:
         diagnostics.append(_diagnostic_from_error(e, src))
     except EmitError as e:
@@ -872,7 +878,7 @@ def _completions_for_line_prefix(
         pkg, partial = qual_match.group(1), qual_match.group(2)
         # Derive a filesystem path from the URI. `file:///foo` → `/foo`.
         doc_path = uri[len("file://"):] if uri.startswith("file://") else uri
-        sigs, recs, _defs, _refs = _get_project_ctx(doc_path)
+        sigs, recs, _defs, _refs, _mods = _get_project_ctx(doc_path)
         partial_len = len(partial)
         replace_start = lsp.Position(
             line=line_no, character=char_no - partial_len
@@ -1001,7 +1007,7 @@ def on_definition(params: lsp.DefinitionParams) -> Optional[lsp.Location]:
     # registered (pkg, name) and return the unique match if one
     # exists — same conservative bare-name rule as the emitter.
     pkg = _qualifier_before(src, params.position)
-    _, _, defs, _ = _get_project_ctx(doc.path)
+    _, _, defs, _, _ = _get_project_ctx(doc.path)
     if pkg is not None:
         loc = defs.get((pkg, word))
         if loc is not None:
@@ -1077,7 +1083,7 @@ def on_references(
     if word is None:
         return None
     pkg = _qualifier_before(src, params.position)
-    _, _, defs, refs = _get_project_ctx(doc.path)
+    _, _, defs, refs, _ = _get_project_ctx(doc.path)
     # If no explicit qualifier, look up the package via the
     # definitions index — if the symbol is uniquely owned by one
     # package, use that. Otherwise we can't reliably distinguish.
