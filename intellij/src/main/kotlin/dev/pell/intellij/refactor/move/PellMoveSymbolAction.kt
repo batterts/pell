@@ -1,10 +1,12 @@
 package dev.pell.intellij.refactor.move
 
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.fileEditor.FileDocumentManager
+import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.util.PsiTreeUtil
@@ -35,6 +37,9 @@ import dev.pell.intellij.symbols.index.PellProjectIndex
  * PSI TRACK — owned by the PSI work stream. See intellij/PSI_TRACK.md.
  */
 class PellMoveSymbolAction : AnAction() {
+
+    override fun getActionUpdateThread(): ActionUpdateThread =
+        ActionUpdateThread.BGT
 
     override fun update(e: AnActionEvent) {
         e.presentation.isEnabledAndVisible = e.getData(CommonDataKeys.PSI_FILE) is PellFile
@@ -73,7 +78,18 @@ class PellMoveSymbolAction : AnAction() {
         ) ?: return
 
         val (_, destFile) = modules.firstOrNull { it.first == choice } ?: return
+        doMove(project, file, target, destFile, choice)
+    }
 
+    // internal so headless tests drive the move without the
+    // destination-module chooser dialog.
+    internal fun doMove(
+        project: Project,
+        file: PellFile,
+        target: PellNamedElement,
+        destFile: PellFile,
+        choice: String,
+    ) {
         WriteCommandAction.runWriteCommandAction(project, "Move `${target.name}` to module $choice", null, Runnable {
             val pm = PsiDocumentManager.getInstance(project)
             val sourceDoc = pm.getDocument(file) ?: return@Runnable
@@ -81,9 +97,15 @@ class PellMoveSymbolAction : AnAction() {
             pm.commitDocument(sourceDoc)
             pm.commitDocument(destDoc)
 
-            val movedText = target.text
+            // Use the full declaration range so the leading `pub` /
+            // annotations move with the body (target.textRange starts at
+            // the `fn`/`record` keyword, after `pub`).
+            val range = dev.pell.intellij.refactor.declarationRange(target)
+            val movedText = sourceDoc.getText(
+                com.intellij.openapi.util.TextRange(range.startOffset, range.endOffset)
+            )
             // Cut from source.
-            sourceDoc.deleteString(target.textRange.startOffset, target.textRange.endOffset)
+            sourceDoc.deleteString(range.startOffset, range.endOffset)
             // Append to dest with a leading blank line.
             destDoc.insertString(destDoc.textLength, "\n\n$movedText")
 

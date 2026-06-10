@@ -31,7 +31,7 @@ from . import semantic_tokens as _semtok
 
 
 SERVER_NAME = "pell-lsp"
-SERVER_VERSION = "0.0.1"
+SERVER_VERSION = "0.5.0"
 
 logger = logging.getLogger(SERVER_NAME)
 
@@ -603,6 +603,33 @@ def on_hover(params: lsp.HoverParams) -> Optional[lsp.Hover]:
     )
 
 
+def _next_ident_on_line(
+    src: str, pos: lsp.Position,
+) -> tuple[Optional[str], Optional[lsp.Range]]:
+    """Scan forward from `pos` to the next IDENT on the same line.
+    Used as a fallback for Find Usages / Rename when the cursor
+    landed on a keyword (`fn`, `record`, etc.) — we want the
+    declared name, not the keyword."""
+    lines = src.splitlines()
+    if pos.line >= len(lines):
+        return (None, None)
+    line = lines[pos.line]
+    col = min(pos.character, len(line))
+    import re
+    m = re.search(r"[A-Za-z_][A-Za-z0-9_]*", line[col:])
+    if m is None:
+        return (None, None)
+    abs_start = col + m.start()
+    abs_end = col + m.end()
+    return (
+        line[abs_start:abs_end],
+        lsp.Range(
+            start=lsp.Position(line=pos.line, character=abs_start),
+            end=lsp.Position(line=pos.line, character=abs_end),
+        ),
+    )
+
+
 def _word_at(src: str, pos: lsp.Position) -> tuple[Optional[str], Optional[lsp.Range]]:
     lines = src.splitlines()
     if pos.line >= len(lines):
@@ -927,6 +954,30 @@ def _completions_for_line_prefix(
 # ---------------------------------------------------------------------------
 
 
+def _name_range_for_item(item: "A.Item", src: str) -> lsp.Range:
+    """Resolve the range covering an item's NAME (not its leading
+    keyword). item.loc points at `fn`/`record`/`error`; we scan
+    forward on that line for the identifier so goto-def lands the
+    cursor on the symbol — required so a follow-up Find Usages at
+    that position resolves correctly."""
+    import re
+    name = getattr(item, "name", None)
+    lines = src.splitlines()
+    line_idx = item.loc.line - 1
+    if not name or line_idx < 0 or line_idx >= len(lines):
+        return _range_from_loc(item.loc, src)
+    line = lines[line_idx]
+    start_col = max(item.loc.col - 1, 0)
+    m = re.search(r"\b" + re.escape(name) + r"\b", line[start_col:])
+    if m is None:
+        return _range_from_loc(item.loc, src)
+    name_col = start_col + m.start()
+    return lsp.Range(
+        start=lsp.Position(line=line_idx, character=name_col),
+        end=lsp.Position(line=line_idx, character=name_col + len(name)),
+    )
+
+
 @server.feature(lsp.TEXT_DOCUMENT_DEFINITION)
 def on_definition(params: lsp.DefinitionParams) -> Optional[lsp.Location]:
     uri = params.text_document.uri
@@ -942,7 +993,8 @@ def on_definition(params: lsp.DefinitionParams) -> Optional[lsp.Location]:
             if isinstance(item, (A.FnDef, A.RecordDef, A.ErrorDef)) \
                     and item.name == word:
                 return lsp.Location(
-                    uri=uri, range=_range_from_loc(item.loc, src),
+                    uri=uri,
+                    range=_name_range_for_item(item, src),
                 )
     # Cross-file: extract the qualifier (if any) and consult the
     # project definitions index. For bare `name`, we look up every
@@ -1012,6 +1064,16 @@ def on_references(
     doc = server.workspace.get_text_document(uri)
     src = doc.source
     word, _ = _word_at(src, params.position)
+    # If the cursor landed on a keyword (`fn`, `record`, etc.), scan
+    # forward to the actual declaration name. IntelliJ jumps cursor to
+    # the goto-def result range and then invokes Find Usages there;
+    # before the scan_project_definitions name-loc fix shipped, the
+    # cursor would land on the keyword. Keep the fallback for users
+    # who manually click on a keyword.
+    _KEYWORDS = {"fn", "pub", "record", "error", "aggregate", "type",
+                 "enum", "sealed", "seq"}
+    if word in _KEYWORDS:
+        word, _ = _next_ident_on_line(src, params.position)
     if word is None:
         return None
     pkg = _qualifier_before(src, params.position)
@@ -1079,6 +1141,22 @@ def on_semantic_tokens_full(params: lsp.SemanticTokensParams) -> lsp.SemanticTok
 
 
 def main() -> None:
+    # Surface the running version on stderr so the IDE's LSP console
+    # banner shows which build is actually attached. Easier than
+    # squinting at the initialize trace's serverInfo JSON.
+    import sys, subprocess, os
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(__file__),
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        sha = "unknown"
+    print(
+        f"[{SERVER_NAME} v{SERVER_VERSION} @ {sha}] starting on stdio",
+        file=sys.stderr, flush=True,
+    )
     logging.basicConfig(level=logging.WARNING)
     server.start_io()
 

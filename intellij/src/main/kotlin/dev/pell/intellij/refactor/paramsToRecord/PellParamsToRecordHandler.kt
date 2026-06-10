@@ -82,7 +82,9 @@ class PellParamsToRecordHandler : RefactoringActionHandler {
         // No-op: caret-driven only.
     }
 
-    private fun applyExtract(
+    // internal so headless tests drive the transformation without the
+    // record-name / arg-name dialogs.
+    internal fun applyExtract(
         project: Project,
         file: PellFile,
         fn: PsiElement,
@@ -91,61 +93,56 @@ class PellParamsToRecordHandler : RefactoringActionHandler {
         recordName: String,
         argName: String,
     ) {
-        WriteCommandAction.runWriteCommandAction(project, "Parameters to Record '$recordName'", null, Runnable {
-            val doc = PsiDocumentManager.getInstance(project).getDocument(file) ?: return@Runnable
-            val pm = PsiDocumentManager.getInstance(project)
-            pm.commitDocument(doc)
+        // Compute every edit against the ORIGINAL offsets, then apply
+        // them back-to-front in a SINGLE write command + commit. Doing
+        // insert→commit→reparse→replace→commit in stages leaves transient
+        // broken-PSI states that the platform logs as errors (fatal under
+        // -Dintellij.testFramework.rethrow.logged.errors and just noisy in
+        // production). One descending-order pass keeps every offset valid
+        // and never reparses mid-flight.
+        val paramSpecs = params.map { p ->
+            ParamSpec(p.name ?: "_", paramTypeText(p))
+        }
+        val paramNames = paramSpecs.map { it.name }.toSet()
 
-            // Synthesize the record fields from the original param decls.
-            val paramSpecs = params.map { p ->
-                val name = p.name ?: "_"
-                val type = paramTypeText(p)
-                ParamSpec(name, type)
-            }
+        // Edit 1: insert the record before the declaration (incl. `pub`).
+        val declStart = dev.pell.intellij.refactor.declarationStartOffset(fn)
+        val recordText = "pub record $recordName {\n" +
+            paramSpecs.joinToString(",\n") { "    ${it.name}: ${it.type}" } +
+            "\n}\n\n"
 
-            // a. Insert record above the fn.
-            val recordText = "pub record $recordName {\n" +
-                paramSpecs.joinToString(",\n") { "    ${it.name}: ${it.type}" } +
-                "\n}\n\n"
-            doc.insertString(fn.textRange.startOffset, recordText)
+        // Edit 2: collapse the param list to `arg: Record`.
+        val firstParam = params.first()
+        val lastParam = params.last()
+        val paramListStart = firstParam.textRange.startOffset
+        val paramListEnd = lastParam.textRange.endOffset
 
-            // Offsets shifted by recordText.length. Re-find the fn.
-            pm.commitDocument(doc)
-
-            val newFn = file.findElementAt(fn.textRange.startOffset + recordText.length)
-                ?.let { PsiTreeUtil.getParentOfType(it, PellFnDef::class.java, PellMethodDef::class.java) } ?: return@Runnable
-
-            // b. Rewrite the param list.
-            val firstParam = PsiTreeUtil.findChildrenOfType(newFn, PellParam::class.java).first()
-            val lastParam = PsiTreeUtil.findChildrenOfType(newFn, PellParam::class.java).last()
-            doc.replaceString(
-                firstParam.textRange.startOffset,
-                lastParam.textRange.endOffset,
-                "$argName: $recordName",
-            )
-            pm.commitDocument(doc)
-
-            // c. Rewrite param refs inside the body.
-            val refreshedFn = file.findElementAt(fn.textRange.startOffset + recordText.length)
-                ?.let { PsiTreeUtil.getParentOfType(it, PellFnDef::class.java, PellMethodDef::class.java) } ?: return@Runnable
-
-            // Walk the body for IDENTs matching original param names and rewrite
-            // back-to-front so offsets don't drift.
-            val body = PsiTreeUtil.findChildOfType(refreshedFn, dev.pell.intellij.psi.PellBlock::class.java) ?: return@Runnable
-            val paramNames = paramSpecs.map { it.name }.toSet()
-            val identsInBody = PsiTreeUtil.findChildrenOfType(body, PsiElement::class.java)
+        // Edit 3: rewrite each body reference of a param to `arg.<name>`.
+        val body = PsiTreeUtil.findChildOfType(fn, dev.pell.intellij.psi.PellBlock::class.java)
+        val bodyRefs = if (body == null) emptyList() else
+            PsiTreeUtil.findChildrenOfType(body, PsiElement::class.java)
                 .filter { it.node?.elementType == dev.pell.intellij.psi.PellElementTypes.IDENT && it.text in paramNames }
-                .sortedByDescending { it.textRange.startOffset }
-            for (ident in identsInBody) {
-                doc.replaceString(
-                    ident.textRange.startOffset,
-                    ident.textRange.endOffset,
-                    "$argName.${ident.text}",
-                )
+                .map { Triple(it.textRange.startOffset, it.textRange.endOffset, "$argName.${it.text}") }
+
+        // Assemble (start, end, replacement) edits, all in original
+        // coordinates, then apply highest-offset-first.
+        data class Edit(val start: Int, val end: Int, val text: String)
+        val edits = mutableListOf<Edit>()
+        edits += Edit(declStart, declStart, recordText)            // insert
+        edits += Edit(paramListStart, paramListEnd, "$argName: $recordName")
+        bodyRefs.forEach { (s, e, t) -> edits += Edit(s, e, t) }
+        edits.sortByDescending { it.start }
+
+        WriteCommandAction.runWriteCommandAction(project, "Parameters to Record '$recordName'", null, Runnable {
+            val pm = PsiDocumentManager.getInstance(project)
+            val doc = pm.getDocument(file) ?: return@Runnable
+            for (ed in edits) {
+                if (ed.start == ed.end) doc.insertString(ed.start, ed.text)
+                else doc.replaceString(ed.start, ed.end, ed.text)
             }
             pm.commitDocument(doc)
 
-            // d. Rewrite every call site of this fn.
+            // Rewrite call sites in OTHER files (separate documents).
             rewriteCallSites(project, fnName, recordName, paramSpecs)
         })
     }

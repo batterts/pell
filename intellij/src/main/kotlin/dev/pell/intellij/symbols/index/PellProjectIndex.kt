@@ -58,6 +58,23 @@ class PellProjectIndex(private val project: Project) {
 
     @Volatile private var initialized = false
 
+    /** Drop the whole index and force a rescan on next query. Used by
+     *  tests (the light project + project-service is shared across
+     *  test methods, so the once-only init would otherwise serve a
+     *  prior test's files). Not on a production path — production
+     *  refreshes incrementally via [reindexFile] from the VFS
+     *  listener. */
+    @org.jetbrains.annotations.TestOnly
+    fun resetForTest() {
+        synchronized(this) {
+            byName.clear()
+            byQName.clear()
+            byModule.clear()
+            perFile.clear()
+            initialized = false
+        }
+    }
+
     /** O(1) lookup by simple name (e.g. `info` matches both
      *  `logger::info` and `audit::info` if both exist). */
     fun findByName(name: String): List<PellNamedElement> {

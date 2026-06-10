@@ -1,9 +1,11 @@
 package dev.pell.intellij.refactor.signature
 
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.command.WriteCommandAction
+import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.util.PsiTreeUtil
@@ -35,6 +37,9 @@ import dev.pell.intellij.psi.PellMethodDef
  */
 class PellChangeSignatureAction : AnAction() {
 
+    override fun getActionUpdateThread(): ActionUpdateThread =
+        ActionUpdateThread.BGT
+
     override fun update(e: AnActionEvent) {
         e.presentation.isEnabledAndVisible = e.getData(CommonDataKeys.PSI_FILE) is PellFile
     }
@@ -63,12 +68,24 @@ class PellChangeSignatureAction : AnAction() {
             null,
             null,
         ) ?: return
+        doChangeSignature(project, file, signatureStart, signatureEnd, newSignature, body != null)
+    }
 
+    // internal so headless tests drive the rewrite without the
+    // multiline signature-input dialog.
+    internal fun doChangeSignature(
+        project: Project,
+        file: PellFile,
+        signatureStart: Int,
+        signatureEnd: Int,
+        newSignature: String,
+        hasBody: Boolean,
+    ) {
         WriteCommandAction.runWriteCommandAction(project, "Change Signature", null, Runnable {
             val pm = PsiDocumentManager.getInstance(project)
             val doc = pm.getDocument(file) ?: return@Runnable
             pm.commitDocument(doc)
-            doc.replaceString(signatureStart, signatureEnd, newSignature + (if (body != null) " " else ""))
+            doc.replaceString(signatureStart, signatureEnd, newSignature + (if (hasBody) " " else ""))
             pm.commitDocument(doc)
         })
     }

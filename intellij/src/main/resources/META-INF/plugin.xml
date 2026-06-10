@@ -682,24 +682,43 @@ END employees;
         <!-- >>> PSI TRACK >>> -->
         <!-- Cross-file reference resolution: every qualified path like
              `hr::employees::Employee` carries a PsiReference back to the
-             declaring PellNamedElement (Phase 4). -->
+             declaring PellNamedElement.
+
+             NOTE: references are now attached via getReference() mixins
+             (PellQualifiedExprMixin / PellTypeRefMixin), NOT this
+             contributor. Grammar-Kit's ASTWrapperPsiElement is not a
+             ContributedReferenceHost, so PsiReferenceContributor
+             providers were silently dropped by SharedPsiElementImplUtil
+             — which broke Find Usages and PSI Rename. The contributor
+             registration is left out; the reference *classes*
+             (PellQualifiedReference / PellTypeReference) still live in
+             PellReferenceContributor.kt and are used by the mixins. -->
+        <!--
         <psi.referenceContributor
             language="pell"
             implementation="dev.pell.intellij.psi.PellReferenceContributor" />
+        -->
 
-        <!-- Find Usages (Cmd-G / Edit ▸ Find Usages) — temporarily
-             disabled so LSP4IJ's references bridge becomes the only
-             Find Usages source. The PSI-side scanner currently returns
-             zero results even on same-file usages; the LSP server's
-             textDocument/references handler returns the right set.
-             Re-enable after fixing PellFindUsagesProvider in Week 2
-             (probable cause: DefaultWordsScanner / PsiReference
-             equality mismatch with PellProjectIndex entries). -->
-        <!--
+        <!-- Element manipulators — tell the platform how to rewrite a
+             reference-bearing element's text. Rename's
+             handleElementRename delegates here; without them it throws
+             "No ElementManipulator instance registered". -->
+        <lang.elementManipulator
+            forClass="dev.pell.intellij.psi.impl.PellQualifiedExprMixin"
+            implementationClass="dev.pell.intellij.psi.PellQualifiedExprManipulator" />
+        <lang.elementManipulator
+            forClass="dev.pell.intellij.psi.impl.PellTypeRefMixin"
+            implementationClass="dev.pell.intellij.psi.PellTypeRefManipulator" />
+
+        <!-- Find Usages (Cmd-G / Edit ▸ Find Usages). Re-enabled in
+             Week 2 — disabling it knee-capped Rename's cross-file
+             scope too, since IntelliJ's ReferencesSearch walks the
+             WordsScanner registered here. Root-cause is being fixed
+             upstream in PellFindUsagesProvider / PellQualifiedReference
+             rather than papered over. -->
         <lang.findUsagesProvider
             language="pell"
             implementationClass="dev.pell.intellij.codeInsight.PellFindUsagesProvider" />
-        -->
 
 
         <!-- Names validator — used by Rename (Phase 5) and by Inspections
@@ -720,11 +739,15 @@ END employees;
         <renamePsiElementProcessor
             implementation="dev.pell.intellij.refactor.PellRenameProcessor" />
 
-        <!-- Extract Method (Cmd-Opt-M). Wraps a contiguous stmt selection
-             in a new pub fn / fn and replaces the selection with a call.
-             Captured locals become parameters. -->
-        <refactoring.extractMethod
-            implementation="dev.pell.intellij.refactor.extract.PellExtractMethodHandler" />
+        <!-- Refactoring support — surfaces Extract Method
+             (Cmd-Alt-M / Refactor ▸ Extract Method…) and drives the
+             "Refactor This" popup + in-place rename availability.
+             Replaces the bogus <refactoring.extractMethod> EP, which
+             doesn't exist and was silently ignored (so Extract Method
+             never appeared in the menu). -->
+        <lang.refactoringSupport
+            language="pell"
+            implementationClass="dev.pell.intellij.refactor.PellRefactoringSupportProvider" />
 
         <!-- PSI-backed autocomplete (Ctrl-Space). Adds primitive types,
              keywords, project pub fn / record names, and in-scope locals

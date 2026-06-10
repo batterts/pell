@@ -1,5 +1,6 @@
 package dev.pell.intellij.refactor.inline
 
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
@@ -36,6 +37,9 @@ import dev.pell.intellij.symbols.index.PellProjectIndex
  * PSI TRACK — owned by the PSI work stream. See intellij/PSI_TRACK.md.
  */
 class PellInlineAction : AnAction() {
+
+    override fun getActionUpdateThread(): ActionUpdateThread =
+        ActionUpdateThread.BGT
 
     override fun update(e: AnActionEvent) {
         e.presentation.isEnabledAndVisible = e.getData(CommonDataKeys.PSI_FILE) is PellFile
@@ -81,7 +85,18 @@ class PellInlineAction : AnAction() {
             null,
         )
         if (confirm != Messages.YES) return
+        doInlineFn(project, file, fn, name, bodyExprText)
+    }
 
+    // internal so headless tests drive the transformation without the
+    // single-expr check + confirm dialog.
+    internal fun doInlineFn(
+        project: Project,
+        file: PellFile,
+        fn: PellFnDef,
+        name: String,
+        bodyExprText: String,
+    ) {
         WriteCommandAction.runWriteCommandAction(project, "Inline fn `$name`", null, Runnable {
             val pm = PsiDocumentManager.getInstance(project)
             val callOps = PellProjectIndex.getInstance(project).findByName(name)

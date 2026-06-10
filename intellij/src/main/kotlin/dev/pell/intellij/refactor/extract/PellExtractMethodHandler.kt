@@ -62,7 +62,10 @@ class PellExtractMethodHandler : RefactoringActionHandler {
         // No-op: Extract Method is editor-driven.
     }
 
-    private fun applyExtract(
+    // internal (not private) so headless tests can drive the
+    // transformation directly, bypassing the modal name/visibility
+    // dialogs that invoke() shows.
+    internal fun applyExtract(
         project: Project,
         file: PellFile,
         editor: Editor,
@@ -83,23 +86,42 @@ class PellExtractMethodHandler : RefactoringActionHandler {
                 "${it.name}: any"
             }
             val visibility = if (isPub) "pub fn" else "fn"
+
+            // Outputs: a local declared in the selection that's used after
+            // it must be RETURNED, and the call site rebinds it. v0 handles
+            // the single-output case (the analyzer rejects >1).
+            val output = analysis.outputs.firstOrNull()
             val bodyText = analysis.selectedStmts.joinToString("\n    ") { it.text }
-            val fnText = "$visibility $name($paramList) {\n    $bodyText\n}\n"
+            val fnText = if (output != null) {
+                "$visibility $name($paramList) -> ${output.typeText} {\n" +
+                    "    $bodyText\n    return ${output.name};\n}\n"
+            } else {
+                "$visibility $name($paramList) {\n    $bodyText\n}\n"
+            }
 
-            // Build the call site that replaces the selection.
+            // Build the call site that replaces the selection. With an
+            // output, rebind it so code after the selection still sees it.
             val argList = analysis.capturedParams.joinToString(", ") { it.name }
-            val callText = "$name($argList);"
+            val callText = if (output != null) {
+                "let ${output.name}: ${output.typeText} = $name($argList);"
+            } else {
+                "$name($argList);"
+            }
 
-            // Replace the selected stmt range with the call site.
+            // Order matters: insert the extracted fn FIRST, at the end of
+            // the enclosing fn (which is AFTER the selection), so the
+            // selection offsets stay valid. Replacing the selection first
+            // would shrink the document and invalidate enclosingRange.end
+            // (the original IndexOutOfBoundsException).
+            val enclosingRange = analysis.enclosingFnOrMethod.textRange
+            doc.insertString(enclosingRange.endOffset, "\n\n$fnText")
+
+            // Now replace the selected stmt range with the call site.
             doc.replaceString(
                 analysis.selectionRange.startOffset,
                 analysis.selectionRange.endOffset,
                 callText,
             )
-
-            // Insert the extracted fn after the enclosing fn declaration.
-            val enclosingRange = analysis.enclosingFnOrMethod.textRange
-            doc.insertString(enclosingRange.endOffset, "\n\n$fnText")
 
             pm.commitDocument(doc)
         })

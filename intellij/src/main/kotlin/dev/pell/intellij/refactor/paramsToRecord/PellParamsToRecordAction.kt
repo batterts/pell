@@ -1,5 +1,6 @@
 package dev.pell.intellij.refactor.paramsToRecord
 
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
@@ -12,6 +13,12 @@ import dev.pell.intellij.PellFile
  * PSI TRACK — owned by the PSI work stream. See intellij/PSI_TRACK.md.
  */
 class PellParamsToRecordAction : AnAction() {
+
+    // update() reads PSI_FILE → must run on the background thread.
+    // Required since 2022.3; without it the platform mis-handles the
+    // action and it can fail to appear in the Refactor menu.
+    override fun getActionUpdateThread(): ActionUpdateThread =
+        ActionUpdateThread.BGT
 
     override fun update(e: AnActionEvent) {
         val file = e.getData(CommonDataKeys.PSI_FILE)

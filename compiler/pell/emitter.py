@@ -2000,10 +2000,27 @@ class Emitter:
                 lines: list[str] = []
                 for f in rec.fields:
                     if f.name in provided:
-                        val = self._emit_expr(provided[f.name])
-                        lines.append(f"{indent}{target}.{f.name.lower()} := {val};")
+                        lines += self._emit_record_field_assign(
+                            f"{target}.{f.name.lower()}", provided[f.name], indent,
+                        )
                 return lines
         return [f"{indent}{target} := {self._emit_expr(expr)};"]
+
+    def _emit_record_field_assign(
+        self, field_target: str, value: A.Expr, indent: str,
+    ) -> list[str]:
+        """Assign `value` to a record field. List-literal values can't be
+        assigned wholesale (PL/SQL has no list literal) — they become
+        index-wise assigns into the field's collection. Everything else
+        is a plain `field := <expr>;`."""
+        if isinstance(value, A.ListLit):
+            lines: list[str] = []
+            for i, el in enumerate(value.elements, start=1):
+                lines.append(
+                    f"{indent}{field_target}({i}) := {self._emit_expr(el)};"
+                )
+            return lines
+        return [f"{indent}{field_target} := {self._emit_expr(value)};"]
 
     def _suggest_record_def(self, sl: A.StructLit) -> str:
         """Build a copy-pasteable `record Foo { ... }` definition by
@@ -3232,6 +3249,115 @@ class Emitter:
             return cur, cur
         return None, None
 
+    def _lift_listlit_args(
+        self, call: A.Call, indent: str,
+    ) -> tuple[list[str], A.Call]:
+        """Lift any ListLit argument to a pre-declared local with literal
+        assigns. PL/SQL has no list-literal expression syntax; pell's
+        `foo([1, 2, 3])` would otherwise fall through to the emitter's
+        \"unhandled\" TODO. We synthesize:
+
+            l_pell_arg_N t_number_list;
+            ...
+            l_pell_arg_N(1) := 1;
+            l_pell_arg_N(2) := 2;
+            l_pell_arg_N(3) := 3;
+            target := foo(l_pell_arg_N);
+
+        Returns (pre_statement_lines, call_with_ListLits_replaced_by_idents).
+        When no ListLit args are present, returns ([], call_unchanged) so
+        the caller can use this unconditionally.
+
+        Element type is inferred from the literal values (NumberLit ->
+        number, TextLit -> text, BoolLit -> bool); mixed or empty lists
+        default to text.
+        """
+        def _liftable_struct(a: A.Expr) -> bool:
+            return (isinstance(a, A.StructLit)
+                    and a.type_name not in self._type_names
+                    and self._resolve_struct_lit_record(a) is not None)
+
+        if not any(isinstance(a, A.ListLit) or _liftable_struct(a)
+                   for a in call.args):
+            return [], call
+        # Intrinsic callees (json::array, sql!{}, jq! macros, etc.)
+        # *want* the raw ListLit — they have specialized handlers that
+        # inspect the literal elements. Leave their args alone.
+        if isinstance(call.callee, A.Ident) and self._is_intrinsic_call(
+            call.callee.name,
+        ):
+            return [], call
+        pre_lines: list[str] = []
+        new_args: list[A.Expr] = []
+        for arg in call.args:
+            # Record struct-lit arg: PL/SQL records have no inline
+            # constructor, so lift to a temp local of the record type,
+            # populate field-by-field, and pass the temp.
+            if _liftable_struct(arg):
+                assert isinstance(arg, A.StructLit)
+                rec = self._resolve_struct_lit_record(arg)
+                assert rec is not None
+                _, owning_pkg = self._lookup_record_with_pkg(arg.type_name)
+                rec_type = (
+                    f"{owning_pkg}.{_record_type_name(rec.name)}"
+                    if owning_pkg is not None
+                    else _record_type_name(rec.name)
+                )
+                self._sql_var_counter += 1
+                tmp_name = f"pell_arg_{self._sql_var_counter}"
+                tmp = local_name(tmp_name)
+                self._decl(f"{tmp} {rec_type};")
+                provided = {f.name: f.value for f in arg.fields}
+                for fld in rec.fields:
+                    if fld.name in provided:
+                        pre_lines += self._emit_record_field_assign(
+                            f"{tmp}.{fld.name.lower()}", provided[fld.name], indent,
+                        )
+                new_args.append(A.Ident(loc=arg.loc, name=tmp_name))
+                continue
+            if not isinstance(arg, A.ListLit):
+                new_args.append(arg)
+                continue
+            elem_pell = self._infer_listlit_elem_type(arg)
+            self._sql_var_counter += 1
+            tmp_name = f"pell_arg_{self._sql_var_counter}"
+            elem_sql = self._lt(A.PrimType(loc=arg.loc, name=elem_pell))
+            list_type = f"t_{elem_pell}_list"
+            if list_type not in self._list_types_emitted:
+                self._list_type_decls.append(
+                    f"  TYPE {list_type} IS TABLE OF {elem_sql} "
+                    f"INDEX BY PLS_INTEGER;"
+                )
+                self._list_types_emitted.add(list_type)
+            local_var = local_name(tmp_name)
+            self._decl(f"{local_var} {list_type};")
+            for i, el in enumerate(arg.elements, start=1):
+                pre_lines.append(
+                    f"{indent}{local_var}({i}) := {self._emit_expr(el)};"
+                )
+            new_args.append(A.Ident(loc=arg.loc, name=tmp_name))
+        new_call = A.Call(
+            loc=call.loc,
+            callee=call.callee,
+            args=new_args,
+            type_args=list(call.type_args),
+            kwargs=dict(call.kwargs),
+        )
+        return pre_lines, new_call
+
+    @staticmethod
+    def _infer_listlit_elem_type(lit: A.ListLit) -> str:
+        if not lit.elements:
+            return "text"
+        first = lit.elements[0]
+        if isinstance(first, A.NumberLit):
+            return "number"
+        if isinstance(first, A.TextLit):
+            return "text"
+        if isinstance(first, A.BoolLit):
+            return "bool"
+        return "text"
+
     def _emit_call_assignment(self, target: str, call: A.Call, indent: str) -> list[str]:
         # `.collect()` on a SELECT → BULK COLLECT INTO
         if isinstance(call.callee, A.MemberAccess) and call.callee.field == "collect":
@@ -3261,7 +3387,8 @@ class Emitter:
             recv = call.callee.obj
             if isinstance(recv, A.SqlBlock) and recv.is_dml:
                 return self._emit_dml_with_rowcount(target, recv, indent)
-        return [f"{indent}{target} := {self._emit_expr(call)};"]
+        pre_lines, call = self._lift_listlit_args(call, indent)
+        return pre_lines + [f"{indent}{target} := {self._emit_expr(call)};"]
 
     def _emit_bulk_collect_into(self, target: str, sql: A.SqlBlock, indent: str) -> list[str]:
         """Lower `<sql_select>.collect()` to `SELECT … BULK COLLECT INTO target …`."""
@@ -3540,6 +3667,14 @@ class Emitter:
             )
             let_lines = self._emit_let(let_stmt, indent)
             return prefix + let_lines + [f"{indent}RETURN {local_name(tmp_name)};"]
+        # `return foo([1,2,3]);` — lift ListLit args to pre-declared
+        # locals before emitting the call.
+        if isinstance(s.value, A.Call):
+            pre, call = self._lift_listlit_args(s.value, indent)
+            if pre:
+                return prefix + pre + [
+                    f"{indent}RETURN {self._emit_expr(call)};"
+                ]
         return prefix + [f"{indent}RETURN {self._emit_expr(s.value)};"]
 
     def _record_return_temp(self, sl: A.StructLit) -> Optional[tuple[str, str, list[str]]]:
@@ -3566,8 +3701,9 @@ class Emitter:
         lines: list[str] = []
         for f in rec.fields:
             if f.name in provided:
-                val = self._emit_expr(provided[f.name])
-                lines.append(f"    {temp_name}.{f.name.lower()} := {val};")
+                lines += self._emit_record_field_assign(
+                    f"{temp_name}.{f.name.lower()}", provided[f.name], "    ",
+                )
         return temp_name, decl_type, lines
 
     def _emit_err_return(self, payload_expr: A.Expr, indent: str) -> list[str]:
@@ -4539,7 +4675,13 @@ class Emitter:
         # built-ins, opaque OBJECT methods) stay permissive because we
         # don't have signatures for them.
         self._reject_unused_return(e, s.loc)
-        # Side-effecting expression (Call / pipeline / try-call / etc.)
+        # Side-effecting expression (Call / pipeline / try-call / etc.).
+        # If it's a Call with ListLit args, lift them to pre-declared
+        # locals so the emitter doesn't fall through to /* TODO: ListLit
+        # unhandled */.
+        if isinstance(e, A.Call):
+            pre, e = self._lift_listlit_args(e, indent)
+            return pre + [f"{indent}{self._emit_expr(e)};"]
         return [f"{indent}{self._emit_expr(e)};"]
 
     def _reject_unused_return(self, e: A.Expr, loc: Any) -> None:
@@ -5985,14 +6127,55 @@ def scan_project_records(
             except Exception:
                 continue
             pkg = mod.name.replace(".", "_").replace("::", "_")
+            # For dotted modules (`pell_test.hello`), also register under
+            # the short package name (`hello`) so callers that refer to
+            # the package by its bare name — the natural form once
+            # connected to that schema — resolve. Mirrors
+            # scan_project_signatures' dual registration.
+            short = mod.name.split(".")[-1].split("::")[-1]
             for item in mod.items:
                 if isinstance(item, A.RecordDef) and item.is_pub:
                     records[(pkg, item.name)] = item
+                    if short != pkg:
+                        records[(short, item.name)] = item
 
     _walk(_Path(root) if root else _Path.cwd())
     runtime = _Path(__file__).resolve().parent.parent / "runtime"
     _walk(runtime)
     return records
+
+
+def _resolve_name_loc(
+    item: "A.Item", src_lines: list[str],
+) -> "A.Loc":
+    """Given an Item with .loc pointing at the leading keyword (`fn`,
+    `record`, `error`, `aggregate`), return a Loc pointing at the
+    declaration's IDENT. Falls back to item.loc if the name can't
+    be located on that line.
+
+    Used by scan_project_definitions so goto-def lands cursor on the
+    name rather than the keyword — required for subsequent Find
+    Usages to look up the right symbol at the new cursor position.
+    """
+    import re as _re
+    name = getattr(item, "name", None)
+    if not name or item.loc.line - 1 >= len(src_lines):
+        return item.loc
+    line = src_lines[item.loc.line - 1]
+    # The keyword sits at item.loc.col (1-based). Scan forward for
+    # the IDENT matching `name` after that column.
+    start_col = max(item.loc.col - 1, 0)
+    m = _re.search(
+        r"\b" + _re.escape(name) + r"\b",
+        line[start_col:],
+    )
+    if m is None:
+        return item.loc
+    return A.Loc(
+        file=item.loc.file,
+        line=item.loc.line,
+        col=start_col + m.start() + 1,  # back to 1-based
+    )
 
 
 def scan_project_definitions(
@@ -6027,9 +6210,11 @@ def scan_project_definitions(
             if any(p in _SKIP for p in rel_parts[:-1]):
                 continue
             try:
-                mod = _parse(path.read_text(encoding="utf-8"), str(path))
+                src = path.read_text(encoding="utf-8")
+                mod = _parse(src, str(path))
             except Exception:
                 continue
+            src_lines = src.splitlines()
             pkg = mod.name.replace(".", "_").replace("::", "_")
             short = mod.name.split(".")[-1].split("::")[-1]
             for item in mod.items:
@@ -6038,11 +6223,18 @@ def scan_project_definitions(
                     continue
                 if not getattr(item, "is_pub", False):
                     continue
-                out[(pkg, item.name)] = item.loc
+                # Resolve the NAME's location, not the keyword's. Parser
+                # stores item.loc on the `fn`/`record`/`error`/`aggregate`
+                # keyword; for navigation we want the cursor to land on
+                # the identifier so Find Usages at that position resolves
+                # to the symbol (IDE jumps cursor to goto-def result, then
+                # subsequent Find Usages searches the name at that position).
+                name_loc = _resolve_name_loc(item, src_lines)
+                out[(pkg, item.name)] = name_loc
                 # Also under the short form for dotted modules so
                 # `logger::info` from `std::logger` finds the same loc.
                 if short != pkg:
-                    out[(short, item.name)] = item.loc
+                    out[(short, item.name)] = name_loc
 
     _walk(_Path(root) if root else _Path.cwd())
     runtime = _Path(__file__).resolve().parent.parent / "runtime"
@@ -6131,6 +6323,7 @@ def emit_anon_block(
     *,
     source_path: Optional[str] = None,
     project_signatures: Optional[dict[str, "A.TypeRef"]] = None,
+    project_records: Optional[dict[tuple[str, str], "A.RecordDef"]] = None,
 ) -> str:
     """Emit a cell (items + top-level statements) as a self-contained
     anonymous PL/SQL block. Used by `pell exec` and the REPL.
@@ -6143,6 +6336,11 @@ def emit_anon_block(
     of pub fns from sibling .pell files in the same project. Lets the
     emitter infer types of cross-package calls without the user
     annotating the let.
+
+    `project_records` is the matching `(pkg, name) → RecordDef` map so
+    cross-package record constructors (`pkg::Args { … }`, or a bare
+    `Args { … }` when `import pkg;` is in the cell) resolve in the REPL
+    and `pell exec` the same way they do in `pell build`.
     """
     loc = A.Loc(file=source_path or "<cell>", line=1, col=1)
     if stmts:
@@ -6170,4 +6368,8 @@ def emit_anon_block(
     )
     if project_signatures:
         emitter._project_signatures = dict(project_signatures)
+    if project_records:
+        emitter._project_records = dict(project_records)
+        for (pkg, name), rec in project_records.items():
+            emitter._project_records_by_name.setdefault(name, []).append((pkg, rec))
     return emitter.emit_anon()

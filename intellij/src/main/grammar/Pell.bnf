@@ -48,6 +48,14 @@
   // PellNamedElementImpl base walks children for.
   implements(".*Name") = "dev.pell.intellij.psi.PellNameIdentifier"
 
+  // Reference-bearing rules — their generated impls extend a mixin that
+  // overrides getReference() with a HARD reference. This is required
+  // because Grammar-Kit's ASTWrapperPsiElement is not a
+  // ContributedReferenceHost, so the PsiReferenceContributor's
+  // references were silently dropped (broke Find Usages + Rename).
+  mixin("qualifiedExpr") = "dev.pell.intellij.psi.impl.PellQualifiedExprMixin"
+  mixin("typeRef")       = "dev.pell.intellij.psi.impl.PellTypeRefMixin"
+
   // Catch-all default base + marker interface for every other rule.
   extends(".*") = "dev.pell.intellij.psi.impl.PellPsiElementImpl"
   implements(".*") = "dev.pell.intellij.psi.PellPsiElement"
