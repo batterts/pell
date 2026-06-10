@@ -82,5 +82,8 @@ pub fn count_of(haystack: text, needle: text) -> number {
 // which behaves correctly only for single-byte charsets; for multibyte
 // data, callers should use a regexp-based reverse instead.
 pub fn reversed(s: text) -> text {
-    return reverse(s);
+    // REVERSE is an undocumented Oracle function that works in SQL but
+    // is NOT callable from PL/SQL (PLS-00201). Wrap it in a sql!{}
+    // SELECT so it runs in the SQL engine.
+    return sql! { select reverse(:s) from dual }.scalar();
 }

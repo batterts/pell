@@ -38,6 +38,12 @@ pub record KV {
 }
 
 pub fn parse_kv(s: text) -> KV {
+    let kv: KV = extracted(s);
+    return kv;
+}
+
+fn extracted(s: text) -> KV {
     let kv: KV = re::capture::<KV>(s, /(?<k>\w+)=(?<v>\S+)/);
     return kv;
 }
+

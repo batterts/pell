@@ -1,18 +1,12 @@
 module hello;
 
 import std::logger;
-import collections_linked_list;
 
+// The smallest useful pell module: a public function that logs and
+// returns an interpolated string. `pub fn` lands in the package spec;
+// the body lowers to a PL/SQL FUNCTION. `logger::info` is the std
+// logging shim (lowers to a DBMS_OUTPUT-backed call).
 pub fn greet(name: text) -> text {
-  logger::info(name);
-  logger::err("test");
-
-    let a: Summary = Summary {
-        count: 0,
-        total: 0,
-        contains_zero: false,
-    };
-
-    let result = collections_linked_list::from_list([1,2,3,4,5,6,7,8]);
-    return "{a.count} {result} {a.total}";
+  logger::info("greeting {name}");
+  return "hello, {name}";
 }
