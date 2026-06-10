@@ -52,7 +52,20 @@ data class ExtractMethodAnalysis(
     /** Why the selection is unextractable, or null if it's fine. */
     val rejectionReason: String?,
 ) {
-    data class CapturedParam(val name: String, val declaration: PsiElement)
+    data class CapturedParam(val name: String, val declaration: PsiElement) {
+        /** The declared pell type of the captured local — read from the
+         *  declaration's typeRef (`let x: number`, `p: text` param,
+         *  `var y: list<text>`). Falls back to "text" when the binding
+         *  is unannotated; `any` is never emitted (it lowers to a
+         *  non-existent `t_any` and fails at deploy). */
+        val typeText: String
+            get() {
+                val typeRef = com.intellij.psi.util.PsiTreeUtil.findChildOfType(
+                    declaration, dev.pell.intellij.psi.PellTypeRef::class.java,
+                )
+                return typeRef?.text ?: "text"
+            }
+    }
 
     /** A value produced by the selection and consumed after it.
      *  `typeText` is the declared pell type (or "any" if unannotated). */

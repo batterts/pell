@@ -151,10 +151,41 @@ class PellRefactoringTest : BasePlatformTestCase() {
         )
         val r = myFixture.file.text
         // Extracted fn returns KV and ends with `return kv;`.
-        assertTrue("fn returns KV", r.contains("fn extract_kv(s: any) -> KV"))
+        assertTrue("fn returns KV with typed param", r.contains("fn extract_kv(s: text) -> KV"))
         assertTrue("fn returns the output", r.contains("return kv;"))
         // Call site rebinds kv so `return kv;` in parse_kv still resolves.
         assertTrue("call rebinds kv", r.contains("let kv: KV = extract_kv(s);"))
+    }
+
+    /** Captured params carry their declared types — `any` never appears
+     *  (it lowers to a non-existent t_any and fails at deploy). */
+    fun testExtractMethodTypedParams() {
+        myFixture.configureByText(
+            "a.pell",
+            """
+            module a;
+
+            pub fn run(n: number) {
+                let label: text = "x";
+                p(label);
+                p(n);
+            }
+            """.trimIndent(),
+        )
+        val text = myFixture.file.text
+        val start = text.indexOf("    p(label);")
+        val end = text.indexOf("p(n);") + "p(n);".length
+        myFixture.editor.selectionModel.setSelection(start, end)
+        val file = myFixture.file as PellFile
+        val analysis = ExtractMethodAnalyzer.analyze(file, myFixture.editor)
+        assertTrue("extractable: ${analysis.rejectionReason}", analysis.isExtractable)
+        PellExtractMethodHandler().applyExtract(
+            project, file, myFixture.editor, analysis, "printed", false,
+        )
+        val r = myFixture.file.text
+        assertTrue("label typed text", r.contains("label: text"))
+        assertTrue("n typed number", r.contains("n: number"))
+        assertFalse("no any params", r.contains(": any"))
     }
 
     // ---- Parameters to Record ------------------------------------------

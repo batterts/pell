@@ -80,10 +80,11 @@ class PellExtractMethodHandler : RefactoringActionHandler {
 
             // Build the extracted fn text from the captured params + selected stmts.
             val paramList = analysis.capturedParams.joinToString(", ") {
-                // Phase 6 v0: every captured param is typed `any` (will be
-                // inferred by the compiler). Phase-final type-inference pass
-                // can fill in concrete types per the original locals.
-                "${it.name}: any"
+                // Param types come from the captured local's declared
+                // annotation (let/var/param typeRef); "text" fallback for
+                // unannotated bindings. Never `any` — that lowers to a
+                // non-existent t_any and fails at deploy.
+                "${it.name}: ${it.typeText}"
             }
             val visibility = if (isPub) "pub fn" else "fn"
 
