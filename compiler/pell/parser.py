@@ -261,8 +261,20 @@ class Parser:
         return A.SequenceDef(loc=kw.loc, annotations=annotations, is_pub=is_pub, name=name)
 
     def _parse_import(self, annotations: list[A.Annotation], is_pub: bool) -> A.ImportStmt:
+        """`import [schema::] a.b.c;` — mirrors the module-decl shape.
+        An optional `IDENT ::` schema prefix, then a dotted module path.
+        The legacy `std::logger`-style multi-`::` path still parses
+        (each `::` hop appends), so existing imports keep working.
+        """
         kw = self._expect("KW_IMPORT")
-        path = self._parse_qualified_ident()
+        first = self._expect("IDENT", "expected module path after `import`")
+        path = first.value
+        # Optional schema prefix and/or legacy :: separators.
+        while self._eat("COLONCOLON"):
+            path += "::" + self._expect("IDENT").value
+        # Dotted module-path segments.
+        while self._eat("DOT"):
+            path += "." + self._expect("IDENT").value
         self._expect("SEMI")
         return A.ImportStmt(loc=kw.loc, annotations=annotations, is_pub=is_pub, path=path)
 

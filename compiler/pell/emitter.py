@@ -10,6 +10,7 @@ in the output indicate constructs that aren't fully lowered yet.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
 
 from . import ast as A
@@ -425,6 +426,10 @@ class Emitter:
         # cases raise a helpful EmitError pointing at the candidates.
         self._project_records: dict[tuple[str, str], A.RecordDef] = {}
         self._project_records_by_name: dict[str, list[tuple[str, A.RecordDef]]] = {}
+        # Project module registry (package/short name -> ModuleInfo).
+        # Drives ACCESSIBLE BY emission + the compile-time access check.
+        # Populated externally via emit(project_modules=...).
+        self._project_modules: dict[str, "ModuleInfo"] = {}
         # Packages currently in scope for cross-package references. Always
         # includes the local module so self-qualified refs work. Each
         # import contributes BOTH the fully-qualified form (`std_logger`)
@@ -748,6 +753,54 @@ class Emitter:
             self._check_pkg_imported(pkg_key, sl.loc)
         return self._lookup_record(sl.type_name)
 
+    def _check_pkg_accessible(self, pkg: str, loc: A.Loc) -> None:
+        """Mirror Oracle's ACCESSIBLE BY enforcement at pell compile
+        time: a call to a GUARDED submodule from outside its access
+        domain is an error here, with a precise loc, instead of a
+        PLS-00904 at install time (or worse, an unguarded mistake).
+
+        A target is guarded iff the emitted spec carries an
+        ACCESSIBLE BY clause — non-root, not @open, and its domain has
+        at least one other member (the exact emission conditions in
+        _accessible_by_clause). Unknown packages (Oracle stdlib,
+        external schemas) are never checked.
+        """
+        target = self._project_modules.get(pkg)
+        if target is None or target.is_root or target.is_open:
+            return
+        # Domain has other members? (Dedupe registry rows — both the
+        # package name and the short name map to the same ModuleInfo.)
+        domain_pkgs = {
+            info.package_name
+            for info in self._project_modules.values()
+            if info.domain_key == target.domain_key
+        }
+        if len(domain_pkgs) <= 1:
+            return  # standalone — no clause was emitted, stays public
+        caller = self.module
+        if caller.name == "_pell_anon":
+            raise EmitError(
+                f"module `{target.path}` is a guarded submodule — its "
+                f"package is ACCESSIBLE BY the `{target.domain}` domain "
+                f"only, so anonymous blocks (REPL / pell exec) can't "
+                f"call it. Call through the domain's root module "
+                f"`{target.domain}`, or mark the module `@open` to lift "
+                f"the wall.",
+                loc,
+                code="pell.access-violation",
+            )
+        caller_key = (caller.schema or "", caller.access_domain)
+        if caller_key != target.domain_key:
+            raise EmitError(
+                f"module `{caller.name}` (domain `{caller.access_domain}`) "
+                f"can't call into `{target.path}` — that package is "
+                f"ACCESSIBLE BY the `{target.domain}` domain only. Call "
+                f"its root module `{target.domain}` instead, or mark "
+                f"`{target.path}` as `@open`.",
+                loc,
+                code="pell.access-violation",
+            )
+
     def _check_pkg_imported(self, pkg: str, loc: A.Loc) -> None:
         """Raise pell.missing-import if `pkg` is not in the local
         module's import set. Callers pass the source loc of the
@@ -875,6 +928,46 @@ class Emitter:
         lines.append("")
         return "\n".join(lines)
 
+    def _accessible_by_clause(self) -> Optional[str]:
+        """Build the ACCESSIBLE BY (...) clause for this module, or None
+        when the package should stay public.
+
+        Access model (full lineage + siblings — i.e., the whole domain):
+          * The access DOMAIN is (schema, top path segment). Everything
+            under `demo::app.*` can call everything else under it.
+          * ROOT modules (`demo::app` — no dotted sub-path) are the
+            public application interface: no clause, callable by anyone.
+          * NON-ROOT modules (`demo::app.parsing`) get
+            `ACCESSIBLE BY (PACKAGE demo.app, PACKAGE demo.app_validation, ...)`
+            listing every OTHER package in the domain. Oracle then
+            rejects calls from outside the domain at compile time of
+            the caller (PLS-00904) — real runtime-adjacent enforcement,
+            not a pell-only fiction.
+          * `@open` on the module opts out (debugging / REPL access).
+          * No project context (single-file build) or a single-member
+            domain → no clause. The walls go up once the domain has
+            other members.
+        """
+        if self.module.is_root_module:
+            return None
+        if any(a.name == "open" for a in self.module.annotations):
+            return None
+        if not self._project_modules:
+            return None
+        my_key = (self.module.schema or "", self.module.access_domain)
+        members = {
+            info.qualified_name: info
+            for info in self._project_modules.values()
+            if info.domain_key == my_key
+            and info.package_name != self.module.package_name
+        }
+        if not members:
+            return None
+        accessors = ", ".join(
+            f"PACKAGE {qn}" for qn in sorted(members)
+        )
+        return f"ACCESSIBLE BY ({accessors})"
+
     def _exception_name(self, err_name: str) -> str:
         # Exceptions land in the global pell_runtime package, so they have
         # to be globally unique. Use the SCHEMA-qualified package name
@@ -921,7 +1014,13 @@ class Emitter:
                             f"  TYPE {cur_name} IS REF CURSOR RETURN {rec_type};"
                         )
         out: list[str] = []
-        out.append(f"CREATE OR REPLACE PACKAGE {self._q(self.pkg)} AS")
+        accessible_by = self._accessible_by_clause()
+        if accessible_by:
+            out.append(f"CREATE OR REPLACE PACKAGE {self._q(self.pkg)}")
+            out.append(f"  {accessible_by}")
+            out.append("AS")
+        else:
+            out.append(f"CREATE OR REPLACE PACKAGE {self._q(self.pkg)} AS")
         # Enum constants — emitted before records so they can be referenced
         # from record field defaults (future) and from fn bodies.
         for e in self._enums:
@@ -5105,6 +5204,7 @@ class Emitter:
             pkg = e.callee.name.rsplit("::", 1)[0]
             pkg_key = pkg.replace("::", "_").replace(".", "_")
             self._check_pkg_imported(pkg_key, e.loc)
+            self._check_pkg_accessible(pkg_key, e.loc)
 
         # Print aliases — rewrite to dbms_output.put_line, auto-stringify
         # the single argument so any type prints with the same format as
@@ -5957,7 +6057,17 @@ class Emitter:
             return name.lower()
         if "::" in name:
             parts = name.split("::")
-            return ".".join(parts[:-1]).lower() + "." + parts[-1].lower()
+            head = ".".join(parts[:-1]).lower()
+            # Resolve a module SHORT name to its real qualified package.
+            # `parsing::tokenize` (module app.parsing) must lower to
+            # `app_parsing.tokenize` — and a schema-qualified module
+            # (`module demo::app.parsing`) to `demo.app_parsing.…`.
+            # The local module is exempt (calls to self stay in-package
+            # — though those are normally unqualified anyway).
+            info = self._project_modules.get(head)
+            if info is not None and info.package_name != self.pkg:
+                head = info.qualified_name.lower()
+            return head + "." + parts[-1].lower()
         # Parameters shadow same-named fn references — a fn's own param
         # always wins inside its body. (Was the other way around and caused
         # subtle aliasing when, e.g., a param `s` shadowed a sibling fn `s`.)
@@ -6088,7 +6198,8 @@ def emit(module: A.Module, target: str = "23", *,
          project_signatures: Optional[dict[str, "A.TypeRef"]] = None,
          project_records: Optional[
              dict[tuple[str, str], "A.RecordDef"]
-         ] = None) -> str:
+         ] = None,
+         project_modules: Optional[dict[str, "ModuleInfo"]] = None) -> str:
     """Compile `module` to PL/SQL.
 
     `project_signatures` and `project_records` thread cross-package
@@ -6114,6 +6225,8 @@ def emit(module: A.Module, target: str = "23", *,
         e._project_records = dict(project_records)
         for (pkg, name), rec in project_records.items():
             e._project_records_by_name.setdefault(name, []).append((pkg, rec))
+    if project_modules:
+        e._project_modules = dict(project_modules)
     return e.emit()
 
 
@@ -6178,6 +6291,93 @@ def scan_project_records(
     runtime = _Path(__file__).resolve().parent.parent / "runtime"
     _walk(runtime)
     return records
+
+
+@dataclass(frozen=True)
+class ModuleInfo:
+    """Project-scan record of one module declaration — everything the
+    ACCESSIBLE BY emission and the compile-time access check need.
+
+    `schema` is the explicit `schema::` prefix or None (connected
+    schema). `path` is the dotted module path. `domain` is the top
+    path segment — the ACCESSIBLE BY boundary. `is_open` marks an
+    `@open` module (opts out of access control). `is_root` marks a
+    top-level module (no dots): the public application interface.
+    """
+    schema: Optional[str]
+    path: str               # e.g. "app.parsing.lex"
+    package_name: str       # e.g. "app_parsing_lex"
+    domain: str             # e.g. "app"
+    is_open: bool
+    is_root: bool
+
+    @property
+    def qualified_name(self) -> str:
+        return f"{self.schema}.{self.package_name}" if self.schema else self.package_name
+
+    @property
+    def domain_key(self) -> tuple[str, str]:
+        return (self.schema or "", self.domain)
+
+
+def scan_project_modules(
+    root: Optional["Path"] = None,
+) -> dict[str, "ModuleInfo"]:
+    """Walk the project (same exclusion rules as scan_project_records)
+    and index every module declaration by BOTH its package name
+    (`app_parsing`) and its short name (`parsing`). Stub modules are
+    skipped — they describe externally-owned packages (Oracle SYS etc.)
+    and never participate in access domains.
+
+    Feeds two consumers:
+      * ACCESSIBLE BY emission — a non-root module lists every other
+        package in its (schema, domain) as an accessor.
+      * The compile-time access check — a cross-module call to a
+        guarded submodule from outside its domain is a pell error
+        before Oracle's PLS-00904 at install time.
+    """
+    from pathlib import Path as _Path
+    from .parser import parse as _parse
+    out: dict[str, ModuleInfo] = {}
+    seen: set[_Path] = set()
+    _SKIP = {"built", "out", ".git", "node_modules", "expected",
+             "plsql", "dist", "build", ".venv", "venv"}
+
+    def _walk(base: _Path) -> None:
+        base = base.resolve()
+        if not base.is_dir() or base in seen:
+            return
+        seen.add(base)
+        for path in base.rglob("*.pell"):
+            try:
+                rel_parts = path.resolve().relative_to(base).parts
+            except ValueError:
+                rel_parts = path.parts
+            if any(p in _SKIP for p in rel_parts[:-1]):
+                continue
+            try:
+                mod = _parse(path.read_text(encoding="utf-8"), str(path))
+            except Exception:
+                continue
+            if any(a.name == "stub" for a in mod.annotations):
+                continue
+            info = ModuleInfo(
+                schema=mod.schema,
+                path=mod.name,
+                package_name=mod.package_name,
+                domain=mod.access_domain,
+                is_open=any(a.name == "open" for a in mod.annotations),
+                is_root=mod.is_root_module,
+            )
+            out[mod.package_name] = info
+            short = mod.short_name
+            if short != mod.package_name:
+                out.setdefault(short, info)
+
+    _walk(_Path(root) if root else _Path.cwd())
+    runtime = _Path(__file__).resolve().parent.parent / "runtime"
+    _walk(runtime)
+    return out
 
 
 def _resolve_name_loc(
@@ -6359,6 +6559,7 @@ def emit_anon_block(
     source_path: Optional[str] = None,
     project_signatures: Optional[dict[str, "A.TypeRef"]] = None,
     project_records: Optional[dict[tuple[str, str], "A.RecordDef"]] = None,
+    project_modules: Optional[dict[str, "ModuleInfo"]] = None,
 ) -> str:
     """Emit a cell (items + top-level statements) as a self-contained
     anonymous PL/SQL block. Used by `pell exec` and the REPL.
@@ -6407,4 +6608,6 @@ def emit_anon_block(
         emitter._project_records = dict(project_records)
         for (pkg, name), rec in project_records.items():
             emitter._project_records_by_name.setdefault(name, []).append((pkg, rec))
+    if project_modules:
+        emitter._project_modules = dict(project_modules)
     return emitter.emit_anon()

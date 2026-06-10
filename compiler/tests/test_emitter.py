@@ -2215,3 +2215,91 @@ def test_record_named_like_list_does_not_call_list_helper():
     assert "t_user_list IS RECORD" in sql
     # NO list helper got triggered:
     assert "pell_list_to_text" not in sql
+
+
+# ---------------------------------------------------------------------------
+# ACCESSIBLE BY — module access domains
+# ---------------------------------------------------------------------------
+
+def _mk_modules(*specs):
+    """Build a project_modules registry from (schema, path, is_open) specs."""
+    from pell.emitter import ModuleInfo
+    out = {}
+    for schema, path, is_open in specs:
+        info = ModuleInfo(
+            schema=schema, path=path,
+            package_name=path.replace(".", "_"),
+            domain=path.split(".")[0],
+            is_open=is_open, is_root="." not in path,
+        )
+        out[info.package_name] = info
+        short = path.split(".")[-1]
+        out.setdefault(short, info)
+    return out
+
+
+def test_accessible_by_emitted_for_guarded_submodule():
+    from pell.parser import parse
+    from pell.emitter import emit
+    mods = _mk_modules((None, "app", False), (None, "app.parsing", False))
+    sql = emit(
+        parse("module app.parsing;\npub fn t() -> number { return 1; }", "<t>"),
+        project_modules=mods,
+    )
+    assert "ACCESSIBLE BY (PACKAGE app)" in sql
+
+
+def test_root_module_stays_public():
+    from pell.parser import parse
+    from pell.emitter import emit
+    mods = _mk_modules((None, "app", False), (None, "app.parsing", False))
+    sql = emit(
+        parse("module app;\npub fn r() -> number { return 1; }", "<t>"),
+        project_modules=mods,
+    )
+    assert "ACCESSIBLE BY" not in sql
+
+
+def test_open_module_skips_clause():
+    from pell.parser import parse
+    from pell.emitter import emit
+    mods = _mk_modules((None, "app", False), (None, "app.debug", True))
+    sql = emit(
+        parse("@open\nmodule app.debug;\npub fn d() -> number { return 1; }", "<t>"),
+        project_modules=mods,
+    )
+    assert "ACCESSIBLE BY" not in sql
+
+
+def test_cross_domain_call_rejected():
+    import pytest
+    from pell.parser import parse
+    from pell.emitter import emit, EmitError
+    mods = _mk_modules((None, "app", False), (None, "app.parsing", False),
+                       (None, "intruder", False))
+    with pytest.raises(EmitError) as exc:
+        emit(
+            parse(
+                "module intruder;\nimport app.parsing;\n"
+                "pub fn s() -> text { return parsing::t(); }",
+                "<t>",
+            ),
+            project_modules=mods,
+        )
+    assert "access" in str(exc.value).lower() or "ACCESSIBLE" in str(exc.value)
+
+
+def test_in_domain_call_allowed_and_lowered_to_real_package():
+    from pell.parser import parse
+    from pell.emitter import emit
+    mods = _mk_modules((None, "app", False), (None, "app.parsing", False))
+    sql = emit(
+        parse(
+            "module app;\nimport app.parsing;\n"
+            "pub fn r() -> text { return parsing::t(); }",
+            "<t>",
+        ),
+        project_modules=mods,
+    )
+    # Short module name resolves to the real package name.
+    assert "app_parsing.t()" in sql

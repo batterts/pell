@@ -2080,24 +2080,56 @@ shape.
 
 ## 7. Module / package model
 
-- One `module foo.bar.baz;` per file.
-- **First dotted node is the schema; the rest is mangled into the package
-  name.** `module hr_app.employees` → schema `hr_app`, package `employees`,
-  emitted as `CREATE OR REPLACE PACKAGE hr_app.employees AS …`. Deeper
-  paths join with underscores: `module hr_app.shared.utils` →
-  `hr_app.shared_utils`. Single-node modules (`module foo;`) emit
-  unqualified (current-schema fallback) for backwards compat.
+- One `module [schema::] a.b.c;` per file.
+- **The schema is the explicit `::`-separated prefix; the dotted path is
+  the package name.** `module hr::employees` → schema `hr`, package
+  `employees`, emitted as `CREATE OR REPLACE PACKAGE hr.employees AS …`.
+  Without a `::` prefix (`module app.parsing;`) the whole dotted path is
+  the package (`app_parsing`) in the *connected* schema — no segment is
+  ever implicitly a schema. This removes the Oracle-style ambiguity where
+  `b.c.d` could mean either schema `b` package `c_d` or package `b_c_d`.
 - `pub fn` / `pub record` / `pub error` is exported; everything else is
   package-private and goes only in the body.
-- Cross-module calls within the same schema are unqualified
-  (`employees.greet(...)`) — Oracle resolves via current schema. Cross-schema
-  calls aren't surfaced in v1 (use `unsafe { sql!{...} }` if you need them).
+- Cross-module calls use the module's **short name** (`parsing::tokenize`)
+  — the last dotted segment — which the emitter resolves to the real
+  qualified package (`app_parsing.tokenize`, schema-prefixed when the
+  target declares one). `import` is required for any cross-module
+  reference; ambiguous short names are a compile error.
 - Single optional runtime package: `pell_runtime` (only if lowering strategy
   (B) wins; see §6.6). Contains payload-passing helpers and nothing else.
-- Cross-module exception identifiers in `pell_runtime` use the *full
-  mangled module name* (`hr_employees_notfound`, not `employees_notfound`)
-  so two modules in different schemas with the same package name and same
-  error name don't collide.
+- Cross-module exception identifiers in `pell_runtime` use the
+  *schema-qualified mangled name* (`hr_employees_notfound`) so modules in
+  different schemas with the same package + error name don't collide.
+
+### 7.0.0 Access domains — `ACCESSIBLE BY` enforcement
+
+The dotted module hierarchy is an **access-control boundary**, enforced
+by Oracle itself via `ACCESSIBLE BY` (12.2+):
+
+- The **access domain** is `(schema, top path segment)`. Everything under
+  `demo::app.*` forms one application: full lineage *and* siblings
+  inter-call freely.
+- The **root module** (`demo::app` — no dotted sub-path) is the public
+  application interface. Its spec carries no clause; anyone can call it.
+- **Non-root modules** (`demo::app.parsing`) emit
+  `ACCESSIBLE BY (PACKAGE demo.app, PACKAGE demo.app_validation, …)` —
+  every other package in the domain. Oracle rejects calls from outside
+  the domain at caller-compile time (PLS-00904). Pell rejects them
+  earlier, at pell-compile time (`pell.access-violation`), with a message
+  naming the root module to call instead.
+- **Anonymous blocks (REPL / `pell exec`) cannot call guarded
+  submodules** — Oracle's accessor lists name program units only. Call
+  through the domain's root, or mark the submodule `@open`.
+- **`@open`** (module-level annotation) opts a submodule out of the
+  clause — an escape hatch for debugging or genuinely shared internals.
+- The walls go up only when a domain has ≥ 2 modules in the project
+  scan. A standalone dotted module (or a single-file build with no
+  project context) stays public.
+
+The intent: decompose a 2000-line package into a public root + focused
+sub-packages without making every helper schema-public. The hierarchy is
+the privacy mechanism — `pub` exports an item *to the domain*; the
+domain wall decides who sees the package at all.
 
 ### 7.0.1 Generated preamble + dependency manifest
 

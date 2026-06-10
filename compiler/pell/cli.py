@@ -36,11 +36,14 @@ def cmd_build(args: argparse.Namespace) -> int:
     try:
         from .repl import scan_project_signatures
         from .emitter import scan_project_records as _scan_records
+        from .emitter import scan_project_modules as _scan_modules
         project_signatures = scan_project_signatures()
         project_records = _scan_records()
+        project_modules = _scan_modules()
     except Exception:
         project_signatures = {}
         project_records = {}
+        project_modules = {}
     failures = 0
     for src_path in inputs:
         try:
@@ -50,7 +53,8 @@ def cmd_build(args: argparse.Namespace) -> int:
                        source_text=src, source_path=str(src_path),
                        reproducible=getattr(args, "reproducible", False),
                        project_signatures=project_signatures,
-                       project_records=project_records)
+                       project_records=project_records,
+                       project_modules=project_modules)
         except (LexError, ParseError, EmitError) as e:
             print(f"pell: {e}", file=sys.stderr)
             failures += 1
@@ -270,11 +274,14 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     try:
         from .repl import scan_project_signatures
         from .emitter import scan_project_records as _scan_records
+        from .emitter import scan_project_modules as _scan_modules
         project_signatures = scan_project_signatures()
         project_records = _scan_records()
+        project_modules = _scan_modules()
     except Exception:
         project_signatures = {}
         project_records = {}
+        project_modules = {}
     built_files: list[Path] = []
     uses_re = False
     uses_logger = False
@@ -287,7 +294,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             sql = emit(module, target=args.target, source_text=src,
                        source_path=str(src_path), reproducible=args.reproducible,
                        project_signatures=project_signatures,
-                       project_records=project_records)
+                       project_records=project_records,
+                       project_modules=project_modules)
         except (LexError, ParseError, EmitError) as e:
             print(f"  ✗ {src_path.name}: {e}", file=sys.stderr)
             failures += 1
@@ -550,16 +558,25 @@ def cmd_exec(args: argparse.Namespace) -> int:
     if not items and not stmts:
         return 0
     # Scan the cwd for sibling .pell files so cross-package call
-    # inference works the same way it does in the REPL.
+    # inference + record resolution + access checks work the same way
+    # they do in the REPL and `pell build`.
     try:
         from .repl import scan_project_signatures
+        from .emitter import scan_project_records as _scan_records
+        from .emitter import scan_project_modules as _scan_modules
         project_signatures = scan_project_signatures()
+        project_records = _scan_records()
+        project_modules = _scan_modules()
     except Exception:
         project_signatures = {}
+        project_records = {}
+        project_modules = {}
     try:
         block = emit_anon_block(items, stmts, target=args.target,
                                 source_path=source_path,
-                                project_signatures=project_signatures)
+                                project_signatures=project_signatures,
+                                project_records=project_records,
+                                project_modules=project_modules)
     except EmitError as e:
         print(f"pell: {e}", file=sys.stderr)
         return 1
