@@ -1,0 +1,8 @@
+Pell File
+  PellModuleDeclImpl(MODULE_DECL)
+    PsiElement(PellTokenType.module)('module')
+    PsiWhiteSpace(' ')
+    PellModuleNameImpl(MODULE_NAME)
+      PellDottedIdentImpl(DOTTED_IDENT)
+        PsiElement(PellTokenType.IDENT)('empty')
+    PsiElement(PellTokenType.;)(';')

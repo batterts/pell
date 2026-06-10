@@ -35,4 +35,16 @@ class PellRangeParseTest : BasePlatformTestCase() {
     fun testListLiteralFor() = assertParses(
         "module a;\npub fn f() {\n  for x in [1, 2, 3] { p(x); }\n}",
     )
+
+    fun testModuleLevelAnnotation() = assertParses(
+        "@stub\nmodule dbms_output;\npub fn put_line(msg: text) { }",
+    )
+
+    fun testSchemaQualifiedModule() = assertParses(
+        "module demo::app.parsing;\npub fn t() -> number { return 1; }",
+    )
+
+    fun testDottedImport() = assertParses(
+        "module app;\nimport app.parsing;\npub fn r() -> number { return 1; }",
+    )
 }
