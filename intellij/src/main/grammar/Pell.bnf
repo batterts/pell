@@ -161,7 +161,10 @@
 pellFile ::= moduleDecl item *
 
 moduleDecl ::= KW_MODULE moduleName SEMI { pin = 1 }
-moduleName ::= dottedIdent
+// `module [schema::] a.b.c;` — optional `IDENT ::` schema prefix, then
+// the dotted module path. Mirrors the Python parser: the schema gets
+// its own slot so the dotted path is unambiguously the package name.
+moduleName ::= (IDENT COLONCOLON) ? dottedIdent
 
 dottedIdent ::= IDENT (DOT IDENT) *
 
