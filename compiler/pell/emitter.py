@@ -1015,6 +1015,23 @@ class Emitter:
                 slug = t.replace(".", "_").replace("@", "_at_")
                 out.append(f"    CURSOR pin_{slug} IS SELECT 1 FROM {t} WHERE 1=0;")
             out.append("  BEGIN NULL; END pell_dep_pinning;")
+        # Forward declarations for PRIVATE fns. Public fns are declared
+        # in the package spec, so the body may call them in any order.
+        # Private fns live only in the body — so calling one before its
+        # definition is a forward reference (PLS-00313). Declaring every
+        # private fn's signature up front lets them call each other (and
+        # be called by earlier pub fns) regardless of source order.
+        private_fwd = [
+            fn for fn in self._fns
+            if not fn.is_pub and not self._is_stub_fn(fn)
+            and not any(a.name == "pipelined" for a in fn.annotations)
+        ]
+        if private_fwd:
+            out.append("")
+            out.append("  -- Forward declarations (private fns; lets them be")
+            out.append("  -- called before their definition in this body).")
+            for fn in private_fwd:
+                out.append("  " + self._fn_signature(fn) + ";")
         # all fns
         for chunk in fn_chunks:
             out.append("")
