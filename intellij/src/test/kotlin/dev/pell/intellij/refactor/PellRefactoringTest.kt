@@ -279,6 +279,62 @@ class PellRefactoringTest : BasePlatformTestCase() {
         assertTrue("added to dest", dest.text.contains("pub fn mover()"))
     }
 
+    /** Move rewrites references: qualified callers flip to the new
+     *  module's qualifier (+ import added); bare uses in the old home
+     *  get qualified. */
+    fun testMoveSymbolRewritesReferences() {
+        val dest = myFixture.addFileToProject(
+            "dest2.pell",
+            """
+            module dest2;
+
+            pub fn existing() -> number {
+                return 0;
+            }
+            """.trimIndent(),
+        ) as PellFile
+        val caller = myFixture.addFileToProject(
+            "caller2.pell",
+            """
+            module caller2;
+            import src2;
+
+            pub fn use_it() -> number {
+                return src2::mover() + 1;
+            }
+            """.trimIndent(),
+        )
+        myFixture.configureByText(
+            "src2.pell",
+            """
+            module src2;
+
+            pub fn mover() -> number {
+                return 99;
+            }
+
+            pub fn local_user() -> number {
+                return mover() + 1;
+            }
+            """.trimIndent(),
+        )
+        val file = myFixture.file as PellFile
+        val target = com.intellij.psi.util.PsiTreeUtil.findChildrenOfType(
+            file, dev.pell.intellij.psi.PellFnDef::class.java,
+        ).first { it.name == "mover" }
+        dev.pell.intellij.refactor.move.PellMoveSymbolAction()
+            .doMove(project, file, target, dest, "dest2")
+        // Cross-file qualified caller flips qualifier + gains import.
+        assertTrue("caller requalified", caller.text.contains("dest2::mover()"))
+        assertTrue("caller imports dest2", caller.text.contains("import dest2;"))
+        // Bare use in the old home gets qualified + import.
+        val src = myFixture.file.text
+        assertTrue("old-home bare use qualified", src.contains("dest2::mover()"))
+        assertTrue("old home imports dest2", src.contains("import dest2;"))
+        // The decl itself lives in dest now.
+        assertTrue("decl moved", dest.text.contains("pub fn mover()"))
+    }
+
     // ---- Change Signature ----------------------------------------------
 
     fun testChangeSignature() {
