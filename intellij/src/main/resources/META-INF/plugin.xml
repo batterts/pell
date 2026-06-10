@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.5.2</version>
+    <version>0.5.3</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,12 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.5.3 — Range expressions in the editor</h3>
+        <p>The Grammar-Kit grammar now accepts range expressions
+        (<code>for i in 1..=10</code>, <code>for i in 0..5</code>) and
+        for-over-list-literal (<code>for x in [1, 2, 3]</code>) — the
+        compiler already lowered these; the IDE parser had been
+        red-squiggling them. Grammar + Python parser are back in sync.</p>
         <h3>0.5.2 — Refactorings actually work now</h3>
         <p><b>The PSI refactoring + navigation stack is real.</b> Every
         feature below is covered by headless platform tests that run the

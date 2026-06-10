@@ -414,7 +414,12 @@ bindingPattern ::= IDENT
 
 expr ::= pipelineExpr
 
-pipelineExpr   ::= logicalOrExpr   (PIPEGT logicalOrExpr) *
+pipelineExpr   ::= rangeExpr        (PIPEGT rangeExpr) *
+// `lo .. hi` (exclusive) / `lo ..= hi` (inclusive). Non-associative,
+// so `?` not `*`. Mirrors the Python parser's _parse_range, which
+// sits between pipeline and logical-or. Used mainly as a `for`
+// iterable (`for i in 1..=10`).
+rangeExpr      ::= logicalOrExpr    ((DOTDOT | DOTDOTEQ) logicalOrExpr) ?
 logicalOrExpr  ::= logicalAndExpr  (PIPEPIPE logicalAndExpr) *
 logicalAndExpr ::= equalityExpr    (AMPAMP equalityExpr) *
 equalityExpr   ::= comparisonExpr  ((EQEQ | BANGEQ) comparisonExpr) *
