@@ -49,3 +49,20 @@ GRANT CREATE ANY PROCEDURE, ALTER ANY PROCEDURE, DROP ANY PROCEDURE,
 
 -- A couple of examples reference DBMS_LOCK (retry/backoff sleeps).
 GRANT EXECUTE ON SYS.DBMS_LOCK TO pell_test;
+
+-- Debugger support: the pell debugger has the database session connect
+-- OUT to the IDE's JDWP listener (DBMS_DEBUG_JDWP.CONNECT_TCP — same
+-- mechanism SQL Developer uses). That needs the session privilege plus
+-- a network ACE permitting jdwp egress, and DEBUG ANY PROCEDURE to step
+-- into units owned by the example schemas.
+GRANT DEBUG CONNECT SESSION TO pell_test;
+GRANT DEBUG ANY PROCEDURE TO pell_test;
+BEGIN
+    DBMS_NETWORK_ACL_ADMIN.APPEND_HOST_ACE(
+        host => '*',
+        ace  => xs$ace_type(
+                    privilege_list => xs$name_list('JDWP'),
+                    principal_name => 'PELL_TEST',
+                    principal_type => xs_acl.ptype_db));
+END;
+/

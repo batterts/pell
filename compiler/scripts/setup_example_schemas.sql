@@ -60,6 +60,24 @@ GRANT CREATE ANY PROCEDURE, ALTER ANY PROCEDURE, DROP ANY PROCEDURE,
       EXECUTE ANY PROCEDURE
   TO PELL_TEST;
 
+-- Debugger support. The pell debugger uses DBMS_DEBUG_JDWP: the database
+-- session connects OUT to the IDE's JDWP listener (the SQL Developer
+-- mechanism). DEBUG CONNECT SESSION enables it; DEBUG ANY PROCEDURE lets
+-- the debugger step into units owned by the example schemas; the ACE
+-- permits the jdwp network egress (without it CONNECT_TCP raises
+-- ORA-24247).
+GRANT DEBUG CONNECT SESSION TO PELL_TEST;
+GRANT DEBUG ANY PROCEDURE TO PELL_TEST;
+BEGIN
+    DBMS_NETWORK_ACL_ADMIN.APPEND_HOST_ACE(
+        host => '*',
+        ace  => xs$ace_type(
+                    privilege_list => xs$name_list('JDWP'),
+                    principal_name => 'PELL_TEST',
+                    principal_type => xs_acl.ptype_db));
+END;
+/
+
 -- Verify.
 PROMPT
 PROMPT Schemas created/confirmed. PELL_TEST can now deploy schema-qualified
