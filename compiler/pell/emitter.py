@@ -292,7 +292,14 @@ class Emitter:
     def __init__(self, module: A.Module, target: str = "23", *,
                  source_text: Optional[str] = None,
                  source_path: Optional[str] = None,
-                 reproducible: bool = False):
+                 reproducible: bool = False,
+                 debug_markers: bool = False):
+        # When True, every emitted statement carries a trailing
+        # `-- @pell:<line>` marker naming its pell source line. The
+        # debugger derives the pell↔PL/SQL line map from these (see
+        # pell/srcmap.py) — no sidecar files, and the map survives in
+        # the deployed source itself (ALL_SOURCE).
+        self.debug_markers = debug_markers
         if target not in SUPPORTED_TARGETS:
             raise ValueError(
                 f"unsupported target {target!r}; must be one of {SUPPORTED_TARGETS}"
@@ -1738,7 +1745,7 @@ class Emitter:
         body_pragmas = self._fn_body_pragmas(fn)
 
         out: list[str] = []
-        out.append(f"  {sig} IS")
+        out.append(f"  {sig} IS{self._dbg_loc_marker(fn.loc)}")
         for d in self._declares:
             out.append(f"    {d}")
         if has_finally:
@@ -1822,7 +1829,29 @@ class Emitter:
 
     # ---- statements -----------------------------------------------------
 
+    def _dbg_loc_marker(self, loc: Optional[A.Loc]) -> str:
+        """Trailing `-- @pell:N` marker for a declaration line, or ""
+        when markers are off / the loc is unknown."""
+        if not self.debug_markers or loc is None or not getattr(loc, "line", None):
+            return ""
+        return f"  -- @pell:{loc.line}"
+
     def _emit_stmt(self, s: A.Stmt, indent: str) -> list[str]:
+        lines = self._emit_stmt_inner(s, indent)
+        if self.debug_markers and lines:
+            loc = getattr(s, "loc", None)
+            line_no = getattr(loc, "line", None) if loc is not None else None
+            first = lines[0]
+            # Skip when the line already carries a marker (nested stmts
+            # re-enter here) or when it ends inside a string literal
+            # (odd quote count) — a trailing comment would corrupt it.
+            if (line_no
+                    and "-- @pell:" not in first
+                    and first.count("'") % 2 == 0):
+                lines[0] = f"{first}  -- @pell:{line_no}"
+        return lines
+
+    def _emit_stmt_inner(self, s: A.Stmt, indent: str) -> list[str]:
         if isinstance(s, A.LetStmt):
             return self._emit_let(s, indent)
         if isinstance(s, A.AssignStmt):
@@ -5950,7 +5979,7 @@ class Emitter:
             self._decl_seen = save_decl_seen
             self._current_fn = save_fn
         out: list[str] = []
-        out.append(f"  {sig} IS")
+        out.append(f"  {sig} IS{self._dbg_loc_marker(m.loc)}")
         for d in decls:
             out.append(f"    {d}")
         out.append(f"  BEGIN")
@@ -6264,6 +6293,7 @@ def emit(module: A.Module, target: str = "23", *,
          source_text: Optional[str] = None,
          source_path: Optional[str] = None,
          reproducible: bool = False,
+         debug: bool = False,
          project_signatures: Optional[dict[str, "A.TypeRef"]] = None,
          project_records: Optional[
              dict[tuple[str, str], "A.RecordDef"]
@@ -6287,6 +6317,7 @@ def emit(module: A.Module, target: str = "23", *,
         module, target=target,
         source_text=source_text, source_path=source_path,
         reproducible=reproducible,
+        debug_markers=debug,
     )
     if project_signatures:
         e._project_signatures = dict(project_signatures)
@@ -6626,6 +6657,7 @@ def emit_anon_block(
     target: str = "23",
     *,
     source_path: Optional[str] = None,
+    debug: bool = False,
     project_signatures: Optional[dict[str, "A.TypeRef"]] = None,
     project_records: Optional[dict[tuple[str, str], "A.RecordDef"]] = None,
     project_modules: Optional[dict[str, "ModuleInfo"]] = None,
@@ -6670,6 +6702,7 @@ def emit_anon_block(
     )
     emitter = Emitter(
         module, target=target, source_path=source_path, reproducible=True,
+        debug_markers=debug,
     )
     if project_signatures:
         emitter._project_signatures = dict(project_signatures)

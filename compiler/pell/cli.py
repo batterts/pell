@@ -52,6 +52,7 @@ def cmd_build(args: argparse.Namespace) -> int:
             sql = emit(module, target=args.target,
                        source_text=src, source_path=str(src_path),
                        reproducible=getattr(args, "reproducible", False),
+                       debug=getattr(args, "debug", False),
                        project_signatures=project_signatures,
                        project_records=project_records,
                        project_modules=project_modules)
@@ -293,6 +294,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             module = parse(src, str(src_path))
             sql = emit(module, target=args.target, source_text=src,
                        source_path=str(src_path), reproducible=args.reproducible,
+                       debug=getattr(args, "debug", False),
                        project_signatures=project_signatures,
                        project_records=project_records,
                        project_modules=project_modules)
@@ -378,6 +380,13 @@ def cmd_deploy(args: argparse.Namespace) -> int:
           f"{(args.connect or '$PELL_DB_URL')}")
     deploy_failures = 0
     try:
+        if getattr(args, "debug", False):
+            # Units must carry PL/SQL debug info for DBMS_DEBUG_JDWP to
+            # stop in them (same as SQL Developer's "Compile for Debug").
+            with conn.raw.cursor() as _cur:
+                _cur.execute("ALTER SESSION SET PLSQL_OPTIMIZE_LEVEL = 1")
+                _cur.execute("ALTER SESSION SET PLSQL_DEBUG = TRUE")
+            print("  (debug build: PLSQL_DEBUG=TRUE, OPTIMIZE_LEVEL=1)")
         for path in install_order:
             try:
                 conn.execute_install(path.read_text())
@@ -957,6 +966,141 @@ def cmd_stubgen(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_srcmap(args: argparse.Namespace) -> int:
+    """Print the pell↔PL/SQL line map for a .pell file as JSON.
+
+    Compiles with debug markers in-memory (no DB, no files) and scans
+    the emitted text. Because a `pell deploy --debug` deploys exactly
+    this text, the map is valid for the deployed units too.
+    """
+    import json
+    from .srcmap import srcmap_json
+
+    src_path = Path(args.input)
+    try:
+        src = src_path.read_text()
+        module = parse(src, str(src_path))
+    except (OSError, LexError, ParseError) as e:
+        print(f"pell: {e}", file=sys.stderr)
+        return 1
+    try:
+        from .repl import scan_project_signatures
+        from .emitter import scan_project_records as _scan_records
+        from .emitter import scan_project_modules as _scan_modules
+        project_signatures = scan_project_signatures()
+        project_records = _scan_records()
+        project_modules = _scan_modules()
+    except Exception:
+        project_signatures = {}
+        project_records = {}
+        project_modules = {}
+    try:
+        sql = emit(module, target=args.target, source_text=src,
+                   source_path=str(src_path), reproducible=True, debug=True,
+                   project_signatures=project_signatures,
+                   project_records=project_records,
+                   project_modules=project_modules)
+    except EmitError as e:
+        print(f"pell: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(srcmap_json(sql, str(src_path)), indent=2))
+    return 0
+
+
+def cmd_debug_target(args: argparse.Namespace) -> int:
+    """Run a pell exec script as the *target* session of a debug run.
+
+    The IDE listens on a JDWP port; this command connects the database
+    session back to it (DBMS_DEBUG_JDWP.CONNECT_TCP), executes the
+    script's anonymous block — during which the IDE controls stepping —
+    then disconnects and prints any DBMS_OUTPUT the block produced.
+    """
+    try:
+        host, _, port_s = args.jdwp.rpartition(":")
+        port = int(port_s)
+        if not host:
+            raise ValueError
+    except ValueError:
+        print(f"pell: --jdwp must be HOST:PORT, got {args.jdwp!r}", file=sys.stderr)
+        return 2
+
+    source_path = args.input
+    try:
+        source = Path(args.input).read_text()
+    except OSError as e:
+        print(f"pell: {e}", file=sys.stderr)
+        return 1
+    try:
+        items, stmts = parse_cell(source, source_path)
+    except (LexError, ParseError) as e:
+        print(f"pell: {e}", file=sys.stderr)
+        return 1
+    if not items and not stmts:
+        print("pell: script is empty — nothing to debug", file=sys.stderr)
+        return 2
+    try:
+        from .repl import scan_project_signatures
+        from .emitter import scan_project_records as _scan_records
+        from .emitter import scan_project_modules as _scan_modules
+        project_signatures = scan_project_signatures()
+        project_records = _scan_records()
+        project_modules = _scan_modules()
+    except Exception:
+        project_signatures = {}
+        project_records = {}
+        project_modules = {}
+    try:
+        block = emit_anon_block(items, stmts, target=args.target,
+                                source_path=source_path, debug=True,
+                                project_signatures=project_signatures,
+                                project_records=project_records,
+                                project_modules=project_modules)
+    except EmitError as e:
+        print(f"pell: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        from . import driver
+    except ImportError as e:
+        print(f"pell: `pell debug-target` needs the optional driver dependency; "
+              f"install with: pip install -e .[repl]\n  ({e})", file=sys.stderr)
+        return 2
+    try:
+        conn = driver.connect(args.connect)
+    except Exception as e:
+        print(f"pell: connection failed: {e}", file=sys.stderr)
+        return 1
+
+    # The IDE parses these two lines to sync with the target's lifecycle.
+    print(f"pell debug-target: connecting to jdwp {host}:{port}", flush=True)
+    try:
+        with conn.raw.cursor() as cur:
+            cur.execute(
+                "begin dbms_debug_jdwp.connect_tcp(:h, :p); end;",
+                h=host, p=port,
+            )
+        print("pell debug-target: jdwp connected; running block", flush=True)
+        try:
+            lines = conn.run_block(block)
+        finally:
+            # Disconnect even if the block raised, or the session stays
+            # pinned to a dead listener.
+            try:
+                with conn.raw.cursor() as cur:
+                    cur.execute("begin dbms_debug_jdwp.disconnect; end;")
+            except Exception:
+                pass
+        for ln in lines:
+            print(ln)
+        print("pell debug-target: block finished", flush=True)
+        return 0
+    except Exception as e:
+        print(f"pell: debug run failed: {e}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="pell", description=f"pell compiler v{__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -978,6 +1122,12 @@ def main(argv: list[str] | None = None) -> int:
         help="omit the build timestamp and uncommitted-working-tree hash from "
         "the preamble so output is byte-stable across runs from the same "
         "source + commit. Useful for golden snapshots.",
+    )
+    b.add_argument(
+        "--debug",
+        action="store_true",
+        help="append `-- @pell:<line>` markers to emitted statements so the "
+        "debugger can map PL/SQL lines back to pell source",
     )
     b.set_defaults(func=cmd_build)
 
@@ -1032,7 +1182,32 @@ def main(argv: list[str] | None = None) -> int:
                     help="run the build half; skip the install half")
     dp.add_argument("--keep-going", action="store_true",
                     help="don't stop on the first failure; collect them and exit non-zero at the end")
+    dp.add_argument("--debug", action="store_true",
+                    help="debug build: emit @pell line markers and compile "
+                         "units with PL/SQL debug info (PLSQL_DEBUG=TRUE, "
+                         "OPTIMIZE_LEVEL=1) so the debugger can stop in them")
     dp.set_defaults(func=cmd_deploy)
+
+    sm = sub.add_parser(
+        "srcmap",
+        help="print the pell↔PL/SQL line map (JSON) for a .pell file — the "
+             "map the debugger uses to place breakpoints and map frames",
+    )
+    sm.add_argument("input", help="path to a .pell file")
+    sm.add_argument("--target", choices=("23", "19c"), default="23")
+    sm.set_defaults(func=cmd_srcmap)
+
+    dt = sub.add_parser(
+        "debug-target",
+        help="run a pell exec script as a JDWP debug target: the session "
+             "connects to the listener, executes the script, disconnects",
+    )
+    dt.add_argument("input", help="path to the .pell stub/script to execute")
+    dt.add_argument("--jdwp", required=True, metavar="HOST:PORT",
+                    help="the IDE's JDWP listener to connect back to")
+    dt.add_argument("-c", "--connect", help="user/pass@host:port/service (or set PELL_DB_URL)")
+    dt.add_argument("--target", choices=("23", "19c"), default="23")
+    dt.set_defaults(func=cmd_debug_target)
 
     sq = sub.add_parser(
         "sql",
