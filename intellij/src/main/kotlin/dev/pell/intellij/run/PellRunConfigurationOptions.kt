@@ -23,4 +23,8 @@ class PellRunConfigurationOptions : LocatableRunConfigurationOptions() {
 
     /** Optional override for the pell repo (defaults to project root). */
     var pellHome: String? by string()
+
+    /** What `pell deploy --debug` deploys before a debug session — the
+     *  module file the debug stub calls into. Defaults to filePath. */
+    var deployPath: String? by string()
 }

@@ -972,15 +972,46 @@ def cmd_srcmap(args: argparse.Namespace) -> int:
     Compiles with debug markers in-memory (no DB, no files) and scans
     the emitted text. Because a `pell deploy --debug` deploys exactly
     this text, the map is valid for the deployed units too.
+
+    With --anon, the file is compiled as an exec script (anonymous
+    block) instead — the map's unit lines are block lines, valid for
+    the $Oracle.Block.* class the block becomes under debug-target.
     """
     import json
-    from .srcmap import srcmap_json
+    from .srcmap import srcmap_json, MARKER_RE
 
     src_path = Path(args.input)
     try:
         src = src_path.read_text()
+    except OSError as e:
+        print(f"pell: {e}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "anon", False):
+        try:
+            items, stmts = parse_cell(src, str(src_path))
+            block = emit_anon_block(items, stmts, target=args.target,
+                                    source_path=str(src_path), debug=True)
+        except (LexError, ParseError, EmitError) as e:
+            print(f"pell: {e}", file=sys.stderr)
+            return 1
+        entries = []
+        for i, line in enumerate(block.splitlines(), start=1):
+            mk = MARKER_RE.search(line)
+            if mk:
+                entries.append({"pell_line": int(mk.group(1)), "unit_line": i})
+        print(json.dumps({
+            "pell_file": str(src_path),
+            "units": [{
+                "kind": "BLOCK", "schema": None, "name": None,
+                "jdwp_class": "$Oracle.Block", "entries": entries,
+            }],
+        }, indent=2))
+        return 0
+
+    try:
         module = parse(src, str(src_path))
-    except (OSError, LexError, ParseError) as e:
+    except (LexError, ParseError) as e:
         print(f"pell: {e}", file=sys.stderr)
         return 1
     try:
@@ -1005,6 +1036,46 @@ def cmd_srcmap(args: argparse.Namespace) -> int:
         return 1
     print(json.dumps(srcmap_json(sql, str(src_path)), indent=2))
     return 0
+
+
+def cmd_debug_source(args: argparse.Namespace) -> int:
+    """Print a deployed unit's source from ALL_SOURCE.
+
+    The debugger shows this when a stack frame lands in a unit with no
+    pell source (the logger runtime, hand-written PL/SQL, SYS code the
+    user can see). Line N of the output == JDWP unit line N.
+    """
+    try:
+        from . import driver
+    except ImportError as e:
+        print(f"pell: needs the driver dependency (pip install -e .[repl])\n  ({e})",
+              file=sys.stderr)
+        return 2
+    owner, _, name = args.unit.rpartition(".")
+    if not owner:
+        print("pell: unit must be OWNER.NAME", file=sys.stderr)
+        return 2
+    try:
+        conn = driver.connect(args.connect)
+    except Exception as e:
+        print(f"pell: connection failed: {e}", file=sys.stderr)
+        return 1
+    try:
+        rows = conn.run_query(
+            "select text from all_source "
+            "where owner = upper(:o) and name = upper(:n) "
+            "and type = upper(:t) order by line",
+            {"o": owner, "n": name, "t": args.type.replace("_", " ")},
+        )
+        if not rows:
+            print(f"pell: no source for {args.unit} ({args.type})", file=sys.stderr)
+            return 1
+        for r in rows:
+            # one column; lines already end with \n in ALL_SOURCE
+            sys.stdout.write(str(list(r.values())[0]))
+        return 0
+    finally:
+        conn.close()
 
 
 def cmd_debug_target(args: argparse.Namespace) -> int:
@@ -1207,7 +1278,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     sm.add_argument("input", help="path to a .pell file")
     sm.add_argument("--target", choices=("23", "19c"), default="23")
+    sm.add_argument("--anon", action="store_true",
+                    help="map the file as an exec script (anonymous block) "
+                         "instead of a module — unit lines are block lines")
     sm.set_defaults(func=cmd_srcmap)
+
+    ds = sub.add_parser(
+        "debug-source",
+        help="print a deployed unit's source from ALL_SOURCE (debugger "
+             "fallback for frames with no pell source)",
+    )
+    ds.add_argument("unit", help="OWNER.NAME")
+    ds.add_argument("--type", default="PACKAGE_BODY",
+                    help="unit type, underscores for spaces (default PACKAGE_BODY)")
+    ds.add_argument("-c", "--connect", help="user/pass@host:port/service (or set PELL_DB_URL)")
+    ds.set_defaults(func=cmd_debug_source)
 
     dt = sub.add_parser(
         "debug-target",

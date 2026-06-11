@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.6.1</version>
+    <version>0.7.0</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,27 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.7.0 — The pell debugger</h3>
+        <p><b>Step through pell running inside Oracle.</b> Built on
+        DBMS_DEBUG_JDWP (the SQL Developer mechanism): the database
+        session connects back to the IDE and the IDE drives it.</p>
+        <ul>
+          <li><b>Breakpoints in .pell files</b> — gutter breakpoints map
+              through compiler line markers to the deployed PL/SQL and
+              snap to the nearest statement.</li>
+          <li><b>Per-fn run/debug gutter actions</b> — every <code>pub fn</code>
+              gets "Debug" which generates an editable stub
+              (<code>.pell-debug/debug_&lt;module&gt;_&lt;fn&gt;.pell</code>)
+              calling it with placeholder args. Step through the stub AND
+              the fn.</li>
+          <li><b>Falls through to PL/SQL</b> — frames outside pell source
+              (runtime packages, hand-written PL/SQL) open the deployed
+              ALL_SOURCE read-only and stepping continues.</li>
+          <li>Variables view, stack, step over/into/out, console; uses
+              <code>PELL_DB_URL</code>; needs DEBUG CONNECT SESSION + a
+              JDWP network ACE (see docs/DEBUGGER.md).</li>
+        </ul>
+
         <h3>0.6.1 — Extract Method works on loops and other nested-block statements</h3>
         <ul>
           <li><b>Extract a whole <code>for</code>/<code>if</code>/<code>match</code>
@@ -712,6 +733,18 @@ END employees;
         <runLineMarkerContributor
             language="pell"
             implementationClass="dev.pell.intellij.run.PellRunLineMarkerContributor" />
+
+        <!-- Debugger: gutter breakpoints in .pell files, a Debug
+             executor for pell run configs (JDWP via DBMS_DEBUG_JDWP —
+             the SQL Developer mechanism), and per-fn run/debug gutter
+             actions that generate a calling stub. -->
+        <xdebugger.breakpointType
+            implementation="dev.pell.intellij.debugger.PellLineBreakpointType" />
+        <programRunner
+            implementation="dev.pell.intellij.debugger.PellDebugRunner" />
+        <runLineMarkerContributor
+            language="pell"
+            implementationClass="dev.pell.intellij.debugger.PellDebugFnLineMarkerContributor" />
 
         <!-- Run-on-Oracle gutter icon for plain `.sql` files. Registered
              for both TEXT (Community fallback) and SQL (Ultimate's
