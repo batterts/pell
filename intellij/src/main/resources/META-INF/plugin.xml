@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.6.0</version>
+    <version>0.6.1</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,20 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.6.1 — Extract Method works on loops and other nested-block statements</h3>
+        <ul>
+          <li><b>Extract a whole <code>for</code>/<code>if</code>/<code>match</code>
+              statement.</b> Selecting a complete loop no longer fails with
+              "selection must lie inside a single block" — the analyzer now
+              finds the deepest block containing the whole selection instead
+              of comparing the endpoints' blocks (the closing <code>}</code>
+              belongs to the nested body).</li>
+          <li><b>Loop variables are real declarations.</b> Extracting from
+              inside a loop body captures <code>i</code> as a typed parameter
+              (<code>number</code> for range loops); extracting the whole
+              loop correctly keeps <code>i</code> internal.</li>
+        </ul>
+
         <h3>0.6.0 — Module access domains + smarter refactorings</h3>
         <p><b>The module hierarchy is now an access-control boundary,
         enforced by Oracle itself.</b> Plus refactoring polish across

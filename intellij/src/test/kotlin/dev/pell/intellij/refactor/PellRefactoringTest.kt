@@ -188,6 +188,69 @@ class PellRefactoringTest : BasePlatformTestCase() {
         assertFalse("no any params", r.contains(": any"))
     }
 
+    /** A whole for-loop is one statement of its parent block and must be
+     *  extractable. (User-reported: the closing `}` of the loop body made
+     *  the analyzer think the selection straddled two blocks.) */
+    fun testExtractMethodWholeForLoop() {
+        myFixture.configureByText(
+            "a.pell",
+            """
+            module a;
+
+            pub fn fill(t: number, months: number) {
+                for i in 1..months {
+                    sql!{insert into cal values ((:t + i))};
+                }
+            }
+            """.trimIndent(),
+        )
+        val text = myFixture.file.text
+        val start = text.indexOf("for i in")
+        val end = text.indexOf("}", text.indexOf("sql!")) + 1
+        myFixture.editor.selectionModel.setSelection(start, end)
+        val file = myFixture.file as PellFile
+        val analysis = ExtractMethodAnalyzer.analyze(file, myFixture.editor)
+        assertTrue("extractable: ${analysis.rejectionReason}", analysis.isExtractable)
+        // `i` is the loop's own var — must NOT become a parameter.
+        assertFalse(
+            "loop var i is not captured",
+            analysis.capturedParams.any { it.name == "i" },
+        )
+        PellExtractMethodHandler().applyExtract(
+            project, file, myFixture.editor, analysis, "fill_months", false,
+        )
+        val r = myFixture.file.text
+        assertTrue("new fn synthesized", r.contains("fn fill_months("))
+        assertTrue("loop moved into it", r.contains("for i in 1..months"))
+    }
+
+    /** Extracting from INSIDE a loop body captures the loop var as a
+     *  typed parameter (ranges iterate numbers). */
+    fun testExtractMethodFromLoopBodyCapturesLoopVar() {
+        myFixture.configureByText(
+            "a.pell",
+            """
+            module a;
+
+            pub fn fill(months: number) {
+                for i in 1..months {
+                    p(i);
+                }
+            }
+            """.trimIndent(),
+        )
+        val text = myFixture.file.text
+        val start = text.indexOf("p(i);")
+        val end = start + "p(i);".length
+        myFixture.editor.selectionModel.setSelection(start, end)
+        val file = myFixture.file as PellFile
+        val analysis = ExtractMethodAnalyzer.analyze(file, myFixture.editor)
+        assertTrue("extractable: ${analysis.rejectionReason}", analysis.isExtractable)
+        val i = analysis.capturedParams.firstOrNull { it.name == "i" }
+        assertNotNull("loop var i captured as param", i)
+        assertEquals("range loop var is number", "number", i!!.typeText)
+    }
+
     // ---- Parameters to Record ------------------------------------------
 
     fun testParamsToRecord() {

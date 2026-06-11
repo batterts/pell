@@ -60,6 +60,15 @@ data class ExtractMethodAnalysis(
          *  non-existent `t_any` and fails at deploy). */
         val typeText: String
             get() {
+                // A captured loop var has no typeRef. Ranges iterate
+                // numbers; for anything else v0 can't see the element
+                // type, so fall back to text.
+                if (declaration is dev.pell.intellij.psi.PellForStmt ||
+                    declaration is dev.pell.intellij.psi.PellForallStmt
+                ) {
+                    val header = declaration.text.substringBefore("{")
+                    return if (header.contains("..")) "number" else "text"
+                }
                 val typeRef = com.intellij.psi.util.PsiTreeUtil.findChildOfType(
                     declaration, dev.pell.intellij.psi.PellTypeRef::class.java,
                 )
@@ -89,12 +98,16 @@ object ExtractMethodAnalyzer {
         val startElem = file.findElementAt(sel.startOffset) ?: return rejection(file, "selection out of range")
         val endElem = file.findElementAt((sel.endOffset - 1).coerceAtLeast(0)) ?: return rejection(file, "selection out of range")
 
-        // Both endpoints must live in the same PellBlock.
-        val startBlock = PsiTreeUtil.getParentOfType(startElem, PellBlock::class.java)
-        val endBlock = PsiTreeUtil.getParentOfType(endElem, PellBlock::class.java)
-        if (startBlock == null || startBlock != endBlock) {
-            return rejection(file, "selection must lie inside a single { ... } block")
-        }
+        // The block we extract from is the deepest PellBlock containing the
+        // WHOLE selection. Don't compare per-endpoint blocks: selecting a
+        // whole `for`/`if`/`match` stmt puts the endpoints in different
+        // blocks (the closing `}` belongs to the nested body), yet the stmt
+        // itself is perfectly extractable from its parent block.
+        val common = PsiTreeUtil.findCommonParent(startElem, endElem)
+            ?: return rejection(file, "selection out of range")
+        val startBlock = common as? PellBlock
+            ?: PsiTreeUtil.getParentOfType(common, PellBlock::class.java)
+            ?: return rejection(file, "selection must lie inside a single { ... } block")
 
         // Enclosing fn or method (where the extracted target gets inserted).
         val enclosingFn = PsiTreeUtil.getParentOfType(
@@ -232,6 +245,12 @@ object ExtractMethodAnalyzer {
             PsiTreeUtil.findChildrenOfType(s, PellVarStmt::class.java).forEach { v ->
                 v.name?.let { internalDecls.add(it) }
             }
+            PsiTreeUtil.findChildrenOfType(s, dev.pell.intellij.psi.PellForStmt::class.java).forEach { f ->
+                f.name?.let { internalDecls.add(it) }
+            }
+            PsiTreeUtil.findChildrenOfType(s, dev.pell.intellij.psi.PellForallStmt::class.java).forEach { f ->
+                f.name?.let { internalDecls.add(it) }
+            }
         }
 
         // Reads inside the selection, in stable encounter order.
@@ -275,6 +294,15 @@ object ExtractMethodAnalyzer {
         }
         for (v in PsiTreeUtil.findChildrenOfType(enclosingFn, PellVarStmt::class.java)) {
             if (v.name == name && !selectionRange.contains(v.textRange)) return v
+        }
+        // Loop vars of for/forall stmts ENCLOSING the selection — when the
+        // selection is the loop body (or part of it), `i` reads inside it
+        // must become a parameter of the extracted fn.
+        for (f in PsiTreeUtil.findChildrenOfType(enclosingFn, dev.pell.intellij.psi.PellForStmt::class.java)) {
+            if (f.name == name && !selectionRange.contains(f.textRange)) return f
+        }
+        for (f in PsiTreeUtil.findChildrenOfType(enclosingFn, dev.pell.intellij.psi.PellForallStmt::class.java)) {
+            if (f.name == name && !selectionRange.contains(f.textRange)) return f
         }
         return null
     }
