@@ -4590,7 +4590,15 @@ class Emitter:
             _, case = st_case
             case_pl = _record_type_name(case.name)
             kw = "IF" if i == 0 else "ELSIF"
-            out.append(f"{indent}{kw} ({scrut_code}) IS OF ({case_pl}) THEN")
+            # Dispatch on the sys_tag_ ordinal, NOT `IS OF (t_case)` —
+            # Oracle 23ai's default optimizer level miscompiles IS OF on
+            # substitutable locals reassigned in loops (elements silently
+            # vanish from a match-walk). A NUMBER compare is immune.
+            tag = self._case_tag(case.name)
+            # NOTE: no parens around the scrutinee — PL/SQL rejects
+            # attribute access on a parenthesized expression
+            # (`(x).attr` is SQL-only syntax; `x.attr` is required here).
+            out.append(f"{indent}{kw} {scrut_code}.sys_tag_ = {tag} THEN")
             # Bind value: VariantPattern.args (positional) gives bind name(s);
             # VariantPattern.fields (struct-form) lets us project fields.
             bind_name: Optional[str] = None
@@ -5409,11 +5417,16 @@ class Emitter:
                 sig = sig.replace("  MEMBER", "  NOT INSTANTIABLE MEMBER", 1)
                 any_abstract = True
             parent_method_sigs.append(sig)
-        spec_lines = attr_lines + parent_method_sigs
-        if not attr_lines:
-            # Oracle (PLS-00589) requires at least one attribute in an OBJECT type.
-            # When the sealed parent has no fields, emit a hidden placeholder.
-            spec_lines = ["  sys_tag_ NUMBER"] + parent_method_sigs
+        # Every sealed parent carries a hidden sys_tag_ attribute holding
+        # the constructing case's 1-based declaration ordinal. Match arms
+        # dispatch on it (`x.sys_tag_ = k`) instead of `IS OF (t_case)`:
+        # Oracle 23ai's PL/SQL optimizer (PLSQL_OPTIMIZE_LEVEL=2, the
+        # default) miscompiles IS OF on substitutable locals reassigned
+        # in loops — a match-walk over a sealed list silently dropped
+        # elements; recompiling at level 1 fixed it. A plain NUMBER
+        # compare is immune. (Also satisfies PLS-00589's at-least-one-
+        # attribute rule for fieldless parents.)
+        spec_lines = ["  sys_tag_ NUMBER"] + attr_lines + parent_method_sigs
         suffix = "NOT FINAL"
         if any_abstract:
             suffix = "NOT INSTANTIABLE " + suffix
@@ -6004,7 +6017,7 @@ class Emitter:
         """
         type_pl = _record_type_name(sl.type_name)
         ordered_field_names: list[str] = []
-        prefix_nulls = 0
+        prefix_args: list[str] = []
         td = self._lookup_type(sl.type_name)
         if td is not None:
             ordered_field_names = [f.name for f in td.fields]
@@ -6013,9 +6026,11 @@ class Emitter:
             if ck is not None:
                 st, case = ck
                 ordered_field_names = [f.name for f in st.fields] + [f.name for f in case.fields]
-                if not st.fields:
-                    # Parent has a synthetic placeholder attribute; pass NULL.
-                    prefix_nulls = 1
+                # Every sealed parent's first attribute is sys_tag_ — the
+                # constructing case's ordinal, which match arms dispatch
+                # on (see the sealed-parent spec emitter for why IS OF
+                # was abandoned).
+                prefix_args = [str(self._case_tag(sl.type_name))]
         provided = {f.name: f.value for f in sl.fields}
         missing = [n for n in ordered_field_names if n not in provided]
         if missing:
@@ -6023,7 +6038,7 @@ class Emitter:
                 f"{sl.type_name} {{ ... }}: missing fields {missing}",
                 sl.loc,
             )
-        args_list = (["NULL"] * prefix_nulls) + [self._emit_expr(provided[n]) for n in ordered_field_names]
+        args_list = prefix_args + [self._emit_expr(provided[n]) for n in ordered_field_names]
         return f"{type_pl}({', '.join(args_list)})"
 
     def _lookup_type(self, name: str) -> Optional[A.TypeDef]:
@@ -6038,6 +6053,15 @@ class Emitter:
                 if c.name == name:
                     return (st, c)
         return None
+
+    def _case_tag(self, case_name: str) -> int:
+        """The 1-based declaration ordinal of a case within its sealed
+        type — the value stored in sys_tag_ at construction and compared
+        by match dispatch."""
+        ck = self._lookup_case(case_name)
+        assert ck is not None, f"not a sealed case: {case_name}"
+        st, case = ck
+        return st.cases.index(case) + 1
 
     def _lower_ident(self, name: str) -> str:
         """Map a pell identifier (possibly qualified with ::) to PL/SQL."""

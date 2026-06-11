@@ -730,7 +730,7 @@ def test_sealed_type_emission_has_under_and_overriding():
     assert "OVERRIDING MEMBER FUNCTION area RETURN NUMBER" in sql
 
 
-def test_match_on_sealed_lowers_to_is_of_treat():
+def test_match_on_sealed_lowers_to_tag_dispatch():
     sql = compile_to_sql("""
         module m;
         pub sealed type Shape {
@@ -747,8 +747,12 @@ def test_match_on_sealed_lowers_to_is_of_treat():
             return k;
         }
     """)
-    assert "IS OF (t_circle)" in sql
-    assert "IS OF (t_square)" in sql
+    # Dispatch is on sys_tag_ ordinals, NOT `IS OF` — Oracle 23ai's
+    # default optimizer level miscompiles IS OF on substitutable locals
+    # reassigned in loops. Extraction still goes through TREAT.
+    assert "p_s.sys_tag_ = 1" in sql
+    assert "p_s.sys_tag_ = 2" in sql
+    assert "IS OF" not in sql
     assert "TREAT((p_s) AS t_circle)" in sql
 
 
