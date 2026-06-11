@@ -24,7 +24,7 @@ DECLARE
     -- The distinct schema prefixes across examples/*.pell. Keep in sync if
     -- a new schema-qualified example lands.
     schemas name_list := name_list(
-        'AUDIT', 'BILLING', 'BULK', 'DATA', 'HR', 'INVENTORY',
+        'AUDITING', 'BILLING', 'BULK', 'DATA', 'HR', 'INVENTORY',
         'LOOKUPS', 'MARKET', 'ORDERS', 'REPORTS', 'SIGNUPS', 'STD'
     );
 BEGIN
@@ -63,4 +63,4 @@ GRANT CREATE ANY PROCEDURE, ALTER ANY PROCEDURE, DROP ANY PROCEDURE,
 -- Verify.
 PROMPT
 PROMPT Schemas created/confirmed. PELL_TEST can now deploy schema-qualified
-PROMPT examples (audit.charges, signups.validate, hr.employees, ...).
+PROMPT examples (auditing.charges, signups.validate, hr.employees, ...).
