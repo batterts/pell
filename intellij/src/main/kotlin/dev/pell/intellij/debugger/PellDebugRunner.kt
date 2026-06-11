@@ -26,11 +26,17 @@ class PellDebugRunner : GenericProgramRunner<RunnerSettings>() {
 
     override fun doExecute(state: RunProfileState, env: ExecutionEnvironment): RunContentDescriptor? {
         val config = env.runProfile as PellRunConfiguration
+        // jdwp (default): the DB connects back to the IDE — richest
+        //   experience (script breakpoints, exact frames).
+        // sql: everything over outbound connections via DBMS_DEBUG —
+        //   for tunnels/NAT/no-ACL instances. PELL_DEBUG_TRANSPORT=sql.
+        val transport = System.getenv("PELL_DEBUG_TRANSPORT")?.lowercase() ?: "jdwp"
         val session = XDebuggerManager.getInstance(env.project).startSession(
             env,
             object : XDebugProcessStarter() {
                 override fun start(session: XDebugSession): XDebugProcess =
-                    PellDebugProcess(session, config)
+                    if (transport == "sql") PellSqlDebugProcess(session, config)
+                    else PellDebugProcess(session, config)
             },
         )
         return session.runContentDescriptor

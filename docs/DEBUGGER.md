@@ -39,13 +39,38 @@ sqlplus system/<pwd>@host:1521/<pdb> @compiler/scripts/grant_debug.sql YOUR_USER
 
 That grants `DEBUG CONNECT SESSION` (required), `DEBUG ANY PROCEDURE`
 (optional — stepping into other schemas), and the JDWP network ACE
-(without it `CONNECT_TCP` raises ORA-24247). This is exactly the
+(only needed for the default jdwp transport). This is exactly the
 privilege bar SQL Developer's debugger has — Oracle treats session
 debugging as a security boundary, and **there is no grant-free path**:
-the legacy `DBMS_DEBUG` API (deprecated since 12.2, still present on
-23ai) checks the *same* `DEBUG CONNECT SESSION` privilege, which is
-why pell doesn't ship a legacy fallback engine — it would cost a
-second debugger implementation and unlock nothing.
+the SQL transport below checks the *same* `DEBUG CONNECT SESSION`
+privilege.
+
+## Two transports
+
+| | jdwp (default) | sql (`PELL_DEBUG_TRANSPORT=sql`) |
+|---|---|---|
+| mechanism | DBMS_DEBUG_JDWP — DB connects back to the IDE | DBMS_DEBUG (Probe) — two outbound SQL sessions |
+| network | needs an inbound path + JDWP ACE | **outbound only** — tunnels/NAT/no-ACL just work |
+| grants | DEBUG CONNECT SESSION (+ ACE) | DEBUG CONNECT SESSION only |
+| script (anon block) breakpoints | yes | no — step from the top instead |
+| module breakpoints, stepping, locals, stack | yes | yes |
+
+The sql transport is a full duplex JSON-lines protocol over the
+`pell debug-serve` process's stdio (websocket-style, minus the
+socket): the IDE writes commands, events stream back. The target
+session suspends at startup waiting for the debugger — a built-in
+rendezvous, so breakpoints can't be outrun.
+
+```sh
+# everything outbound — through the same tunnel as your SQL connection:
+export PELL_DEBUG_TRANSPORT=sql
+```
+
+The engine is also usable standalone:
+
+```sh
+pell debug-serve script.pell     # JSON commands on stdin, events on stdout
+```
 
 The docker harness and `setup_example_schemas.sql` already include
 these grants for `pell_test`.

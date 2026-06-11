@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.7.2</version>
+    <version>0.8.0</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,16 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.8.0 — SQL-transport debugging (outbound-only)</h3>
+        <p><b>Debug with nothing but outbound database connections.</b>
+        Set <code>PELL_DEBUG_TRANSPORT=sql</code> and the debugger drives
+        Oracle's Probe API (DBMS_DEBUG) over two ordinary SQL sessions —
+        no JDWP listener, no network ACE, no inbound path. If
+        <code>pell exec</code> works through your tunnel, debugging now
+        does too. Module breakpoints, stepping, locals, and stack all
+        work; script-level breakpoints remain a jdwp-transport feature.
+        Needs only the DEBUG CONNECT SESSION grant.</p>
+
         <h3>0.7.2 — debug through SSH tunnels</h3>
         <ul><li>Set <code>PELL_DEBUG_JDWP_PORT</code> to pin the IDE's
         JDWP listener port and <code>PELL_DEBUG_CALLBACK_HOST=127.0.0.1</code>

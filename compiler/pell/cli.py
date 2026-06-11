@@ -1081,6 +1081,55 @@ def cmd_debug_source(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def cmd_debug_serve(args: argparse.Namespace) -> int:
+    """SQL-transport debug engine (DBMS_DEBUG over two outbound
+    connections) speaking JSON lines on stdin/stdout. See
+    pell/debug_serve.py for the protocol. No network ACE, no inbound
+    connection — works anywhere `pell exec` works (plus the
+    DEBUG CONNECT SESSION grant)."""
+    source_path = args.input
+    try:
+        source = Path(args.input).read_text()
+    except OSError as e:
+        print(f"pell: {e}", file=sys.stderr)
+        return 1
+    try:
+        items, stmts = parse_cell(source, source_path)
+    except (LexError, ParseError) as e:
+        print(f"pell: {e}", file=sys.stderr)
+        return 1
+    if not items and not stmts:
+        print("pell: script is empty — nothing to debug", file=sys.stderr)
+        return 2
+    try:
+        from .repl import scan_project_signatures
+        from .emitter import scan_project_records as _scan_records
+        from .emitter import scan_project_modules as _scan_modules
+        project_signatures = scan_project_signatures()
+        project_records = _scan_records()
+        project_modules = _scan_modules()
+    except Exception:
+        project_signatures = {}
+        project_records = {}
+        project_modules = {}
+    try:
+        block = emit_anon_block(items, stmts, target=args.target,
+                                source_path=source_path, debug=True,
+                                project_signatures=project_signatures,
+                                project_records=project_records,
+                                project_modules=project_modules)
+    except EmitError as e:
+        print(f"pell: {e}", file=sys.stderr)
+        return 1
+    try:
+        from .debug_serve import serve
+    except ImportError as e:
+        print(f"pell: needs the driver dependency (pip install -e .[repl])\n  ({e})",
+              file=sys.stderr)
+        return 2
+    return serve(block, args.connect)
+
+
 def cmd_debug_target(args: argparse.Namespace) -> int:
     """Run a pell exec script as the *target* session of a debug run.
 
@@ -1325,6 +1374,17 @@ def main(argv: list[str] | None = None) -> int:
                          "before running the block (lets the debugger arm "
                          "breakpoints first — the IDE always passes this)")
     dt.set_defaults(func=cmd_debug_target)
+
+    dsv = sub.add_parser(
+        "debug-serve",
+        help="SQL-transport debug engine: drive DBMS_DEBUG over two outbound "
+             "connections, speaking JSON lines on stdio (no network ACE, "
+             "works through SSH tunnels)",
+    )
+    dsv.add_argument("input", help="path to the .pell stub/script to execute")
+    dsv.add_argument("-c", "--connect", help="user/pass@host:port/service (or set PELL_DB_URL)")
+    dsv.add_argument("--target", choices=("23", "19c"), default="23")
+    dsv.set_defaults(func=cmd_debug_serve)
 
     sq = sub.add_parser(
         "sql",
