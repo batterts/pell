@@ -38,16 +38,14 @@ class PellDebugFnLineMarkerContributor : RunLineMarkerContributor() {
         val file = element.containingFile ?: return null
         if (file.fileType !is PellFileType) return null
         if (element.node?.elementType != PellElementTypes.IDENT) return null
-        val fn = element.parent as? PellFnDef
-            ?: PsiTreeUtil.getParentOfType(element, PellFnDef::class.java)?.takeIf {
-                it.name == element.text
-            } ?: return null
-        if (fn.name != element.text) return null
+        // The fn's own name ident: IDENT -> fnName -> fnDef.
+        val nameNode = element.parent as? dev.pell.intellij.psi.PellFnName ?: return null
+        val fn = nameNode.parent as? PellFnDef ?: return null
         // pub fns only — private fns aren't callable from an anon stub.
-        if (!fn.text.trimStart().startsWith("pub")) return null
-        // Only the fn's own name ident (not idents in the body).
-        val nameOffset = fn.text.indexOf(element.text)
-        if (element.textOffset != fn.textOffset + nameOffset) return null
+        // KW_PUB lives on the wrapping `item` node, not the fnDef.
+        val isPub = fn.parent?.node?.getChildren(null)
+            ?.any { it.elementType == PellElementTypes.KW_PUB } == true
+        if (!isPub) return null
 
         return Info(
             AllIcons.Actions.Execute,
