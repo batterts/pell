@@ -1,0 +1,48 @@
+# pell integration-test harness.
+#
+# Two services:
+#   oracle — Oracle Database 23ai Free (gvenzl community image; the
+#            de-facto standard for Oracle-in-CI). First boot runs
+#            init/*.sql as SYSDBA: creates the example schemas + grants.
+#   tests  — python image with the pell compiler + examples copied in;
+#            waits for oracle to be healthy, then runs the FULL pytest
+#            suite including live deploy + runtime execution tests.
+#
+# One-shot run (build, test, tear down, exit code = test result):
+#     ./docker/run_integration.sh
+#
+# Or keep oracle up for iterating locally:
+#     docker compose -f docker/docker-compose.yml up -d oracle
+#     PELL_DB_URL=pell_test/pell_test@localhost:1521/FREEPDB1 \
+#         compiler/.venv/bin/python -m pytest compiler/tests -q
+
+services:
+  oracle:
+    image: gvenzl/oracle-free:23-slim
+    environment:
+      # SYS / SYSTEM password.
+      ORACLE_PASSWORD: pellsys
+      # App user, created in FREEPDB1 on first boot.
+      APP_USER: pell_test
+      APP_USER_PASSWORD: pell_test
+    ports:
+      - "1521:1521"
+    volumes:
+      - ./init:/container-entrypoint-initdb.d:ro
+    healthcheck:
+      # The image ships healthcheck.sh (checks the PDB is open).
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  tests:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.tests
+    depends_on:
+      oracle:
+        condition: service_healthy
+    environment:
+      PELL_DB_URL: pell_test/pell_test@oracle:1521/FREEPDB1

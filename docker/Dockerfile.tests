@@ -1,0 +1,20 @@
+# Test-runner image: the pell compiler + examples + test suite, ready
+# to run against the oracle service. Built from the repo root context
+# (see docker-compose.yml).
+FROM python:3.12-slim
+
+WORKDIR /pell
+
+# The compiler package (pell/), examples/, runtime/ stdlib, and tests/
+# all live under compiler/.
+COPY compiler/ compiler/
+
+# oracledb (thin mode — no instant client needed) via the [repl] extra,
+# plus pytest.
+RUN pip install --no-cache-dir -e "compiler/[repl]" pytest
+
+WORKDIR /pell/compiler
+
+# Full suite: emitter tests run anywhere; the live deploy + runtime
+# execution modules activate because PELL_DB_URL is set by compose.
+CMD ["python", "-m", "pytest", "-q", "--color=yes"]
