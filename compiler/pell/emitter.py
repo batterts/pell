@@ -293,13 +293,20 @@ class Emitter:
                  source_text: Optional[str] = None,
                  source_path: Optional[str] = None,
                  reproducible: bool = False,
-                 debug_markers: bool = False):
+                 debug_markers: bool = False,
+                 trace_markers: bool = False):
         # When True, every emitted statement carries a trailing
         # `-- @pell:<line>` marker naming its pell source line. The
         # debugger derives the pell↔PL/SQL line map from these (see
         # pell/srcmap.py) — no sidecar files, and the map survives in
         # the deployed source itself (ALL_SOURCE).
         self.debug_markers = debug_markers
+        # When True, every statement is preceded by a DBMS_OUTPUT line
+        # `[pell-trace] <file>:<line>` — a zero-privilege execution
+        # trace for users who can't get DEBUG CONNECT SESSION granted
+        # (Oracle gates real debugging behind that privilege; this
+        # needs nothing beyond what `pell exec` already uses).
+        self.trace_markers = trace_markers
         if target not in SUPPORTED_TARGETS:
             raise ValueError(
                 f"unsupported target {target!r}; must be one of {SUPPORTED_TARGETS}"
@@ -1838,17 +1845,22 @@ class Emitter:
 
     def _emit_stmt(self, s: A.Stmt, indent: str) -> list[str]:
         lines = self._emit_stmt_inner(s, indent)
-        if self.debug_markers and lines:
-            loc = getattr(s, "loc", None)
-            line_no = getattr(loc, "line", None) if loc is not None else None
+        loc = getattr(s, "loc", None)
+        line_no = getattr(loc, "line", None) if loc is not None else None
+        if self.debug_markers and lines and line_no:
             first = lines[0]
             # Skip when the line already carries a marker (nested stmts
             # re-enter here) or when it ends inside a string literal
             # (odd quote count) — a trailing comment would corrupt it.
-            if (line_no
-                    and "-- @pell:" not in first
-                    and first.count("'") % 2 == 0):
+            if "-- @pell:" not in first and first.count("'") % 2 == 0:
                 lines[0] = f"{first}  -- @pell:{line_no}"
+        # Trace line goes in AFTER debug-marker placement so the @pell
+        # marker stays on the statement itself.
+        if self.trace_markers and lines and line_no:
+            import os as _os
+            fname = _os.path.basename(loc.file or "?").replace("'", "''")
+            lines.insert(0,
+                f"{indent}dbms_output.put_line('[pell-trace] {fname}:{line_no}');")
         return lines
 
     def _emit_stmt_inner(self, s: A.Stmt, indent: str) -> list[str]:
@@ -6294,6 +6306,7 @@ def emit(module: A.Module, target: str = "23", *,
          source_path: Optional[str] = None,
          reproducible: bool = False,
          debug: bool = False,
+         trace: bool = False,
          project_signatures: Optional[dict[str, "A.TypeRef"]] = None,
          project_records: Optional[
              dict[tuple[str, str], "A.RecordDef"]
@@ -6318,6 +6331,7 @@ def emit(module: A.Module, target: str = "23", *,
         source_text=source_text, source_path=source_path,
         reproducible=reproducible,
         debug_markers=debug,
+        trace_markers=trace,
     )
     if project_signatures:
         e._project_signatures = dict(project_signatures)
@@ -6658,6 +6672,7 @@ def emit_anon_block(
     *,
     source_path: Optional[str] = None,
     debug: bool = False,
+    trace: bool = False,
     project_signatures: Optional[dict[str, "A.TypeRef"]] = None,
     project_records: Optional[dict[tuple[str, str], "A.RecordDef"]] = None,
     project_modules: Optional[dict[str, "ModuleInfo"]] = None,
@@ -6702,7 +6717,7 @@ def emit_anon_block(
     )
     emitter = Emitter(
         module, target=target, source_path=source_path, reproducible=True,
-        debug_markers=debug,
+        debug_markers=debug, trace_markers=trace,
     )
     if project_signatures:
         emitter._project_signatures = dict(project_signatures)

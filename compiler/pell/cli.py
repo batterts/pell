@@ -53,6 +53,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                        source_text=src, source_path=str(src_path),
                        reproducible=getattr(args, "reproducible", False),
                        debug=getattr(args, "debug", False),
+                       trace=getattr(args, "trace", False),
                        project_signatures=project_signatures,
                        project_records=project_records,
                        project_modules=project_modules)
@@ -295,6 +296,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             sql = emit(module, target=args.target, source_text=src,
                        source_path=str(src_path), reproducible=args.reproducible,
                        debug=getattr(args, "debug", False),
+                       trace=getattr(args, "trace", False),
                        project_signatures=project_signatures,
                        project_records=project_records,
                        project_modules=project_modules)
@@ -583,6 +585,7 @@ def cmd_exec(args: argparse.Namespace) -> int:
     try:
         block = emit_anon_block(items, stmts, target=args.target,
                                 source_path=source_path,
+                                trace=getattr(args, "trace", False),
                                 project_signatures=project_signatures,
                                 project_records=project_records,
                                 project_modules=project_modules)
@@ -1212,6 +1215,12 @@ def main(argv: list[str] | None = None) -> int:
         help="append `-- @pell:<line>` markers to emitted statements so the "
         "debugger can map PL/SQL lines back to pell source",
     )
+    b.add_argument(
+        "--trace",
+        action="store_true",
+        help="instrument every statement with a `[pell-trace] file:line` "
+        "DBMS_OUTPUT line — zero-privilege execution tracing",
+    )
     b.set_defaults(func=cmd_build)
 
     pa = sub.add_parser("parse", help="print AST for a .pell file")
@@ -1239,6 +1248,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="print the emitted block and exit; don't connect to a database")
     ex.add_argument("--show-block", action="store_true",
                     help="on error, also print the emitted block to stderr")
+    ex.add_argument("--trace", action="store_true",
+                    help="print a `[pell-trace] file:line` line before every "
+                         "statement executes — the no-privilege fallback when "
+                         "DEBUG CONNECT SESSION can't be granted")
     ex.set_defaults(func=cmd_exec)
 
     rp = sub.add_parser("repl", help="interactive pell notebook against a live Oracle")
@@ -1269,6 +1282,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="debug build: emit @pell line markers and compile "
                          "units with PL/SQL debug info (PLSQL_DEBUG=TRUE, "
                          "OPTIMIZE_LEVEL=1) so the debugger can stop in them")
+    dp.add_argument("--trace", action="store_true",
+                    help="instrument deployed units with `[pell-trace]` "
+                         "DBMS_OUTPUT lines — zero-privilege execution tracing")
     dp.set_defaults(func=cmd_deploy)
 
     sm = sub.add_parser(

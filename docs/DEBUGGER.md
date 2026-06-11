@@ -31,23 +31,48 @@ read-only — stepping just keeps going.
 
 ## One-time database setup
 
-Run as a DBA (already in `compiler/scripts/setup_example_schemas.sql`
-and the docker init):
+Ask a DBA to run, once per developer:
 
-```sql
-GRANT DEBUG CONNECT SESSION TO pell_test;
-GRANT DEBUG ANY PROCEDURE TO pell_test;   -- step into other schemas
-BEGIN
-  DBMS_NETWORK_ACL_ADMIN.APPEND_HOST_ACE(
-    host => '*',
-    ace  => xs$ace_type(privilege_list => xs$name_list('JDWP'),
-                        principal_name => 'PELL_TEST',
-                        principal_type => xs_acl.ptype_db));
-END;
-/
+```sh
+sqlplus system/<pwd>@host:1521/<pdb> @compiler/scripts/grant_debug.sql YOUR_USER
 ```
 
-Without the ACE, `CONNECT_TCP` raises ORA-24247.
+That grants `DEBUG CONNECT SESSION` (required), `DEBUG ANY PROCEDURE`
+(optional — stepping into other schemas), and the JDWP network ACE
+(without it `CONNECT_TCP` raises ORA-24247). This is exactly the
+privilege bar SQL Developer's debugger has — Oracle treats session
+debugging as a security boundary, and **there is no grant-free path**:
+the legacy `DBMS_DEBUG` API (deprecated since 12.2, still present on
+23ai) checks the *same* `DEBUG CONNECT SESSION` privilege, which is
+why pell doesn't ship a legacy fallback engine — it would cost a
+second debugger implementation and unlock nothing.
+
+The docker harness and `setup_example_schemas.sql` already include
+these grants for `pell_test`.
+
+## No DBA? Use trace mode
+
+`--trace` is the zero-privilege fallback — line-by-line execution
+tracing over DBMS_OUTPUT, needing nothing beyond what `pell exec`
+already uses:
+
+```sh
+pell exec myscript.pell --trace        # trace the script
+pell deploy app/ --trace               # instrument deployed packages too
+```
+
+Every statement prints `[pell-trace] file.pell:line` before it runs:
+
+```
+[pell-trace] trace_test.pell:2
+INFO:  greeting world
+[pell-trace] trace_test.pell:3
+hello, world
+```
+
+It composes with `--debug` (markers and trace lines don't collide),
+and traced packages stay traced for every caller until redeployed
+without the flag.
 
 ## Using it in IntelliJ
 
@@ -74,6 +99,38 @@ The database must be able to reach the IDE:
 | docker on this machine      | `host.docker.internal` (automatic)  |
 | remote host                 | the local interface's IP (automatic)|
 | anything unusual            | set `PELL_DEBUG_CALLBACK_HOST`      |
+
+### Through an SSH tunnel
+
+If you reach the database through `ssh -L 1521:localhost:1521 dbhost`,
+the auto-detection sees `localhost` and guesses wrong — and the
+database can't open a connection straight back to your machine anyway.
+Give the JDWP connection the same treatment as the SQL connection: a
+reverse tunnel.
+
+```sh
+# one ssh session carries both directions:
+ssh -L 1521:localhost:1521 -R 5005:localhost:5005 user@dbhost
+```
+
+Then tell pell both halves — the IDE must listen on a FIXED port (the
+reverse tunnel needs one), and the database should connect to its own
+loopback, where sshd is listening:
+
+```sh
+export PELL_DEBUG_JDWP_PORT=5005          # pin the IDE's listener port
+export PELL_DEBUG_CALLBACK_HOST=127.0.0.1 # "connect to yourself" — sshd forwards it
+```
+
+Flow: Oracle session → `127.0.0.1:5005` on the DB host → sshd → your
+machine's `5005` → the IDE's JDI listener. Works through bastions too,
+as long as the `-R` listener lands on a host the database server can
+reach (tunnel to the DB host itself and loopback always works; on a
+separate bastion, Oracle must be able to reach `bastion:5005` and
+you'd set `PELL_DEBUG_CALLBACK_HOST=<bastion>`).
+
+The same two variables work for the standalone CLI:
+`pell debug-target script.pell --jdwp 127.0.0.1:5005`.
 
 ## CLI pieces (usable standalone)
 

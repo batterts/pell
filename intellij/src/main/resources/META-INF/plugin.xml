@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.7.1</version>
+    <version>0.7.2</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,15 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.7.2 — debug through SSH tunnels</h3>
+        <ul><li>Set <code>PELL_DEBUG_JDWP_PORT</code> to pin the IDE's
+        JDWP listener port and <code>PELL_DEBUG_CALLBACK_HOST=127.0.0.1</code>
+        to debug across a reverse SSH tunnel
+        (<code>ssh -R 5005:localhost:5005 dbhost</code>) — see
+        docs/DEBUGGER.md. Also new: <code>pell exec --trace</code>, a
+        zero-privilege line-by-line execution trace for users who can't
+        get DEBUG CONNECT SESSION granted.</li></ul>
+
         <h3>0.7.1 — debugger gutter fix</h3>
         <ul><li>The per-fn run/debug gutter icon now actually appears on
         <code>pub fn</code> (0.7.0 looked for <code>pub</code> inside the

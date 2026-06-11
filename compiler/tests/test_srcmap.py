@@ -78,3 +78,27 @@ pub fn f(n: number) -> number {
     body = next(u for u in compute_srcmap(sql) if u.kind == "PACKAGE BODY")
     # Line 5 is blank — breakpoint snaps to the next stmt (line 6).
     assert body.unit_line_for_pell(5) == body.unit_line_for_pell(6)
+
+
+def test_trace_markers():
+    sql = emit(parse(SRC), trace=True)
+    assert "dbms_output.put_line('[pell-trace] <unknown>:5');" in sql \
+        or "[pell-trace]" in sql
+    # one trace line per statement, placed BEFORE it
+    lines = sql.splitlines()
+    idx = next(i for i, l in enumerate(lines) if "[pell-trace]" in l and ":5'" in l)
+    assert "logger.info" in lines[idx + 1]
+
+
+def test_trace_and_debug_markers_compose():
+    sql = emit(parse(SRC), debug=True, trace=True)
+    lines = sql.splitlines()
+    # The @pell marker stays on the statement, not the trace line.
+    for i, l in enumerate(lines):
+        if "[pell-trace]" in l:
+            assert "-- @pell:" not in l
+    assert any("logger.info" in l and "-- @pell:5" in l for l in lines)
+
+
+def test_no_trace_by_default():
+    assert "[pell-trace]" not in emit(parse(SRC))

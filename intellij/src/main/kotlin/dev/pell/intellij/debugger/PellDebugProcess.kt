@@ -179,6 +179,12 @@ class PellDebugProcess(
             connector = conn
             val cargs = conn.defaultArguments()
             cargs["localAddress"]?.setValue("0.0.0.0")
+            // Pin the port when the connect-back arrives through a
+            // reverse SSH tunnel (ssh -R needs a fixed port). Default:
+            // ephemeral.
+            System.getenv("PELL_DEBUG_JDWP_PORT")?.takeIf { it.isNotBlank() }?.let {
+                cargs["port"]?.setValue(it)
+            }
             connectorArgs = cargs
             val address = conn.startListening(cargs)
             val port = address.substringAfterLast(":")
