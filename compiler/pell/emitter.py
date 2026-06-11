@@ -70,6 +70,30 @@ PRIM_PARAM_MAP = {
 SUPPORTED_TARGETS = ("23", "19c")
 
 
+# Oracle's hard-reserved words (V$RESERVED_WORDS where RESERVED='Y').
+# These can never name a schema or package — CREATE fails with ORA-04050
+# or a syntax error, so we reject them at compile time instead. Discovered
+# the hard way twice: `module audit::…` and `module signups::validate`.
+_ORACLE_RESERVED = frozenset({
+    "access", "add", "all", "alter", "and", "any", "as", "asc", "audit",
+    "between", "by", "char", "check", "cluster", "column", "comment",
+    "compress", "connect", "create", "current", "date", "decimal",
+    "default", "delete", "desc", "distinct", "drop", "else", "exclusive",
+    "exists", "file", "float", "for", "from", "grant", "group", "having",
+    "identified", "immediate", "in", "increment", "index", "initial",
+    "insert", "integer", "intersect", "into", "is", "level", "like",
+    "lock", "long", "maxextents", "minus", "mlslabel", "mode", "modify",
+    "noaudit", "nocompress", "not", "nowait", "null", "number", "of",
+    "offline", "on", "online", "option", "or", "order", "pctfree",
+    "prior", "public", "raw", "rename", "resource", "revoke", "row",
+    "rowid", "rownum", "rows", "select", "session", "set", "share",
+    "size", "smallint", "start", "successful", "synonym", "sysdate",
+    "table", "then", "to", "trigger", "uid", "union", "unique", "update",
+    "user", "validate", "values", "varchar", "varchar2", "view",
+    "whenever", "where", "with",
+})
+
+
 # Pell param mode → PL/SQL parameter mode keyword.
 PARAM_MODE_PL: dict[str, str] = {"in": "IN", "out": "OUT", "inout": "IN OUT"}
 
@@ -287,6 +311,27 @@ class Emitter:
         # underscores. (No dotted segment is implicitly a schema now.)
         self.schema = module.schema
         self.pkg = module.package_name
+        # Oracle rejects reserved words as object names (ORA-04050 / syntax
+        # errors at CREATE time) — fail here with a pointable loc instead.
+        if module.name != "_pell_anon":
+            if self.schema and self.schema.lower() in _ORACLE_RESERVED:
+                raise EmitError(
+                    f"`{self.schema}` is an Oracle reserved word and can't "
+                    f"be a schema name. Pick another name (e.g. "
+                    f"`{self.schema}ing`, `{self.schema}s`).",
+                    module.loc,
+                    code="pell.reserved-name",
+                )
+            if self.pkg.lower() in _ORACLE_RESERVED:
+                raise EmitError(
+                    f"module path `{module.name}` lowers to package "
+                    f"`{self.pkg}`, an Oracle reserved word — CREATE "
+                    f"PACKAGE would fail with ORA-04050. Rename the "
+                    f"module (e.g. `{module.name}_pkg` or a longer "
+                    f"dotted path).",
+                    module.loc,
+                    code="pell.reserved-name",
+                )
         # collected during emission of a function body
         self._declares: list[str] = []  # PL/SQL declaration lines (no trailing ;)
         self._decl_seen: set[str] = set()

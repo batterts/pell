@@ -1,20 +1,33 @@
 """CLI integration tests — run pell as a script."""
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[2]
-EXAMPLES = REPO / "compiler" / "examples"
+COMPILER = REPO / "compiler"
+EXAMPLES = COMPILER / "examples"
+
+# The ./pell wrapper hardcodes compiler/.venv — outside a full checkout
+# (e.g. the docker test image, which only carries compiler/) run the
+# module under the current interpreter instead.
+_WRAPPER = REPO / "pell"
+_WRAPPER_OK = _WRAPPER.exists() and (COMPILER / ".venv" / "bin" / "python").exists()
 
 
 def _run_pell(*args):
-    """Run the ./pell wrapper from the repo root."""
+    """Run the pell CLI (the ./pell wrapper when available)."""
+    if _WRAPPER_OK:
+        cmd = [str(_WRAPPER), *args]
+    else:
+        cmd = [sys.executable, "-m", "pell", *args]
     return subprocess.run(
-        [str(REPO / "pell"), *args],
+        cmd,
         capture_output=True,
         text=True,
         cwd=REPO,
+        env={**os.environ, "PYTHONPATH": str(COMPILER)},
     )
 
 

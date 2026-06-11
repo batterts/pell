@@ -2307,3 +2307,36 @@ def test_in_domain_call_allowed_and_lowered_to_real_package():
     )
     # Short module name resolves to the real package name.
     assert "app_parsing.t()" in sql
+
+
+def test_reserved_word_package_name_rejected():
+    # `validate` is on Oracle's hard-reserved list — CREATE PACKAGE
+    # signups.validate dies with ORA-04050, so the emitter refuses it.
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError) as exc:
+        compile_to_sql("""
+            module signups::validate;
+            pub fn ping() {}
+        """)
+    assert exc.value.code == "pell.reserved-name"
+    assert "reserved" in exc.value.msg
+
+
+def test_reserved_word_schema_name_rejected():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError) as exc:
+        compile_to_sql("""
+            module audit::charges;
+            pub fn ping() {}
+        """)
+    assert exc.value.code == "pell.reserved-name"
+
+
+def test_reserved_word_ok_as_path_segment():
+    # Only the final mangled package name matters — `validate` inside a
+    # dotted path mangles into app_validate_rules, which is fine.
+    sql = compile_to_sql("""
+        module app.validate.rules;
+        pub fn ping() {}
+    """)
+    assert "CREATE OR REPLACE PACKAGE app_validate_rules AS" in sql

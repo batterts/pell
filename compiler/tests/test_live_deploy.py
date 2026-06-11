@@ -46,6 +46,48 @@ def _deploy(path: Path) -> subprocess.CompletedProcess:
     )
 
 
+# External objects the examples reference but (by design) don't create —
+# pell emits no DDL. 14_sequence reads employee_id_seq; 15_retry inserts
+# into the retry tables; 16/29's @touches pinning cursors need the dyn_*
+# and pivot_orders tables to exist at compile time.
+_DEMO_OBJECTS = [
+    "CREATE SEQUENCE employee_id_seq",
+    "CREATE TABLE retry_jobs ("
+    " name VARCHAR2(100), status VARCHAR2(20), attempted_at TIMESTAMP)",
+    "CREATE TABLE retry_audit_log (action VARCHAR2(100), ts TIMESTAMP)",
+    "CREATE TABLE dyn_orders (id NUMBER, status VARCHAR2(20))",
+    "CREATE TABLE dyn_archive_orders (id NUMBER, status VARCHAR2(20))",
+    "CREATE TABLE pivot_orders ("
+    " product VARCHAR2(50), region VARCHAR2(20), sales NUMBER)",
+]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _provision_examples_env():
+    """Make the sweep self-contained on a fresh database.
+
+    Creates the demo tables/sequence above (idempotent — ORA-00955
+    swallowed) and installs runtime/catalog.pell, which 28_repl_demo
+    imports.
+    """
+    from pell.driver import connect
+    c = connect()
+    try:
+        with c.raw.cursor() as cur:
+            for ddl in _DEMO_OBJECTS:
+                try:
+                    cur.execute(ddl)
+                except Exception as e:
+                    if "ORA-00955" not in str(e):  # name already used
+                        raise
+    finally:
+        c.close()
+    r = _deploy(COMPILER / "runtime" / "catalog.pell")
+    assert r.returncode == 0, (
+        f"runtime/catalog.pell failed to deploy:\n{r.stdout}{r.stderr}"
+    )
+
+
 @pytest.mark.parametrize(
     "example",
     sorted(EXAMPLES.glob("*.pell")),
