@@ -1075,10 +1075,22 @@ def cmd_debug_target(args: argparse.Namespace) -> int:
     print(f"pell debug-target: connecting to jdwp {host}:{port}", flush=True)
     try:
         with conn.raw.cursor() as cur:
+            # The anonymous block itself must carry debug info or its
+            # frames report line -1 and stepping through the stub is
+            # impossible. (Deployed packages get this from deploy --debug.)
+            cur.execute("ALTER SESSION SET PLSQL_OPTIMIZE_LEVEL = 1")
+            cur.execute("ALTER SESSION SET PLSQL_DEBUG = TRUE")
             cur.execute(
                 "begin dbms_debug_jdwp.connect_tcp(:h, :p); end;",
                 h=host, p=port,
             )
+        if getattr(args, "wait_for_go", False):
+            # The session is attached but Oracle does NOT suspend it —
+            # without a barrier the block can finish before the debugger
+            # arms its ClassPrepare/breakpoint requests. The IDE writes a
+            # line to our stdin once it's ready.
+            print("pell debug-target: jdwp connected; awaiting go", flush=True)
+            sys.stdin.readline()
         print("pell debug-target: jdwp connected; running block", flush=True)
         try:
             lines = conn.run_block(block)
@@ -1207,6 +1219,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="the IDE's JDWP listener to connect back to")
     dt.add_argument("-c", "--connect", help="user/pass@host:port/service (or set PELL_DB_URL)")
     dt.add_argument("--target", choices=("23", "19c"), default="23")
+    dt.add_argument("--wait-for-go", action="store_true",
+                    help="after the jdwp connection, wait for a line on stdin "
+                         "before running the block (lets the debugger arm "
+                         "breakpoints first — the IDE always passes this)")
     dt.set_defaults(func=cmd_debug_target)
 
     sq = sub.add_parser(
