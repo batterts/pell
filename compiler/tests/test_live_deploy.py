@@ -59,6 +59,33 @@ _DEMO_OBJECTS = [
     "CREATE TABLE dyn_archive_orders (id NUMBER, status VARCHAR2(20))",
     "CREATE TABLE pivot_orders ("
     " product VARCHAR2(50), region VARCHAR2(20), sales NUMBER)",
+    # 04_inventory deploys into INVENTORY and reads/writes its skus
+    # table. The proper table (seq-backed id DEFAULT) is created by
+    # setup_example_schemas.sql in DBA context; creating the DEFAULT
+    # cross-schema needs READ on the sequence (ORA-41900), so this
+    # fixture fallback only guarantees a compile-sufficient shape.
+    "CREATE SEQUENCE inventory.skus_seq",
+    "CREATE TABLE inventory.skus ("
+    " id NUMBER, code VARCHAR2(40), qty NUMBER, expires_at DATE)",
+    # Compile-sufficient shapes for every schema-qualified example;
+    # the DBA setup script owns the canonical versions.
+    "CREATE TABLE hr.employees (id NUMBER, name VARCHAR2(100),"
+    " email VARCHAR2(100), grade NUMBER)",
+    "CREATE TABLE billing.accounts (id NUMBER, balance NUMBER, frozen NUMBER)",
+    "CREATE TABLE reports.orders (order_id NUMBER, total NUMBER, created_at DATE)",
+    "CREATE TABLE lookups.countries (code VARCHAR2(8), name VARCHAR2(80))",
+    "CREATE TABLE lookups.audit_tbl (event VARCHAR2(200), ts DATE)",
+    "CREATE TABLE orders.orders (id NUMBER, customer_id NUMBER,"
+    " status VARCHAR2(20), total NUMBER, created_at DATE)",
+    "CREATE TABLE orders.order_lines (id NUMBER, order_id NUMBER,"
+    " sku_id NUMBER, qty NUMBER)",
+    "CREATE TABLE orders.skus (id NUMBER, qty NUMBER)",
+    "CREATE TABLE orders.audit_log (id NUMBER, event VARCHAR2(200),"
+    " order_id NUMBER, occurred_at DATE)",
+    "CREATE TABLE auditing.ledger (entry_id NUMBER, account_id NUMBER,"
+    " amount NUMBER, ts DATE)",
+    "CREATE TABLE bulk.num_table (n NUMBER)",
+    "CREATE TABLE market.stocktable (sym VARCHAR2(10), price NUMBER)",
 ]
 
 

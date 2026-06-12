@@ -50,6 +50,77 @@ GRANT CREATE ANY PROCEDURE, ALTER ANY PROCEDURE, DROP ANY PROCEDURE,
 -- A couple of examples reference DBMS_LOCK (retry/backoff sleeps).
 GRANT EXECUTE ON SYS.DBMS_LOCK TO pell_test;
 
+-- 04_inventory needs its table (seq-backed id, per house style —
+-- no IDENTITY). Created here in DBA context so the DEFAULT works.
+DECLARE
+    PROCEDURE try(p_sql VARCHAR2) IS
+    BEGIN
+        EXECUTE IMMEDIATE p_sql;
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLCODE != -955 THEN RAISE; END IF;
+    END;
+BEGIN
+    try('CREATE SEQUENCE inventory.skus_seq');
+    try('CREATE TABLE inventory.skus (
+           id NUMBER DEFAULT inventory.skus_seq.NEXTVAL PRIMARY KEY,
+           code VARCHAR2(40), qty NUMBER, expires_at DATE)');
+END;
+/
+
+-- Demo tables the schema-qualified examples query. Owner context so
+-- defaults work; idempotent via try(). Sequence-backed ids per house
+-- style (no IDENTITY).
+DECLARE
+    PROCEDURE try(p_sql VARCHAR2) IS
+    BEGIN
+        EXECUTE IMMEDIATE p_sql;
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLCODE != -955 THEN RAISE; END IF;
+    END;
+BEGIN
+    -- Modules renamed (hr::staffing, inventory::stock) — retire the old
+    -- package names so the same-named TABLES can exist (one namespace).
+    BEGIN EXECUTE IMMEDIATE 'DROP PACKAGE hr.employees';
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+    BEGIN EXECUTE IMMEDIATE 'DROP PACKAGE inventory.skus';
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+    try('CREATE TABLE hr.employees (
+           id NUMBER PRIMARY KEY, name VARCHAR2(100),
+           email VARCHAR2(100), grade NUMBER)');
+    try('CREATE TABLE billing.accounts (
+           id NUMBER PRIMARY KEY, balance NUMBER, frozen NUMBER DEFAULT 0)');
+    try('CREATE TABLE reports.orders (
+           order_id NUMBER, total NUMBER, created_at DATE)');
+    try('CREATE TABLE lookups.countries (
+           code VARCHAR2(8), name VARCHAR2(80))');
+    try('CREATE TABLE lookups.audit_tbl (event VARCHAR2(200), ts DATE)');
+    try('CREATE TABLE orders.orders (
+           id NUMBER PRIMARY KEY, customer_id NUMBER,
+           status VARCHAR2(20), total NUMBER, created_at DATE)');
+    try('CREATE SEQUENCE orders.order_lines_seq');
+    try('CREATE TABLE orders.order_lines (
+           id NUMBER DEFAULT orders.order_lines_seq.NEXTVAL,
+           order_id NUMBER, sku_id NUMBER, qty NUMBER)');
+    try('CREATE TABLE orders.skus (id NUMBER PRIMARY KEY, qty NUMBER)');
+    try('CREATE SEQUENCE orders.audit_log_seq');
+    try('CREATE TABLE orders.audit_log (
+           id NUMBER DEFAULT orders.audit_log_seq.NEXTVAL,
+           event VARCHAR2(200), order_id NUMBER, occurred_at DATE)');
+    try('CREATE SEQUENCE auditing.ledger_seq');
+    try('CREATE TABLE auditing.ledger (
+           entry_id NUMBER DEFAULT auditing.ledger_seq.NEXTVAL,
+           account_id NUMBER, amount NUMBER, ts DATE)');
+    try('CREATE TABLE bulk.num_table (n NUMBER)');
+    try('CREATE TABLE market.stocktable (sym VARCHAR2(10), price NUMBER)');
+    -- pell_runtime / logger / pell_re live in PELL_TEST; packages in
+    -- the example schemas reference them unqualified — public synonyms
+    -- make that resolve (EXECUTE is granted by pell deploy itself).
+    try('CREATE PUBLIC SYNONYM pell_runtime FOR pell_test.pell_runtime');
+    try('CREATE PUBLIC SYNONYM logger FOR pell_test.logger');
+    try('CREATE PUBLIC SYNONYM pell_re FOR pell_test.pell_re');
+END;
+/
+
 -- Performance-introspection examples (stat_diff, table-stats reports,
 -- execution-plan visualizers) read the V$ dynamic views.
 GRANT SELECT ON SYS.V_$MYSTAT   TO pell_test;

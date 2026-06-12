@@ -161,10 +161,13 @@ class Connection:
                         "<unknown>", "<unknown>",
                         [(0, 0, str(cur.warning))],
                     )
-                name, obj_type = obj
-                errors = _user_errors_for(cur, name, obj_type)
-                if errors:
-                    raise InstallError(name, obj_type, errors)
+                name, obj_type, owner = obj
+                errors = _user_errors_for(cur, name, obj_type, owner)
+                if not errors:
+                    # Oracle SAID it compiled dirty — never swallow that,
+                    # even when the error rows are out of view.
+                    errors = [(0, 0, str(cur.warning))]
+                raise InstallError(name, obj_type, errors)
 
     def commit(self) -> None:
         self.raw.commit()
@@ -293,7 +296,7 @@ _CREATE_OBJECT_RE = _re.compile(
 )
 
 
-def _parse_create_object(stmt: str) -> Optional[tuple[str, str]]:
+def _parse_create_object(stmt: str) -> Optional[tuple[str, str, Optional[str]]]:
     """Return (name_upper, type_upper) of the object being created by
     `stmt`, or None if it's not a CREATE OR REPLACE for an object type
     that has a USER_ERRORS row.
@@ -308,22 +311,27 @@ def _parse_create_object(stmt: str) -> Optional[tuple[str, str]]:
         return None
     obj_type = _re.sub(r"\s+", " ", m.group(1).upper())
     raw_name = m.group(2)
-    # Last segment of a dotted name. Strip surrounding quotes if any.
-    last = raw_name.rsplit(".", 1)[-1]
-    if last.startswith('"') and last.endswith('"'):
-        last = last[1:-1]
-    return last.upper(), obj_type
+    # Owner = everything before the last dot (None = connected schema);
+    # name = last segment. Strip quotes from both.
+    def _unq(x: str) -> str:
+        return x[1:-1] if x.startswith('"') and x.endswith('"') else x
+    parts = raw_name.rsplit(".", 1)
+    owner = _unq(parts[0]).upper() if len(parts) == 2 else None
+    return _unq(parts[-1]).upper(), obj_type, owner
 
 
 def _user_errors_for(
-    cur: Any, name: str, obj_type: str,
+    cur: Any, name: str, obj_type: str, owner: Optional[str] = None,
 ) -> list[tuple[int, int, str]]:
-    """Pull all errors for (name, type) from USER_ERRORS, ordered by
-    sequence. Returns [] when the object compiled clean."""
+    """Pull all errors for (owner, name, type), ordered by sequence.
+    Queries ALL_ERRORS so cross-schema deploys (CREATE PACKAGE
+    inventory.skus run as PELL_TEST) report their errors too — they are
+    invisible in USER_ERRORS, which only covers the connected schema.
+    Returns [] when the object compiled clean."""
     cur.execute(
-        "SELECT line, position, text FROM user_errors "
-        "WHERE name = :n AND type = :t "
+        "SELECT line, position, text FROM all_errors "
+        "WHERE owner = NVL(:o, USER) AND name = :n AND type = :t "
         "ORDER BY sequence",
-        {"n": name, "t": obj_type},
+        {"o": owner, "n": name, "t": obj_type},
     )
     return [(int(line), int(pos), text) for line, pos, text in cur.fetchall()]

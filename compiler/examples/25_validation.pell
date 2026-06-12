@@ -65,7 +65,7 @@ pub fn validate_signup(form: SignupForm)
     return Ok(SignupForm { name: name, email: email, age: age });
 }
 
-fn get_name(form: any) -> text {
+fn get_name(form: SignupForm) -> text {
     return require_text("name", form.name)?;
 }
 

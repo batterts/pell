@@ -36,6 +36,33 @@ object PellDebugStubGenerator {
         }
     }
 
+    /** The fn's return type with Result<T, ...> unwrapped to T, or
+     *  null for procedures / Unit-like returns (which lower to PL/SQL
+     *  PROCEDUREs — binding their "result" emits invalid code). */
+    fun effectiveReturnType(fn: PellFnDef): String? {
+        val header = fn.text.substringBefore("{")
+        if (!header.contains("->")) return null
+        var t = header.substringAfter("->").trim()
+        if (t.startsWith("Result<")) {
+            // first top-level type argument
+            val inner = t.removePrefix("Result<").substringBeforeLast(">")
+            var depth = 0
+            var cut = inner.length
+            for ((i, c) in inner.withIndex()) {
+                when (c) {
+                    '<' -> depth++
+                    '>' -> depth--
+                    ',' -> if (depth == 0) { cut = i; break }
+                }
+            }
+            t = inner.substring(0, cut).trim()
+        }
+        return t.takeIf { it.isNotBlank() && it != "Unit" && it != "()" }
+    }
+
+    private val printable = setOf("text", "bigtext", "number", "bool",
+                                  "date", "timestamp", "json")
+
     fun stubText(fn: PellFnDef): String {
         val file = fn.containingFile
         val moduleDecl = PsiTreeUtil.findChildOfType(file, PellModuleDecl::class.java)
@@ -43,18 +70,24 @@ object PellDebugStubGenerator {
         val fnName = fn.name ?: "unknown_fn"
         val params = PsiTreeUtil.findChildrenOfType(fn, PellParam::class.java).toList()
         val args = params.joinToString(", ") { defaultArgFor(it) }
-        val hasReturn = fn.text.substringBefore("{").contains("->")
+        val ret = effectiveReturnType(fn)
         val call = "$module::$fnName($args)"
         return buildString {
             appendLine("// Debug stub for $module::$fnName — edit the arguments, set")
             appendLine("// breakpoints here or in ${file.name}, then Debug this file.")
             appendLine("import $module;")
             appendLine()
-            if (hasReturn) {
-                appendLine("let result = $call;")
-                appendLine("p(\"{result}\");")
-            } else {
-                appendLine("$call;")
+            when {
+                ret == null -> appendLine("$call;")
+                ret in printable || ret.startsWith("json") -> {
+                    appendLine("let result = $call;")
+                    appendLine("p(\"{result}\");")
+                }
+                else -> {
+                    // record / list returns: bind for the debugger's
+                    // Variables view; printing them isn't supported.
+                    appendLine("let result = $call;  // inspect `result` in the debugger")
+                }
             }
         }
     }

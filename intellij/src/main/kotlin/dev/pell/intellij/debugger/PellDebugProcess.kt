@@ -374,7 +374,14 @@ class PellDebugProcess(
 
     private fun armOn(rt: com.sun.jdi.ReferenceType, p: Pending): Boolean {
         return try {
-            val locs = rt.locationsOfLine(p.unitLine)
+            // Snap forward: markers can sit on declaration lines (no
+            // code location) — the statement is within the next few.
+            var locs = rt.locationsOfLine(p.unitLine)
+            var probe = p.unitLine
+            while (locs.isEmpty() && probe < p.unitLine + 8) {
+                probe++
+                locs = runCatching { rt.locationsOfLine(probe) }.getOrDefault(emptyList())
+            }
             if (locs.isEmpty()) {
                 console("pell debugger: ${rt.name()} has no code at unit line ${p.unitLine}",
                         ConsoleViewContentType.ERROR_OUTPUT)

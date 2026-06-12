@@ -20,6 +20,11 @@ pub record Transfer {
 pub fn transfer(args: Transfer)
   -> Result<Unit, Overdraft | AccountFrozen>
 {
+  // sql!{} binds (:from_id, :to_id, :amt) reference pell locals —
+  // destructure the record up front so each bind has a visible name.
+  let from_id = args.from_id;
+  let to_id = args.to_id;
+  let amt = args.amt;
   transaction {
     let src: Account = sql! {
       select id, balance from accounts where id = :from_id and frozen = 0

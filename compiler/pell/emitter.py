@@ -518,6 +518,17 @@ class Emitter:
         # would refer to a local-only type.
         def _lt(t, *, param: bool = False, sql_context: bool = False) -> str:
             if isinstance(t, A.NamedType):
+                # `any` has no PL/SQL lowering — it would emit a reference
+                # to a nonexistent t_any and only fail at deploy. Reject at
+                # compile time with the actual fix.
+                if t.name == "any":
+                    raise EmitError(
+                        "`any` can't be lowered to PL/SQL — annotate with "
+                        "the concrete type (record name, text, number, "
+                        "json, ...).",
+                        t.loc,
+                        code="pell.any-not-lowerable",
+                    )
                 # Qualified `pkg::Type` — verify the package is imported.
                 # The error fires here so the squiggle lands on the type
                 # annotation token, not on whatever statement happened to
@@ -2558,6 +2569,22 @@ class Emitter:
                     and len(ret.params) == 1):
                 elem = _render_type(ret.params[0])
                 return f"{pkg}.t_{_safe(elem)}_list"
+            # Record returns: the type lives in the FOREIGN package —
+            # qualify it, or anon blocks / other packages declare a
+            # nonexistent local t_<record> (PLS-00201). The short module
+            # name resolves to the real (schema-qualified) package via
+            # the project module registry, same as call lowering.
+            # Result<T, E> carries its value type in params[0].
+            if (isinstance(ret, A.GenericType) and ret.base == "Result"
+                    and ret.params):
+                ret = ret.params[0]
+            if isinstance(ret, A.NamedType):
+                info = self._project_modules.get(pkg)
+                real_pkg = info.package_name if info is not None else pkg.replace(".", "_")
+                qual = (info.qualified_name.lower() if info is not None
+                        else pkg)
+                if (real_pkg, ret.name) in self._project_records:
+                    return f"{qual}.{_record_type_name(ret.name)}"
             return self._lt(ret)
         # json::* helpers — type by name (no fallthrough to free-fn lookup).
         if isinstance(call.callee, A.Ident) and call.callee.name.startswith("json::"):
@@ -4982,7 +5009,10 @@ class Emitter:
         out += [
             f"{indent}EXCEPTION",
             f"{indent}  WHEN OTHERS THEN",
-            f"{indent}    IF NOT {committed_flag} THEN ROLLBACK TO {sp};{prov} END IF;",
+            # NOTE: the provenance comment must come AFTER `END IF;` —
+            # placed mid-line it comments out the rest of the line and
+            # breaks the block (PLS-00103).
+            f"{indent}    IF NOT {committed_flag} THEN ROLLBACK TO {sp}; END IF;{prov}",
             f"{indent}    RAISE;",
             f"{indent}END;",
         ]
@@ -5104,6 +5134,13 @@ class Emitter:
         if isinstance(t, A.PrimType) and t.name == "Unit":
             return True
         if isinstance(t, A.NamedType) and t.name == "Unit":
+            return True
+        # Result<Unit, E...> lowers to a PROCEDURE too (the Ok carries
+        # no value; errors raise).
+        if (isinstance(t, A.GenericType) and t.base == "Result"
+                and t.params
+                and isinstance(t.params[0], (A.PrimType, A.NamedType))
+                and getattr(t.params[0], "name", None) == "Unit"):
             return True
         return False
 

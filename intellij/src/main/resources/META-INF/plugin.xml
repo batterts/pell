@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.9.0</version>
+    <version>0.9.1</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -23,8 +23,8 @@
         <h3>One look at the lowering</h3>
 
 <pre>
-// src/hr/employees.pell
-module hr.employees;
+// src/hr/staffing.pell
+module hr::staffing;
 
 pub record Employee { id: number, name: text, level: number }
 pub error NotFound { id: number }
@@ -44,17 +44,17 @@ pub fn promote(id: number) -> Result&lt;Employee, NotFound&gt; {
         <p>…lowers to PL/SQL you'd write by hand:</p>
 
 <pre>
-CREATE OR REPLACE PACKAGE hr.employees AS
+CREATE OR REPLACE PACKAGE hr.staffing AS
   TYPE t_employee IS RECORD (
     id    NUMBER,
     name  VARCHAR2(4000),
     level NUMBER
   );
   FUNCTION promote(p_id IN NUMBER) RETURN t_employee;
-END employees;
+END staffing;
 /
 
-CREATE OR REPLACE PACKAGE BODY hr.employees AS
+CREATE OR REPLACE PACKAGE BODY hr.staffing AS
   FUNCTION promote(p_id IN NUMBER) RETURN t_employee IS
     l_row t_employee;
     l_ret t_employee;
@@ -69,9 +69,9 @@ CREATE OR REPLACE PACKAGE BODY hr.employees AS
     RETURN l_ret;
   EXCEPTION
     WHEN NO_DATA_FOUND THEN
-      RAISE pell_runtime.hr_employees_notfound;
+      RAISE pell_runtime.hr_staffing_notfound;
   END promote;
-END employees;
+END staffing;
 /
 </pre>
 
@@ -163,6 +163,25 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.9.1 — return-type-aware stubs + honest cross-schema deploys</h3>
+        <ul><li>Generated debug stubs respect the fn's return type:
+        procedures and <code>Result&lt;Unit,…&gt;</code> fns are called
+        without a bogus result binding; record/list returns bind for the
+        Variables view without unsupported printing; scalar/json returns
+        print as before.</li>
+        <li>Cross-package record returns now lower fully qualified
+        (<code>hr.staffing.t_employee</code>) — stubs for record-returning
+        fns compile.</li>
+        <li>Breakpoints landing on declaration lines snap forward to the
+        next executable line instead of being dropped.</li>
+        <li>Compiler-side: <code>pell deploy</code> no longer reports ✓
+        when a cross-schema unit compiled with errors (it checked
+        USER_ERRORS, which can't see other schemas) — this exposed and
+        fixed 11 latently-broken examples, an emitter comment-placement
+        bug in transaction blocks, and two examples whose module name
+        collided with their table name (packages and tables share a
+        namespace — now hr::staffing and inventory::stock).</li></ul>
+
         <h3>0.9.0 — paired execution line in the split-view preview</h3>
         <ul><li>While debugging, the split editor highlights <b>both
         sides</b>: XDebugger's band on the pell source and a matching

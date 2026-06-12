@@ -393,6 +393,16 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             try:
                 conn.execute_install(path.read_text())
                 print(f"  ✓ {path.name}")
+                # Shared runtime packages are referenced unqualified from
+                # packages deployed into OTHER schemas (via the public
+                # synonyms the setup script creates) — make them callable.
+                stem = path.stem
+                if stem in ("pell_runtime", "logger", "pell_re"):
+                    try:
+                        with conn.raw.cursor() as _c:
+                            _c.execute(f"GRANT EXECUTE ON {stem} TO PUBLIC")
+                    except Exception:
+                        pass  # single-schema setups don't need it
             except Exception as e:
                 deploy_failures += 1
                 print(f"  ✗ {path.name}: {e}", file=sys.stderr)
@@ -451,10 +461,11 @@ def cmd_sql(args: argparse.Namespace) -> int:
                     if dirty:
                         obj = driver._parse_create_object(stmt)
                         if obj is not None:
-                            name, obj_type = obj
-                            errors = driver._user_errors_for(cur, name, obj_type)
-                            if errors:
-                                raise driver.InstallError(name, obj_type, errors)
+                            name, obj_type, owner = obj
+                            errors = driver._user_errors_for(cur, name, obj_type, owner)
+                            if not errors:
+                                errors = [(0, 0, str(cur.warning))]
+                            raise driver.InstallError(name, obj_type, errors)
                 print(f"{label}  ok")
                 for ln in output:
                     print(f"  {ln}")

@@ -51,7 +51,7 @@ def test_runtime_aggregation():
     assert result.returncode == 0, result.stderr
     out = result.stdout
     assert "CREATE OR REPLACE PACKAGE pell_runtime" in out
-    assert "hr_employees_notfound EXCEPTION" in out
+    assert "hr_staffing_notfound EXCEPTION" in out
     assert "billing_charges_overdraft EXCEPTION" in out
 
 
