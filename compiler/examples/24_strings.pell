@@ -87,3 +87,112 @@ pub fn reversed(s: text) -> text {
     // SELECT so it runs in the SQL engine.
     return sql! { select reverse(:s) from dual }.scalar();
 }
+
+// 1-based position of the first occurrence of `needle`, 0 when absent
+// (Oracle INSTR semantics).
+pub fn index_of(haystack: text, needle: text) -> number {
+    return nvl(instr(haystack, needle), 0);
+}
+
+// Text before the first `sep` — the whole string when `sep` is absent.
+pub fn before(s: text, sep: text) -> text {
+    let i = nvl(instr(s, sep), 0);
+    if i == 0 {
+        return s;
+    }
+    return substr(s, 1, i - 1);
+}
+
+// Text after the first `sep` — "" (NULL) when `sep` is absent.
+pub fn after(s: text, sep: text) -> text {
+    let i = nvl(instr(s, sep), 0);
+    if i == 0 {
+        return "";
+    }
+    return substr(s, i + length(sep));
+}
+
+// Text between the first `open` and the next `close` after it.
+pub fn text_between(s: text, open: text, close: text) -> text {
+    return before(after(s, open), close);
+}
+
+// Remove `prefix` from the front when present, else return s unchanged.
+pub fn strip_prefix(s: text, prefix: text) -> text {
+    if s.starts_with(prefix) {
+        return substr(s, length(prefix) + 1);
+    }
+    return s;
+}
+
+// Remove `suffix` from the end when present, else return s unchanged.
+pub fn strip_suffix(s: text, suffix: text) -> text {
+    if s.ends_with(suffix) {
+        return substr(s, 1, length(s) - length(suffix));
+    }
+    return s;
+}
+
+// `s` repeated `n` times ("" for n <= 0).
+pub fn repeat_text(s: text, n: number) -> text {
+    var acc: text = "";
+    for i in 1..=n {
+        acc = acc + s;
+    }
+    return acc;
+}
+
+// Every word capitalized (Oracle INITCAP).
+pub fn title_case(s: text) -> text {
+    return initcap(s);
+}
+
+// Join a list of parts with `delim` — the inverse of split().
+pub fn join(parts: list<text>, delim: text) -> text {
+    var acc: text = "";
+    var seen: number = 0;
+    for part in parts {
+        if seen > 0 {
+            acc = acc + delim;
+        }
+        acc = acc + part;
+        seen = seen + 1;
+    }
+    return acc;
+}
+
+// Truncate to at most `max_len` characters, ending in "..." when cut.
+pub fn ellipsize(s: text, max_len: number) -> text {
+    if nvl(length(s), 0) <= max_len {
+        return s;
+    }
+    return substr(s, 1, max_len - 3) + "...";
+}
+
+// Collapse runs of whitespace to single spaces and trim the ends.
+pub fn squish(s: text) -> text {
+    return trim_ws(regexp_replace(s, "\s+", " "));
+}
+
+// `userName` / `UserName` → `user_name`.
+pub fn camel_to_snake(s: text) -> text {
+    return lower(regexp_replace(s, "([a-z0-9])([A-Z])", "\1_\2"));
+}
+
+// `user_name` → `UserName`.
+pub fn snake_to_camel(s: text) -> text {
+    let parts: list<text> = s.split("_");
+    var acc: text = "";
+    for part in parts {
+        acc = acc + initcap(part);
+    }
+    return acc;
+}
+
+// `s` when it has visible content, otherwise `dflt`.
+pub fn default_if_blank(s: text, dflt: text) -> text {
+    if is_blank(s) {
+        return dflt;
+    }
+    return s;
+}

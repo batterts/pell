@@ -63,6 +63,25 @@ pub fn t_text_utils() {
     ut::expect(text_utils::has("haystack", "hay")).to_be_true();
     ut::expect(text_utils::is_blank("   ")).to_be_true();
     ut::expect(text_utils::is_blank("x")).to_be_false();
+    // slicing around separators
+    ut::expect(text_utils::index_of("hello", "ll")).to_equal(3);
+    ut::expect(text_utils::before("key=value", "=")).to_equal("key");
+    ut::expect(text_utils::after("key=value", "=")).to_equal("value");
+    ut::expect(text_utils::text_between("x[mid]y", "[", "]")).to_equal("mid");
+    ut::expect(text_utils::strip_prefix("pre_x", "pre_")).to_equal("x");
+    ut::expect(text_utils::strip_suffix("x.sql", ".sql")).to_equal("x");
+    // building and shaping
+    ut::expect(text_utils::repeat_text("ab", 3)).to_equal("ababab");
+    ut::expect(text_utils::ellipsize("abcdefghij", 8)).to_equal("abcde...");
+    ut::expect(text_utils::squish("  a   b  ")).to_equal("a b");
+    ut::expect(text_utils::title_case("hello world")).to_equal("Hello World");
+    ut::expect(text_utils::default_if_blank("  ", "dflt")).to_equal("dflt");
+    // case conventions
+    ut::expect(text_utils::camel_to_snake("userName")).to_equal("user_name");
+    ut::expect(text_utils::snake_to_camel("user_name")).to_equal("UserName");
+    // split → join round-trip (join takes the list parameter directly)
+    let parts = text_utils::split("a-b-c", "-");
+    ut::expect(text_utils::join(parts, "+")).to_equal("a+b+c");
 }
 
 @test("json_demo builds and reads nested documents")
@@ -300,6 +319,31 @@ pub fn t_datetime() {
     let ts = datetime::parse_iso("2026-06-13T12:00:00");
     ut::expect(datetime::format_iso(ts)).to_be_like("2026-06-13T12:00:00%");
     ut::expect(datetime::epoch(datetime::from_epoch(1750000000))).to_equal(1750000000);
+    // calendar helpers — 2026-02-14 is a Saturday in a non-leap year
+    let feb = datetime::parse_iso("2026-02-14T15:30:00");
+    ut::expect(datetime::format_iso(datetime::start_of_day(feb)))
+        .to_be_like("2026-02-14T00:00:00%");
+    ut::expect(datetime::format_iso(datetime::start_of_month(feb)))
+        .to_be_like("2026-02-01%");
+    ut::expect(datetime::format_iso(datetime::end_of_month(feb)))
+        .to_be_like("2026-02-28%");
+    ut::expect(datetime::format_iso(datetime::start_of_week(feb)))
+        .to_be_like("2026-02-09%");      // ISO week starts Monday
+    ut::expect(datetime::day_of_week(feb)).to_equal(6);
+    ut::expect(datetime::day_name(feb)).to_equal("Saturday");
+    ut::expect(datetime::is_weekend(feb)).to_be_true();
+    ut::expect(datetime::year_of(feb)).to_equal(2026);
+    ut::expect(datetime::month_of(feb)).to_equal(2);
+    ut::expect(datetime::day_of(feb)).to_equal(14);
+    ut::expect(datetime::hour_of(feb)).to_equal(15);
+    ut::expect(datetime::days_in_month(feb)).to_equal(28);
+    ut::expect(datetime::is_leap_year(feb)).to_be_false();
+    ut::expect(datetime::is_leap_year(datetime::parse_iso("2028-06-01T00:00:00")))
+        .to_be_true();
+    // ADD_MONTHS clamps end-of-month: Jan 31 + 1 month = Feb 28
+    let jan31 = datetime::parse_iso("2026-01-31T00:00:00");
+    ut::expect(datetime::format_iso(datetime::add_months_to(jan31, 1)))
+        .to_be_like("2026-02-28%");
 }
 
 @test("signups::validation: checks pass and compose")
@@ -313,6 +357,18 @@ pub fn t_validation() {
     let sf = validation::SignupForm { name: "Ann", email: "ann@example.com", age: 30 };
     let form = validation::validate_signup(sf)?;
     ut::expect(form.name).to_equal("Ann");
+    // generic gates
+    let ml = validation::require_min_length("pw", "secret12", 8)?;
+    ut::expect(ml).to_equal("secret12");
+    let xl = validation::require_max_length("code", "abc", 5)?;
+    ut::expect(xl).to_equal("abc");
+    let rng = validation::require_in_range("qty", 5, 1, 10)?;
+    ut::expect(rng).to_equal(5);
+    // raw string: `{5}` in a regular string would interpolate
+    let pat = validation::require_pattern("zip", "90210", `^\d{5}$`)?;
+    ut::expect(pat).to_equal("90210");
+    let one = validation::require_one_of("size", "M", "S,M,L,XL")?;
+    ut::expect(one).to_equal("M");
 }
 
 @test("orders::paging: counts, page math, page contents")

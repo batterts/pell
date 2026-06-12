@@ -168,3 +168,105 @@ pub fn add_days(ts: timestamp, n: number) -> timestamp {
 pub fn add_seconds(ts: timestamp, n: number) -> timestamp {
     return ts + numtodsinterval(n, "SECOND");
 }
+
+// Add N months, clamping end-of-month per Oracle ADD_MONTHS rules
+// (Jan 31 + 1 month = Feb 28/29).
+pub fn add_months_to(ts: timestamp, n: number) -> timestamp {
+    let r: timestamp = sql! {
+        select cast(add_months(cast(:ts as date), :n) as timestamp) from dual
+    }.one();
+    return r;
+}
+
+// ---- calendar helpers -------------------------------------------------------
+
+// Midnight at the start of ts's day.
+pub fn start_of_day(ts: timestamp) -> timestamp {
+    let r: timestamp = sql! {
+        select cast(trunc(cast(:ts as date)) as timestamp) from dual
+    }.one();
+    return r;
+}
+
+// Midnight on the first of ts's month.
+pub fn start_of_month(ts: timestamp) -> timestamp {
+    let r: timestamp = sql! {
+        select cast(trunc(cast(:ts as date), 'MM') as timestamp) from dual
+    }.one();
+    return r;
+}
+
+// Midnight on the LAST day of ts's month (start of that day, not 23:59).
+pub fn end_of_month(ts: timestamp) -> timestamp {
+    let r: timestamp = sql! {
+        select cast(trunc(last_day(cast(:ts as date))) as timestamp) from dual
+    }.one();
+    return r;
+}
+
+// Midnight on the Monday of ts's ISO week.
+pub fn start_of_week(ts: timestamp) -> timestamp {
+    let r: timestamp = sql! {
+        select cast(trunc(cast(:ts as date), 'IW') as timestamp) from dual
+    }.one();
+    return r;
+}
+
+// ISO day of week: 1 = Monday … 7 = Sunday. (to_char 'D' is
+// NLS_TERRITORY-dependent — day-diff from the ISO week start isn't.)
+pub fn day_of_week(ts: timestamp) -> number {
+    let r: number = sql! {
+        select trunc(cast(:ts as date)) - trunc(cast(:ts as date), 'IW') + 1
+        from dual
+    }.one();
+    return r;
+}
+
+// English day name, e.g. "Monday" — pinned to a fixed NLS language so
+// output doesn't change with session settings.
+pub fn day_name(ts: timestamp) -> text {
+    let r: text = sql! {
+        select to_char(cast(:ts as date), 'fmDay', 'NLS_DATE_LANGUAGE=ENGLISH')
+        from dual
+    }.one();
+    return r;
+}
+
+// True on Saturday or Sunday (ISO days 6 and 7).
+pub fn is_weekend(ts: timestamp) -> bool {
+    return day_of_week(ts) >= 6;
+}
+
+// Calendar parts as numbers.
+pub fn year_of(ts: timestamp) -> number {
+    return to_number(to_char(ts, "YYYY"));
+}
+
+pub fn month_of(ts: timestamp) -> number {
+    return to_number(to_char(ts, "MM"));
+}
+
+pub fn day_of(ts: timestamp) -> number {
+    return to_number(to_char(ts, "DD"));
+}
+
+pub fn hour_of(ts: timestamp) -> number {
+    return to_number(to_char(ts, "HH24"));
+}
+
+// Days in ts's month (28–31).
+pub fn days_in_month(ts: timestamp) -> number {
+    let r: number = sql! {
+        select to_number(to_char(last_day(cast(:ts as date)), 'DD')) from dual
+    }.one();
+    return r;
+}
+
+// True in a leap year.
+pub fn is_leap_year(ts: timestamp) -> bool {
+    let feb_days: number = sql! {
+        select to_number(to_char(last_day(trunc(cast(:ts as date), 'YYYY') + 31), 'DD'))
+        from dual
+    }.one();
+    return feb_days == 29;
+}

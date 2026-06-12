@@ -18,6 +18,11 @@ pub record SignupForm {
 pub error MissingField     { field: text }
 pub error InvalidEmail     { value: text, reason: text }
 pub error AgeOutOfRange    { value: number, min: number, max: number }
+pub error TooShort         { field: text, min_len: number }
+pub error TooLong          { field: text, max_len: number }
+pub error OutOfRange       { field: text, value: number, min: number, max: number }
+pub error PatternMismatch  { field: text, value: text, pattern: text }
+pub error NotOneOf         { field: text, value: text, allowed: text }
 
 // Required-field check: rejects NULL or whitespace-only input.
 // Note we explicitly compare against `is_empty()` because Oracle's `''`
@@ -49,6 +54,60 @@ pub fn require_email(value: text) -> Result<text, InvalidEmail> {
 pub fn require_age(value: number) -> Result<number, AgeOutOfRange> {
     if value < 13 || value > 120 {
         return Err(AgeOutOfRange { value: value, min: 13, max: 120 });
+    }
+    return Ok(value);
+}
+
+// Length gates — counts characters (Oracle LENGTH), not bytes.
+pub fn require_min_length(field: text, value: text, min_len: number)
+    -> Result<text, TooShort>
+{
+    if nvl(length(value), 0) < min_len {
+        return Err(TooShort { field: field, min_len: min_len });
+    }
+    return Ok(value);
+}
+
+pub fn require_max_length(field: text, value: text, max_len: number)
+    -> Result<text, TooLong>
+{
+    if nvl(length(value), 0) > max_len {
+        return Err(TooLong { field: field, max_len: max_len });
+    }
+    return Ok(value);
+}
+
+// Generic numeric range gate (inclusive on both ends).
+pub fn require_in_range(field: text, value: number, min: number, max: number)
+    -> Result<number, OutOfRange>
+{
+    if value < min || value > max {
+        return Err(OutOfRange { field: field, value: value, min: min, max: max });
+    }
+    return Ok(value);
+}
+
+// Regex gate — the whole value must match `pattern` (anchored by caller).
+pub fn require_pattern(field: text, value: text, pattern: text)
+    -> Result<text, PatternMismatch>
+{
+    let matched: number = sql! {
+        select case when regexp_like(:value, :pattern) then 1 else 0 end
+        from dual
+    }.one();
+    if matched == 0 {
+        return Err(PatternMismatch { field: field, value: value, pattern: pattern });
+    }
+    return Ok(value);
+}
+
+// Enum gate — `allowed` is a comma-separated list, e.g. "S,M,L,XL".
+pub fn require_one_of(field: text, value: text, allowed: text)
+    -> Result<text, NotOneOf>
+{
+    let padded = "," + allowed + ",";
+    if padded.contains("," + value + ",") == false {
+        return Err(NotOneOf { field: field, value: value, allowed: allowed });
     }
     return Ok(value);
 }
