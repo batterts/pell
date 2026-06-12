@@ -191,6 +191,12 @@ class PellDebugProcess(
                     if (m.first == 0) moduleMaps[File(dep).canonicalPath] = PellSrcMap.parse(m.second)
                 }
             }
+            // Pair with the split-editor preview: its build switches to
+            // --debug (matching the deployed text) and it will show the
+            // execution line during suspends.
+            config.options.deployPath?.let {
+                dev.pell.intellij.preview.PellPreviewRegistry.beginDebug(it)
+            }
             // Maps are built — process any breakpoints that registered
             // during startup.
             mapsReady = true
@@ -494,19 +500,33 @@ class PellDebugProcess(
 
     private fun resumeTarget() {
         sqlHighlight.clear()
+        dev.pell.intellij.preview.PellPreviewRegistry.clearHighlights()
         val es = currentEventSet
         currentEventSet = null
         runCatching { es?.resume() } .onFailure { runCatching { vm?.resume() } }
     }
 
-    /** Place the paired "you are here" marker on the deployed PL/SQL
-     *  for the current top frame's unit line. Block frames have no
-     *  deployed .sql (the pell file IS the source) — skip them. */
+    /** Place the paired "you are here" marker on the lowered PL/SQL for
+     *  the current top frame's unit line. Prefers the split-editor
+     *  preview pane (highlighting the matching file line in the debug
+     *  build it now shows); falls back to a read-only ALL_SOURCE tab
+     *  for units without an open preview. Block frames have no .sql
+     *  (the pell file IS the source) — cleared. */
     private fun updateSqlHighlight(thread: ThreadReference) {
         val frame = runCatching { thread.frames().firstOrNull() }.getOrNull() ?: return
         val loc = frame.location()
         val className = loc.declaringType().name()
         if (className.contains(".Block.")) { sqlHighlight.clear(); return }
+        // Preview pane first: unit line -> file line via the srcmap's
+        // CREATE anchor (file_line + unit_line - 1), 0-based for the doc.
+        for ((path, map) in moduleMaps) {
+            val unit = map.unitFor(className) ?: continue
+            val fileLine0 = unit.fileLine + loc.lineNumber() - 2
+            if (dev.pell.intellij.preview.PellPreviewRegistry.highlight(path, fileLine0)) {
+                sqlHighlight.clear()
+                return
+            }
+        }
         val vf = foreignSourceFile(className) ?: run { sqlHighlight.clear(); return }
         sqlHighlight.show(vf, (loc.lineNumber() - 1).coerceAtLeast(0))
     }
@@ -551,6 +571,9 @@ class PellDebugProcess(
     override fun stop() {
         stopped = true
         sqlHighlight.clear()
+        config.options.deployPath?.let {
+            dev.pell.intellij.preview.PellPreviewRegistry.endDebug(it)
+        }
         ApplicationManager.getApplication().executeOnPooledThread {
             runCatching { vm?.dispose() }
             runCatching {

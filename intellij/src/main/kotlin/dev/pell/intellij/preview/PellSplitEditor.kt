@@ -88,6 +88,14 @@ class PellSplitEditor(
         )
         // Kick off the first compile as soon as the editor is shown.
         ApplicationManager.getApplication().invokeLater { triggerCompile(delayMs = 0) }
+        // Debugger pairing: the registry lets an active debug session
+        // force a --debug preview build and paint the execution line.
+        PellPreviewRegistry.register(sourceFile.path, pellPreview) { triggerCompile(0) }
+    }
+
+    override fun dispose() {
+        PellPreviewRegistry.unregister(sourceFile.path)
+        super.dispose()
     }
 
     /**

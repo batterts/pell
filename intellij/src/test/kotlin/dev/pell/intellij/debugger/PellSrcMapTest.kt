@@ -16,6 +16,7 @@ class PellSrcMapTest {
          "jdwp_class": "${'$'}Oracle.Package..HELLO", "entries": []},
         {"kind": "PACKAGE BODY", "schema": null, "name": "HELLO",
          "jdwp_class": "${'$'}Oracle.PackageBody..HELLO",
+         "file_line": 21,
          "entries": [
             {"pell_line": 9,  "unit_line": 3},
             {"pell_line": 10, "unit_line": 5},
@@ -56,6 +57,17 @@ class PellSrcMapTest {
         assertEquals(9, body.pellLineForUnit(4))
         // before any marker: unmapped
         assertNull(body.pellLineForUnit(1))
+    }
+
+    @Test
+    fun fileLineAnchorsUnitToFileConversion() {
+        val body = PellSrcMap.parse(json).unitFor("${'$'}Oracle.PackageBody.X.HELLO")!!
+        // unit line 1 IS the CREATE line: file line = fileLine + unit - 1.
+        assertEquals(21, body.fileLine)
+        assertEquals(25, body.fileLine + 5 - 1)
+        // absent file_line defaults to 1 (older maps)
+        val spec = PellSrcMap.parse(json).units.first { it.kind == "PACKAGE" }
+        assertEquals(1, spec.fileLine)
     }
 
     @Test

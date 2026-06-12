@@ -91,8 +91,12 @@ class PellCompileService(private val project: Project) {
             .filter { it.isNotEmpty() && !it.startsWith("//") }
             .firstOrNull()
             ?.startsWith("module") == true
+        // During a debug session the preview must show the DEBUG build —
+        // identical to the deployed text — so execution lines align.
+        val dbg = PellPreviewRegistry.isDebug(sourcePath)
         val params = if (isModule)
-            listOf("build", tmp.absolutePath, "--reproducible")
+            listOf("build", tmp.absolutePath, "--reproducible") +
+                (if (dbg) listOf("--debug") else emptyList())
         else
             listOf("exec", tmp.absolutePath, "--dry-run")
         val cmd = GeneralCommandLine(pellExe.absolutePath)

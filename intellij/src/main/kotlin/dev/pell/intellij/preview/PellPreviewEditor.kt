@@ -81,6 +81,7 @@ class PellPreviewEditor(
     // pinned to when the user clicks a decl in the source. One at a
     // time; the previous gets removed before the next is added.
     private var caretSyncHighlighter: RangeHighlighter? = null
+    private var executionHighlighter: RangeHighlighter? = null
 
     init {
         viewer.isViewer = true
@@ -122,12 +123,52 @@ class PellPreviewEditor(
         // changes — its line offsets won't be meaningful in the new text.
         caretSyncHighlighter?.let { viewer.markupModel.removeHighlighter(it) }
         caretSyncHighlighter = null
+        executionHighlighter?.let { viewer.markupModel.removeHighlighter(it) }
+        executionHighlighter = null
         com.intellij.openapi.application.ApplicationManager.getApplication().runWriteAction {
             document.setText(sql.ifEmpty { "// (no output)\n" })
         }
         hasGoodCompile = true
         errorBannerPanel.isVisible = false
         installRunGutterIcon()
+    }
+
+    /** Paint the debugger's current execution line (0-based) — the
+     *  paired highlight to XDebugger's band in the pell source. The
+     *  preview must be showing the debug build (the registry forces
+     *  that during a session) or the line would be off by the shadow
+     *  declarations. */
+    fun setExecutionLine(line0: Int) {
+        clearExecutionLine()
+        if (line0 < 0 || line0 >= document.lineCount) return
+        val start = document.getLineStartOffset(line0)
+        val end = document.getLineEndOffset(line0)
+        var attrs = viewer.colorsScheme.getAttributes(
+            com.intellij.xdebugger.ui.DebuggerColors.EXECUTIONPOINT_ATTRIBUTES)
+        if (attrs == null || attrs.backgroundColor == null) {
+            attrs = com.intellij.openapi.editor.markup.TextAttributes().apply {
+                backgroundColor = com.intellij.ui.JBColor(0xCFE8FC, 0x2D4A5E)
+            }
+        }
+        val hl = viewer.markupModel.addRangeHighlighter(
+            start, end, HighlighterLayer.SELECTION - 1,
+            attrs, HighlighterTargetArea.LINES_IN_RANGE)
+        hl.gutterIconRenderer = object :
+            com.intellij.openapi.editor.markup.GutterIconRenderer() {
+            override fun getIcon() = com.intellij.icons.AllIcons.Debugger.NextStatement
+            override fun getTooltipText() = "pell execution point"
+            override fun equals(other: Any?) = other === this
+            override fun hashCode() = System.identityHashCode(this)
+        }
+        executionHighlighter = hl
+        viewer.caretModel.moveToOffset(start)
+        viewer.scrollingModel.scrollToCaret(
+            com.intellij.openapi.editor.ScrollType.CENTER)
+    }
+
+    fun clearExecutionLine() {
+        executionHighlighter?.let { viewer.markupModel.removeHighlighter(it) }
+        executionHighlighter = null
     }
 
     /** Pin a green-play gutter icon on line 1 of the preview. Click it

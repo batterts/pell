@@ -102,3 +102,15 @@ def test_trace_and_debug_markers_compose():
 
 def test_no_trace_by_default():
     assert "[pell-trace]" not in emit(parse(SRC))
+
+
+def test_srcmap_json_carries_file_line():
+    from pell.srcmap import srcmap_json
+    sql = emit(parse(SRC), debug=True)
+    d = srcmap_json(sql, "x.pell")
+    body = next(u for u in d["units"] if u["kind"] == "PACKAGE BODY")
+    lines = sql.splitlines()
+    assert "PACKAGE BODY" in lines[body["file_line"] - 1].upper()
+    # unit line N == file line (file_line + N - 1)
+    e = body["entries"][0]
+    assert "@pell:%d" % e["pell_line"] in lines[body["file_line"] + e["unit_line"] - 2]

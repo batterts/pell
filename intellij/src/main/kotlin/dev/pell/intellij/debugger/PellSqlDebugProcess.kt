@@ -125,6 +125,9 @@ class PellSqlDebugProcess(
                 console("deploy --debug failed (continuing):\n${deploy.second}",
                         ConsoleViewContentType.ERROR_OUTPUT)
             }
+            config.options.deployPath?.let {
+                dev.pell.intellij.preview.PellPreviewRegistry.beginDebug(it)
+            }
             val anon = PellCli.run(exe, workDir, "srcmap", script, "--anon")
             if (anon.first == 0) scriptMap = PellSrcMap.parse(anon.second)
             config.options.deployPath?.let { dep ->
@@ -394,6 +397,7 @@ class PellSqlDebugProcess(
 
     private fun beginStep(cmd: String) {
         sqlHighlight.clear()
+        dev.pell.intellij.preview.PellPreviewRegistry.clearHighlights()
         activeStep = ActiveStep(cmd, lastSuspendPell)
         send("cmd" to cmd)
     }
@@ -404,6 +408,7 @@ class PellSqlDebugProcess(
     override fun resume(context: XSuspendContext?) {
         activeStep = null
         sqlHighlight.clear()
+        dev.pell.intellij.preview.PellPreviewRegistry.clearHighlights()
         send("cmd" to "continue")
     }
 
@@ -414,6 +419,17 @@ class PellSqlDebugProcess(
         val name = ev.get("name")?.takeIf { !it.isJsonNull }?.asString
         val line = ev.get("line")?.takeIf { !it.isJsonNull }?.asInt
         if (name == null || line == null) { sqlHighlight.clear(); return }
+        // Preview pane first (file line = CREATE anchor + unit line - 1).
+        for ((path, map) in moduleMaps) {
+            val u = map.units.firstOrNull {
+                it.name.equals(name, true) && it.kind == "PACKAGE BODY"
+            } ?: continue
+            val fileLine0 = u.fileLine + line - 2
+            if (dev.pell.intellij.preview.PellPreviewRegistry.highlight(path, fileLine0)) {
+                sqlHighlight.clear()
+                return
+            }
+        }
         val vf = deployedSourceFile(owner, name) ?: run { sqlHighlight.clear(); return }
         sqlHighlight.show(vf, (line - 1).coerceAtLeast(0))
     }
@@ -434,6 +450,9 @@ class PellSqlDebugProcess(
     override fun stop() {
         stopped = true
         sqlHighlight.clear()
+        config.options.deployPath?.let {
+            dev.pell.intellij.preview.PellPreviewRegistry.endDebug(it)
+        }
         runCatching { send("cmd" to "stop") }
         ApplicationManager.getApplication().executeOnPooledThread {
             val p = serve ?: return@executeOnPooledThread

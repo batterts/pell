@@ -19,6 +19,7 @@ class PellSrcMap(val units: List<Unit>) {
         val kind: String,            // "PACKAGE BODY", "TYPE BODY", "BLOCK", ...
         val schema: String?,         // null = connected schema
         val name: String?,           // null for anon blocks
+        val fileLine: Int,           // 1-based CREATE line in the emitted .sql
         val entries: List<Pair<Int, Int>>,  // (pellLine, unitLine), emission order
     ) {
         /** JDWP class name; for units with no explicit schema the
@@ -83,6 +84,7 @@ class PellSrcMap(val units: List<Unit>) {
                     kind = o.get("kind").asString,
                     schema = o.get("schema")?.takeIf { !it.isJsonNull }?.asString,
                     name = o.get("name")?.takeIf { !it.isJsonNull }?.asString,
+                    fileLine = o.get("file_line")?.takeIf { !it.isJsonNull }?.asInt ?: 1,
                     entries = o.getAsJsonArray("entries").map { e ->
                         val eo = e.asJsonObject
                         eo.get("pell_line").asInt to eo.get("unit_line").asInt

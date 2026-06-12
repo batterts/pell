@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.8.9</version>
+    <version>0.9.0</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,16 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.9.0 — paired execution line in the split-view preview</h3>
+        <ul><li>While debugging, the split editor highlights <b>both
+        sides</b>: XDebugger's band on the pell source and a matching
+        band + gutter arrow on the lowered PL/SQL in the preview pane,
+        stepping in lock-step. During the session the preview compiles
+        with <code>--debug</code> so it shows exactly the deployed text
+        (including the <code>@pell</code> line markers); it returns to
+        the normal build when the session ends. Units without an open
+        preview still fall back to a read-only ALL_SOURCE tab.</li></ul>
+
         <h3>0.8.9 — readable values over JDWP, pell names, pell-sized steps</h3>
         <ul><li><b>Scalar values now read correctly over JDWP.</b> Oracle's
         variable mirrors carry the value in a <code>_value</code> field

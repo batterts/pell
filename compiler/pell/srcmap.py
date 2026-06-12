@@ -86,6 +86,10 @@ class UnitMap:
             "schema": self.schema,
             "name": self.name,
             "jdwp_class": self.jdwp_class(),
+            # 1-based line of the CREATE in the emitted .sql FILE — lets
+            # the IDE convert unit lines to file lines (unit line 1 IS
+            # the CREATE line): file_line + unit_line - 1.
+            "file_line": self.file_line,
             "entries": self.entries,
         }
 
