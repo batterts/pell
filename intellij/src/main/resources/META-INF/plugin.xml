@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.8.2</version>
+    <version>0.8.3</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,17 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.8.3 — cleaner debugger variables view</h3>
+        <ul><li>Compiler-internal temporaries (the <code>l_pell_jobj_*</code>
+        JSON DOM scaffolding and friends) are hidden from the Variables
+        view — you see your own locals, not emission internals.</li>
+        <li>Opaque object locals (JSON, JSON_OBJECT_T, collections,
+        records) are now labeled by their type instead of a bare
+        <code>&lt;OPAQUE&gt;</code>. Their <i>values</i> remain unreadable —
+        that's an Oracle debug-API limitation (both JDWP and DBMS_DEBUG
+        can only read scalar variables); to inspect a JSON value at a
+        breakpoint, assign it to a <code>text</code> local.</li></ul>
+
         <h3>0.8.2 — per-config environment variables + DB URL setting</h3>
         <ul><li>Run configurations now have an Environment field (the
         standard env-vars editor) — set <code>PELL_DB_URL</code> per

@@ -175,46 +175,82 @@ class ProbeSession:
 # the unit's source (params + DECLARE block of the enclosing subprogram).
 # --------------------------------------------------------------------------
 
-_DECL_RE = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s+(?:CONSTANT\s+)?[a-z_]", re.I)
-_PARAM_RE = re.compile(r"[(,]\s*([a-z_][a-z0-9_]*)\s+(?:IN\b|OUT\b|IN\s+OUT\b)", re.I)
+_DECL_RE = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s+(?:CONSTANT\s+)?([a-z_][a-z0-9_$.%() ]*?)\s*(?::=|;)", re.I)
+_PARAM_RE = re.compile(r"[(,]\s*([a-z_][a-z0-9_]*)\s+(IN\s+OUT|IN|OUT)\s+([a-z_][a-z0-9_$.%]*)", re.I)
 _SUB_RE = re.compile(r"^\s*(?:FUNCTION|PROCEDURE)\s+([a-z_][a-z0-9_]*)", re.I)
 _KEYWORDS = {"begin", "end", "exception", "pragma", "type", "cursor", "is", "as"}
 
+# Compiler-emitted scaffolding the user never wrote — hidden from the
+# variables view. `l_pell_*` is the emitter's private namespace (JSON
+# DOM temporaries l_pell_jobj_N, sql cursor temporaries, etc.).
+_INTERNAL_PREFIXES = ("l_pell_", "pell_")
 
-def candidate_locals(source: str, line: int, max_names: int = 40) -> list[str]:
-    """Names worth asking GET_VALUE about for a frame at `line` of
-    `source`: the enclosing subprogram's params + declarations. Falls
-    back to all declarations in the unit when the boundary is murky."""
+
+def _is_opaque_type(base_type: str) -> bool:
+    """True when GET_VALUE can't read this type's value (anything that
+    isn't a PL/SQL scalar)."""
+    return bool(base_type) and base_type.upper() not in _SCALAR_TYPES
+
+# Scalar PL/SQL types GET_VALUE can read. Anything else (JSON,
+# JSON_OBJECT_T, collections, %ROWTYPE records, ADTs, REF CURSOR) is
+# opaque to BOTH Oracle debug APIs — GET_VALUE returns only scalars,
+# and DBMS_DEBUG.EXECUTE can only run at global scope (frame -1), where
+# frame-locals aren't visible — so such locals are labeled by type
+# rather than given a fake value.
+_SCALAR_TYPES = {
+    "VARCHAR2", "VARCHAR", "NVARCHAR2", "CHAR", "NCHAR", "STRING",
+    "NUMBER", "INTEGER", "INT", "PLS_INTEGER", "BINARY_INTEGER",
+    "SIMPLE_INTEGER", "NATURAL", "POSITIVE", "FLOAT", "REAL",
+    "BINARY_FLOAT", "BINARY_DOUBLE", "DEC", "DECIMAL", "NUMERIC",
+    "DATE", "TIMESTAMP", "BOOLEAN", "RAW", "ROWID", "UROWID",
+}
+
+
+def _is_internal(name: str) -> bool:
+    return name.lower().startswith(_INTERNAL_PREFIXES)
+
+
+def candidate_locals(source: str, line: int, max_names: int = 40) -> list[dict]:
+    """Variables worth showing for a frame at `line` of `source`:
+    the enclosing subprogram's params + declarations, each as
+    {name, type, opaque}. Compiler temporaries (l_pell_*) are skipped.
+    `opaque` marks types GET_VALUE can't read (objects/collections)."""
     lines = source.splitlines()
-    # walk back to the enclosing FUNCTION/PROCEDURE (or block DECLARE)
     start = 0
     for i in range(min(line, len(lines)) - 1, -1, -1):
         if _SUB_RE.match(lines[i]) or lines[i].strip().lower().startswith("declare"):
             start = i
             break
-    names: list[str] = []
+    out: list[dict] = []
     seen = set()
     in_body = False
+
+    def add(name: str, type_text: str):
+        nm = name.lower()
+        if nm in seen or nm in _KEYWORDS or _is_internal(nm):
+            return
+        seen.add(nm)
+        base_type = type_text.strip().split("(")[0].split()[0].upper() if type_text.strip() else ""
+        out.append({
+            "name": name.upper(),
+            "type": type_text.strip() or None,
+            "opaque": _is_opaque_type(base_type),
+        })
+
     for i in range(start, min(line + 1, len(lines))):
         text = lines[i]
         for m in _PARAM_RE.finditer(text):
-            nm = m.group(1).lower()
-            if nm not in seen and nm not in _KEYWORDS:
-                seen.add(nm)
-                names.append(m.group(1).upper())
+            add(m.group(1), m.group(3))
         stripped = text.strip().lower()
         if stripped == "begin" or stripped.startswith("begin "):
             in_body = True
         if not in_body:
             m = _DECL_RE.match(text)
             if m:
-                nm = m.group(1).lower()
-                if nm not in seen and nm not in _KEYWORDS:
-                    seen.add(nm)
-                    names.append(m.group(1).upper())
-        if len(names) >= max_names:
+                add(m.group(1), m.group(2))
+        if len(out) >= max_names:
             break
-    return names
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -410,10 +446,27 @@ def serve(block: str, connect_str: str | None) -> int:
                 frame = int(c.get("frame", 0))
                 src = unit_source(last["owner"], last["name"])
                 values = []
-                for nm in candidate_locals(src, last["line"] or 1):
-                    st, v = probe.get_value(nm, frame)
-                    if st == 0:
-                        values.append({"name": nm, "value": v})
+                for var in candidate_locals(src, last["line"] or 1):
+                    nm = var["name"]
+                    # Opaque object types (JSON, JSON_OBJECT_T, collections,
+                    # records, ADTs) have NO readable value through either
+                    # Oracle debug API: GET_VALUE handles only scalars, and
+                    # DBMS_DEBUG.EXECUTE can't reach frame-locals (runs at
+                    # global scope only). Show the declared type so the var
+                    # is at least identified, rather than a bare <OPAQUE>.
+                    if var["opaque"]:
+                        values.append({"name": nm, "value": f"<{var['type']}>",
+                                       "type": var["type"], "opaque": True})
+                        continue
+                    try:
+                        st, v = probe.get_value(nm, frame)
+                        if st == 0:
+                            values.append({"name": nm, "value": v, "type": var["type"]})
+                        elif var["type"]:
+                            values.append({"name": nm, "value": f"<{var['type']}>",
+                                           "type": var["type"], "opaque": True})
+                    except Exception:
+                        pass
                 _emit({"event": "locals", "frame": frame, "values": values})
             elif cmd == "stop":
                 probe.delete_all_breakpoints()

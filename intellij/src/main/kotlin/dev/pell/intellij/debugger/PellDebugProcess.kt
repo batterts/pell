@@ -510,6 +510,10 @@ class PellDebugProcess(
                 val children = XValueChildrenList()
                 runCatching {
                     for (v in frame.visibleVariables()) {
+                        // Hide compiler scaffolding (l_pell_jobj_N JSON DOM
+                        // temporaries, sql cursor temporaries) — the user
+                        // never wrote these.
+                        if (v.name().lowercase().startsWith("l_pell_")) continue
                         val value = runCatching { frame.getValue(v) }.getOrNull()
                         children.add(PellValue(v.name(), value))
                     }
@@ -560,20 +564,28 @@ class PellDebugProcess(
             else -> v.toString() to null
         }
 
-        /** Oracle hands locals back as $Oracle.Builtin.* object mirrors.
-         *  toString() on the mirror gives "instance of ..."; the real
-         *  value usually surfaces via the object's own toString method. */
+        /** Oracle boxes non-scalar PL/SQL locals (JSON, JSON_OBJECT_T,
+         *  collections, records, ADTs) as $Oracle.Builtin.OPAQUE — JDI
+         *  exposes no accessor or usable toString, so their VALUE is
+         *  unreadable over JDWP (an Oracle limitation; the sql transport
+         *  has the same ceiling on object types). Show an honest note
+         *  rather than a bare <OPAQUE>. Scalars never reach here. */
         private fun renderObject(o: ObjectReference): Pair<String, String?> {
             val typeName = o.referenceType().name().removePrefix("\$Oracle.Builtin.")
-            val rendered = runCatching {
-                val m = o.referenceType().methodsByName("toString").firstOrNull()
-                    ?: return@runCatching null
-                val thread = o.virtualMachine().allThreads().firstOrNull { it.isSuspended }
-                    ?: return@runCatching null
-                val res = o.invokeMethod(thread, m, emptyList(), ObjectReference.INVOKE_SINGLE_THREADED)
-                (res as? StringReference)?.value() ?: res?.toString()
-            }.getOrNull()
-            return (rendered ?: "<$typeName>") to typeName
+            // Some builtins do carry a usable toString (e.g. wrapped
+            // scalars) — try it, but never treat the generic OPAQUE box
+            // as renderable.
+            if (!typeName.equals("OPAQUE", ignoreCase = true)) {
+                runCatching {
+                    val m = o.referenceType().methodsByName("toString").firstOrNull()
+                        ?: return@runCatching null
+                    val thread = o.virtualMachine().allThreads().firstOrNull { it.isSuspended }
+                        ?: return@runCatching null
+                    val res = o.invokeMethod(thread, m, emptyList(), ObjectReference.INVOKE_SINGLE_THREADED)
+                    (res as? StringReference)?.value() ?: res?.toString()
+                }.getOrNull()?.let { return it to typeName }
+            }
+            return "(opaque object — value not readable over JDWP)" to "opaque"
         }
     }
 

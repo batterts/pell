@@ -55,16 +55,21 @@ class Serve:
             self.p.kill()
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _deploy_hello():
+def _deploy(example: str):
     r = subprocess.run(
         [sys.executable, "-m", "pell", "deploy",
-         str(EXAMPLES / "01_hello.pell"), "--debug",
+         str(EXAMPLES / example), "--debug",
          "--out-dir", tempfile.mkdtemp()],
         capture_output=True, text=True, cwd=COMPILER,
         env={**os.environ, "PYTHONPATH": str(COMPILER)},
     )
-    assert r.returncode == 0, f"deploy failed:\n{r.stdout}{r.stderr}"
+    assert r.returncode == 0, f"deploy {example} failed:\n{r.stdout}{r.stderr}"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _deploy_examples():
+    _deploy("01_hello.pell")
+    _deploy("18_json.pell")
 
 
 def test_breakpoint_step_locals_terminate(tmp_path):
@@ -143,6 +148,47 @@ def test_stop_aborts_target(tmp_path):
         assert s.recv()["event"] == "suspended"
         s.send(cmd="stop")
         ev = s.recv(timeout=60)
+        assert ev["event"] == "terminated", ev
+        assert s.p.wait(15) == 0
+    finally:
+        s.close()
+
+
+def test_temporaries_hidden_and_opaque_labeled(tmp_path):
+    """Compiler scaffolding (l_pell_jobj_*) is hidden from the
+    variables view, and opaque object locals (JSON — unreadable by
+    either Oracle debug API) are labeled by type instead of <OPAQUE>."""
+    script = tmp_path / "stub.pell"
+    script.write_text(
+        "import json_demo;\n"
+        "let j = json_demo::build_simple();\n"
+        "p(\"{j}\");\n"
+    )
+    s = Serve(script)
+    try:
+        assert s.recv()["event"] == "ready"
+        # build_simple body: RETURN l_j is unit line 60 (the @pell:96 marker).
+        s.send(cmd="set_breakpoint", owner=None, name="JSON_DEMO", namespace=2,
+               line=60, id="bp1")
+        assert s.recv()["event"] == "bp_set"
+        s.send(cmd="run")
+        ev = s.recv()
+        assert ev["event"] == "suspended" and ev["name"] == "JSON_DEMO", ev
+
+        s.send(cmd="locals")
+        ev = s.recv()
+        assert ev["event"] == "locals", ev
+        byname = {v["name"]: v for v in ev["values"]}
+        # Compiler temporaries (l_pell_jobj_0..N) never surface.
+        assert not any(n.startswith("L_PELL_") for n in byname), list(byname)
+        # The user's JSON local is shown, labeled by its type (its value
+        # is opaque to both Oracle debug APIs).
+        assert "L_J" in byname, list(byname)
+        assert byname["L_J"].get("opaque") is True, byname["L_J"]
+        assert "JSON" in byname["L_J"]["value"].upper(), byname["L_J"]
+
+        s.send(cmd="continue")
+        ev = s.recv(timeout=90)
         assert ev["event"] == "terminated", ev
         assert s.p.wait(15) == 0
     finally:
