@@ -168,11 +168,11 @@ def test_json_local_value_via_debug_shadow(tmp_path):
     s = Serve(script)
     try:
         assert s.recv()["event"] == "ready"
-        # build_simple: break on RETURN l_j (unit line 62, the @pell:96
-        # marker) — by then the shadow `l_j__pdbg := ...` on line 61 has
-        # run, so the shadow holds the current value.
+        # build_simple: break on RETURN l_j (unit line 64) — by then the
+        # shadow `l_j__pdbg := ...` (line 62) has run, so it holds the
+        # current value.
         s.send(cmd="set_breakpoint", owner=None, name="JSON_DEMO", namespace=2,
-               line=62, id="bp1")
+               line=64, id="bp1")
         assert s.recv()["event"] == "bp_set"
         s.send(cmd="run")
         ev = s.recv()
@@ -193,6 +193,40 @@ def test_json_local_value_via_debug_shadow(tmp_path):
         s.send(cmd="continue")
         ev = s.recv(timeout=90)
         assert ev["event"] == "terminated", ev
+        assert s.p.wait(15) == 0
+    finally:
+        s.close()
+
+
+def test_return_value_shown_before_step_out(tmp_path):
+    """Debug builds capture a bare-identifier return into the `pell$ret`
+    shadow; the debugger surfaces it as "↩ return" at the RETURN line,
+    so you see the value before stepping out."""
+    script = tmp_path / "stub.pell"
+    script.write_text(
+        "import json_demo;\n"
+        "let j = json_demo::build_simple();\n"
+        "p(\"{j}\");\n"
+    )
+    s = Serve(script)
+    try:
+        assert s.recv()["event"] == "ready"
+        # build_simple RETURN l_j is unit line 64 (after the l_j__pdbg
+        # and pell$ret shadow updates on 62/63).
+        s.send(cmd="set_breakpoint", owner=None, name="JSON_DEMO", namespace=2,
+               line=64, id="bp1")
+        assert s.recv()["event"] == "bp_set"
+        s.send(cmd="run")
+        assert s.recv()["event"] == "suspended"
+        s.send(cmd="locals")
+        ev = s.recv()
+        byname = {v["name"]: v["value"] for v in ev["values"]}
+        assert "↩ return" in byname, list(byname)
+        assert "Alice" in byname["↩ return"], byname["↩ return"]
+        # The raw shadow name never leaks.
+        assert not any("PELL$RET" in n for n in byname), list(byname)
+        s.send(cmd="continue")
+        assert s.recv(timeout=90)["event"] == "terminated"
         assert s.p.wait(15) == 0
     finally:
         s.close()

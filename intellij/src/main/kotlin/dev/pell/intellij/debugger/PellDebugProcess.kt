@@ -541,6 +541,14 @@ class PellDebugProcess(
                         // temporaries) and the shadow scalars themselves.
                         if (lname.startsWith("l_pell_") || lname.endsWith("__pdbg")) continue
                         val value = runCatching { frame.getValue(v) }.getOrNull()
+                        // The return-value shadow surfaces as "↩ return",
+                        // but only once set (NULL before the fn returns).
+                        if (lname == "pell\$ret") {
+                            if (value is StringReference) {
+                                children.add(PellValue("↩ return", value, null))
+                            }
+                            continue
+                        }
                         val shadow = shadows[lname]?.let { sv ->
                             runCatching { frame.getValue(sv) }.getOrNull()
                         }

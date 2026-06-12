@@ -359,6 +359,7 @@ class Emitter:
         # only). The debugger reads the companion to show the real value
         # of a type GET_VALUE/JDI can't (JSON, etc.). Reset per fn body.
         self._dbg_shadows: set[str] = set()
+        self._dbg_ret_declared: bool = False
         # module-level list-of-T types we've already declared (so we don't redeclare)
         self._list_types_emitted: set[str] = set()
         # list-type declarations to inject into the package body header
@@ -1663,6 +1664,7 @@ class Emitter:
         self._current_fn = fn
         self._local_types = {}
         self._dbg_shadows = set()
+        self._dbg_ret_declared = False
         self._list_locals = {}
         self._cursor_params = {}
         for p in fn.params:
@@ -1869,6 +1871,24 @@ class Emitter:
         pl_name = local_name(pell_name)
         self._decl(f"{pl_name}__pdbg VARCHAR2(32767);")
         self._dbg_shadows.add(pl_name)
+
+    def _dbg_retval_capture(self, ident: A.Ident, indent: str) -> list[str]:
+        """Capture a bare-identifier return value into the per-fn
+        `pell$ret VARCHAR2` shadow so the debugger can show it before
+        the fn returns. The `$` keeps it clear of the hidden `pell_`
+        prefix; the debugger relabels it as the return value."""
+        name = self._emit_expr(ident)
+        t = self._infer_expr_type(ident)
+        if not self._dbg_ret_declared:
+            self._decl("pell$ret VARCHAR2(32767);")
+            self._dbg_ret_declared = True
+        if (t or "").upper() == "JSON":
+            expr = f"JSON_SERIALIZE({name})"
+        elif self._is_text_type(t):
+            expr = name
+        else:
+            expr = self._auto_stringify(name, t)
+        return [f"{indent}pell$ret := SUBSTR({expr}, 1, 32767);"]
 
     def _dbg_shadow_update(self, pl_name: str, indent: str) -> list[str]:
         """The companion-assignment line(s) to run after `pl_name` is
@@ -3891,6 +3911,15 @@ class Emitter:
         # In a procedure, the value is conventionally Ok(()); just RETURN;
         if is_proc:
             return prefix + [f"{indent}RETURN;"]
+        # Debug builds: capture a bare-identifier return value into a
+        # readable shadow (`pell$ret`) right before RETURN, so the
+        # debugger can show what the fn is about to return BEFORE you
+        # step out. Only for simple Idents — no double-evaluation of
+        # calls / side-effecting exprs.
+        if self.debug_markers and isinstance(s.value, A.Ident):
+            cap = self._dbg_retval_capture(s.value, indent)
+            if cap:
+                return prefix + cap + [f"{indent}RETURN {self._emit_expr(s.value)};"]
         # `return Ok(x)` → RETURN x;
         if isinstance(s.value, A.OkExpr):
             inner = s.value.inner

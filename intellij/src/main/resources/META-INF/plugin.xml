@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.8.5</version>
+    <version>0.8.6</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,13 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.8.6 — see a function's return value before stepping out</h3>
+        <ul><li>At a <code>return x;</code> line, the Variables view now
+        shows <b>↩ return</b> with the value the function is about to
+        return — inspect it before you step out. Debug builds capture
+        bare-identifier returns into a readable shadow; works on both
+        transports, including JSON and other opaque types.</li></ul>
+
         <h3>0.8.5 — paired execution line in the lowered PL/SQL</h3>
         <ul><li>While debugging, the deployed <code>.sql</code> opens
         beside your pell source (read-only) with the current execution

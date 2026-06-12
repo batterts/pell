@@ -175,7 +175,7 @@ class ProbeSession:
 # the unit's source (params + DECLARE block of the enclosing subprogram).
 # --------------------------------------------------------------------------
 
-_DECL_RE = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s+(?:CONSTANT\s+)?([a-z_][a-z0-9_$.%() ]*?)\s*(?::=|;)", re.I)
+_DECL_RE = re.compile(r"^\s*([a-z_][a-z0-9_$#]*)\s+(?:CONSTANT\s+)?([a-z_][a-z0-9_$.%() ]*?)\s*(?::=|;)", re.I)
 _PARAM_RE = re.compile(r"[(,]\s*([a-z_][a-z0-9_]*)\s+(IN\s+OUT|IN|OUT)\s+([a-z_][a-z0-9_$.%]*)", re.I)
 _SUB_RE = re.compile(r"^\s*(?:FUNCTION|PROCEDURE)\s+([a-z_][a-z0-9_]*)", re.I)
 _KEYWORDS = {"begin", "end", "exception", "pragma", "type", "cursor", "is", "as"}
@@ -227,6 +227,14 @@ def candidate_locals(source: str, line: int, max_names: int = 40) -> list[dict]:
 
     def add(name: str, type_text: str):
         nm = name.lower()
+        # The return-value shadow surfaces as a labeled pseudo-variable.
+        if nm == "pell$ret":
+            if nm in seen:
+                return
+            seen.add(nm)
+            out.append({"name": "PELL$RET", "display": "↩ return",
+                        "type": None, "opaque": False})
+            return
         # Skip compiler scaffolding and the debug shadow scalars
         # (<name>__pdbg) — the latter are read on demand for their
         # opaque sibling, never shown as variables themselves.
@@ -236,6 +244,7 @@ def candidate_locals(source: str, line: int, max_names: int = 40) -> list[dict]:
         base_type = type_text.strip().split("(")[0].split()[0].upper() if type_text.strip() else ""
         out.append({
             "name": name.upper(),
+            "display": name.upper(),
             "type": type_text.strip() or None,
             "opaque": _is_opaque_type(base_type),
         })
@@ -451,6 +460,7 @@ def serve(block: str, connect_str: str | None) -> int:
                 values = []
                 for var in candidate_locals(src, last["line"] or 1):
                     nm = var["name"]
+                    disp = var.get("display", nm)
                     if var["opaque"]:
                         # Opaque object types (JSON, collections, records)
                         # have no readable value through either Oracle
@@ -460,18 +470,23 @@ def serve(block: str, connect_str: str | None) -> int:
                         # shadow exists (non-debug build / unshadowed type).
                         st, sv = probe.get_value(nm + "__PDBG", frame)
                         if st == 0 and sv is not None:
-                            values.append({"name": nm, "value": sv,
+                            values.append({"name": disp, "value": sv,
                                            "type": var["type"]})
                         else:
-                            values.append({"name": nm, "value": f"<{var['type']}>",
+                            values.append({"name": disp, "value": f"<{var['type']}>",
                                            "type": var["type"], "opaque": True})
                         continue
                     try:
                         st, v = probe.get_value(nm, frame)
+                        # The return shadow is only meaningful once set
+                        # (NULL before the fn reaches its return) — hide it
+                        # until then.
+                        if nm == "PELL$RET" and (st != 0 or v is None):
+                            continue
                         if st == 0:
-                            values.append({"name": nm, "value": v, "type": var["type"]})
+                            values.append({"name": disp, "value": v, "type": var["type"]})
                         elif var["type"]:
-                            values.append({"name": nm, "value": f"<{var['type']}>",
+                            values.append({"name": disp, "value": f"<{var['type']}>",
                                            "type": var["type"], "opaque": True})
                     except Exception:
                         pass
