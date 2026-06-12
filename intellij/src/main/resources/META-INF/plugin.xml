@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.8.6</version>
+    <version>0.8.7</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,18 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.8.7 — debugger restart + stub-preview fixes</h3>
+        <ul><li><b>Restarting a debug session on a pinned port</b> no
+        longer fails with "Already listening" — the stale listener is
+        cleared and rebound.</li>
+        <li>Generated debug stubs (and other module-less scripts) now
+        preview their lowered anonymous block instead of erroring with
+        "expected module".</li>
+        <li>Breakpoints registered during debug startup are deferred
+        until the line maps are built, instead of being dropped with a
+        spurious "no line map" warning; breakpoints in files outside the
+        session are noted once, quietly.</li></ul>
+
         <h3>0.8.6 — see a function's return value before stepping out</h3>
         <ul><li>At a <code>return x;</code> line, the Variables view now
         shows <b>↩ return</b> with the value the function is about to

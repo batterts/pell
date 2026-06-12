@@ -82,8 +82,21 @@ class PellCompileService(private val project: Project) {
             it.deleteOnExit()
         }
 
+        // A module file lowers via `build`; a script (top-level
+        // statements — e.g. a generated debug stub or a REPL snippet)
+        // has no `module` and must lower via `exec --dry-run`, which
+        // emits the anonymous block. Pick based on the content.
+        val isModule = contentText.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("//") }
+            .firstOrNull()
+            ?.startsWith("module") == true
+        val params = if (isModule)
+            listOf("build", tmp.absolutePath, "--reproducible")
+        else
+            listOf("exec", tmp.absolutePath, "--dry-run")
         val cmd = GeneralCommandLine(pellExe.absolutePath)
-            .withParameters("build", tmp.absolutePath, "--reproducible")
+            .withParameters(params)
             .withWorkDirectory(project.basePath)
             .withCharset(Charsets.UTF_8)
             .withRedirectErrorStream(false)

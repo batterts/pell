@@ -34,6 +34,7 @@ import com.sun.jdi.StringReference
 import com.sun.jdi.ThreadReference
 import com.sun.jdi.VMDisconnectedException
 import com.sun.jdi.VirtualMachine
+import com.sun.jdi.connect.IllegalConnectorArgumentsException
 import com.sun.jdi.connect.ListeningConnector
 import com.sun.jdi.event.BreakpointEvent
 import com.sun.jdi.event.ClassPrepareEvent
@@ -99,6 +100,11 @@ class PellDebugProcess(
     // srcmaps: script (anon block) + one per module file we know about
     @Volatile private var scriptMap: PellSrcMap? = null
     private val moduleMaps = ConcurrentHashMap<String, PellSrcMap>()   // file path -> map
+    // Breakpoints can register (XDebugger) before the srcmaps are built;
+    // defer them until then rather than dropping with a spurious warning.
+    @Volatile private var mapsReady = false
+    private val deferredBreakpoints = mutableListOf<XLineBreakpoint<*>>()
+    private val warnedFiles = java.util.Collections.synchronizedSet(HashSet<String>())
 
     // breakpoints not yet armed (their unit class isn't loaded yet):
     // jdwp matcher -> (unit line, xbreakpoint)
@@ -176,6 +182,13 @@ class PellDebugProcess(
                     if (m.first == 0) moduleMaps[File(dep).canonicalPath] = PellSrcMap.parse(m.second)
                 }
             }
+            // Maps are built — process any breakpoints that registered
+            // during startup.
+            mapsReady = true
+            val deferred = synchronized(deferredBreakpoints) {
+                deferredBreakpoints.toList().also { deferredBreakpoints.clear() }
+            }
+            deferred.forEach { addBreakpoint(it) }
 
             // 3. listen + launch the target.
             val conn = Bootstrap.virtualMachineManager().listeningConnectors()
@@ -193,7 +206,22 @@ class PellDebugProcess(
                 cargs["port"]?.setValue(pinnedPort)
             }
             connectorArgs = cargs
-            val address = conn.startListening(cargs)
+            // A pinned port (reverse-tunnel setups) is reused across
+            // sessions; JDI's SocketListeningConnector keeps the prior
+            // listener bound and throws "Already listening" on re-bind.
+            // Clear any stale listener on this connector first.
+            if (pinnedPort.isNotBlank()) {
+                runCatching { conn.stopListening(cargs) }
+            }
+            val address = try {
+                conn.startListening(cargs)
+            } catch (e: IllegalConnectorArgumentsException) {
+                throw e
+            } catch (e: java.io.IOException) {
+                // "Already listening" / address in use — clear and retry once.
+                runCatching { conn.stopListening(cargs) }
+                conn.startListening(cargs)
+            }
             val port = address.substringAfterLast(":")
             val callback = callbackHost()
             console("pell debugger: listening on $callback:$port")
@@ -277,9 +305,20 @@ class PellDebugProcess(
         val pos = bp.sourcePosition ?: return
         val filePath = pos.file.canonicalPath ?: return
         val pellLine = pos.line + 1
+        // Maps not built yet (breakpoint registered during startup) —
+        // defer rather than warn; drained once the srcmaps are ready.
+        if (!mapsReady) {
+            synchronized(deferredBreakpoints) { deferredBreakpoints.add(bp) }
+            return
+        }
         val map = mapForFile(filePath) ?: run {
-            console("pell debugger: no line map for ${pos.file.name} — breakpoint inactive",
-                    ConsoleViewContentType.ERROR_OUTPUT)
+            // A breakpoint in a file that isn't the debugged script nor a
+            // deployed module (e.g. an old debug stub from a prior
+            // session) just can't be hit — note it once, quietly.
+            if (warnedFiles.add(filePath)) {
+                console("pell debugger: ${pos.file.name} isn't part of this debug " +
+                        "session — its breakpoints are inactive.")
+            }
             return
         }
         val target = map.resolveBreakpoint(pellLine) ?: run {
