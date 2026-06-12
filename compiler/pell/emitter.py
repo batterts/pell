@@ -2465,6 +2465,10 @@ class Emitter:
             return self._infer_decl_type(value.inner)
         if isinstance(value, A.StructLit):
             return _record_type_name(value.type_name)
+        # `a + b` etc. — defer to expression inference, which knows the
+        # polymorphic `+` rule (text concat vs numeric).
+        if isinstance(value, A.BinOp):
+            return self._infer_expr_type(value)
         # `<seq>.nextval` / `<seq>.currval` → NUMBER.
         if (
             isinstance(value, A.MemberAccess)

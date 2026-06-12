@@ -1,0 +1,107 @@
+module stat_diff;
+
+import dbms_output;
+
+// ---------------------------------------------------------------------------
+// stat_diff — measure what a piece of work actually cost.
+//
+// Wraps V$MYSTAT so you can snapshot your session's statistics before a
+// query, run it, snapshot after, and print the delta — net logical I/O,
+// consistent gets, physical reads, CPU, sorts, redo, and more. This is
+// the "is my change actually faster, and why" harness.
+//
+// Stateless by design: snapshot() returns a json blob, report() diffs
+// two of them. No package state, so it composes anywhere.
+//
+//   let before = stat_diff::snapshot();
+//   // ... run the query under test ...
+//   for row in sql! { select count(*) c from big_table } { p(row.c); }
+//   let after = stat_diff::snapshot();
+//   p(stat_diff::report(before, after));
+//
+// Or the one-call form around a single statement:
+//   stat_diff::around("select count(*) from big_table");
+// ---------------------------------------------------------------------------
+
+// Capture the current session's key statistics as a json object keyed by
+// short, stable names (logical_reads, consistent_gets, …).
+pub fn snapshot() -> json {
+    let snap = sql! {
+        select json_objectagg(k value v returning clob) as j
+          from (
+            select case n.name
+                     when 'session logical reads'      then 'logical_reads'
+                     when 'consistent gets'            then 'consistent_gets'
+                     when 'db block gets'              then 'db_block_gets'
+                     when 'physical reads'             then 'physical_reads'
+                     when 'CPU used by this session'   then 'cpu_centisecs'
+                     when 'sorts (memory)'             then 'sorts_memory'
+                     when 'sorts (disk)'               then 'sorts_disk'
+                     when 'redo size'                  then 'redo_size'
+                     when 'execute count'              then 'execute_count'
+                     when 'parse count (total)'        then 'parse_count'
+                     when 'table scan rows gotten'     then 'table_scan_rows'
+                     when 'table fetch by rowid'       then 'fetch_by_rowid'
+                   end as k,
+                   m.value as v
+              from v$mystat m
+              join v$statname n on m.statistic# = n.statistic#
+             where n.name in (
+                     'session logical reads', 'consistent gets',
+                     'db block gets', 'physical reads',
+                     'CPU used by this session', 'sorts (memory)',
+                     'sorts (disk)', 'redo size', 'execute count',
+                     'parse count (total)', 'table scan rows gotten',
+                     'table fetch by rowid')
+          )
+    }.one();
+    return snap;
+}
+
+// One metric's delta as a formatted line, or "" when the stat didn't
+// change (keeps the report focused on what moved).
+fn delta_line(label: text, before: json, after: json, key: text) -> text {
+    let path = "$." + key;
+    let b = json::get_number(before, path);
+    let a = json::get_number(after, path);
+    let d = a - b;
+    if d == 0 {
+        return "";
+    }
+    return rpad(label, 26, " ") + lpad(b, 14, " ") + lpad(a, 14, " ")
+         + lpad(d, 14, " ") + chr(10);
+}
+
+// Diff two snapshots into a human-readable report. Only stats that moved
+// are listed. "Net LIO" (logical reads) is the headline number for I/O
+// efficiency; consistent gets + db block gets are its components.
+pub fn report(before: json, after: json) -> text {
+    var buf: text = rpad("statistic", 26, " ") + lpad("before", 14, " ")
+                  + lpad("after", 14, " ") + lpad("delta", 14, " ") + chr(10);
+    buf = buf + rpad("-", 64, "-") + chr(10);
+    buf = buf + delta_line("logical reads (LIO)", before, after, "logical_reads");
+    buf = buf + delta_line("consistent gets", before, after, "consistent_gets");
+    buf = buf + delta_line("db block gets", before, after, "db_block_gets");
+    buf = buf + delta_line("physical reads", before, after, "physical_reads");
+    buf = buf + delta_line("CPU (centisecs)", before, after, "cpu_centisecs");
+    buf = buf + delta_line("sorts (memory)", before, after, "sorts_memory");
+    buf = buf + delta_line("sorts (disk)", before, after, "sorts_disk");
+    buf = buf + delta_line("redo size (bytes)", before, after, "redo_size");
+    buf = buf + delta_line("executes", before, after, "execute_count");
+    buf = buf + delta_line("parses", before, after, "parse_count");
+    buf = buf + delta_line("table scan rows", before, after, "table_scan_rows");
+    buf = buf + delta_line("rows by rowid", before, after, "fetch_by_rowid");
+    return buf;
+}
+
+// One-shot: run `query` once (discarding its rows) and print the stat
+// delta it caused. Dynamic SQL because the statement is supplied at
+// runtime — hence `unsafe`.
+pub unsafe fn around(query: text) {
+    let before = snapshot();
+    let n: number = exec_dyn("select count(*) from ({query})")?;
+    let after = snapshot();
+    dbms_output::put_line("ran: " + query);
+    dbms_output::put_line("(scanned " + n + " rows)");
+    dbms_output::put_line(report(before, after));
+}

@@ -1,0 +1,106 @@
+module table_stats;
+
+import dbms_output;
+
+// ---------------------------------------------------------------------------
+// table_stats — readable reports of the optimizer statistics on a table.
+//
+// The optimizer's row counts, column cardinalities, and histograms decide
+// every plan — but they live scattered across USER_TAB_STATISTICS,
+// USER_TAB_COL_STATISTICS, and USER_TAB_HISTOGRAMS. This package gathers
+// them into report text you can print from the REPL.
+//
+//   p(table_stats::summary("MY_TABLE"));      -- rows/blocks/last analyzed
+//   p(table_stats::column_stats("MY_TABLE"));      -- per-column cardinality
+//   p(table_stats::histogram("MY_TABLE", "STATUS"));  -- bucket detail
+//   p(table_stats::report("MY_TABLE"));       -- summary + column_stats
+//
+// All names are case-insensitive (upper-cased for the dictionary).
+// ---------------------------------------------------------------------------
+
+// Table-level stats: row count, block count, average row length, when the
+// stats were gathered and on how big a sample.
+pub fn summary(table_name: text) -> text {
+    var buf: text = "TABLE " + upper(table_name) + chr(10);
+    for r in sql! {
+        select num_rows,
+               blocks,
+               avg_row_len,
+               sample_size,
+               to_char(last_analyzed, 'YYYY-MM-DD HH24:MI') as analyzed,
+               case when stale_stats = 'YES' then ' (STALE)' else '' end as stale
+          from user_tab_statistics
+         where table_name = upper(:table_name)
+           and partition_name is null
+    } {
+        buf = buf + "  rows         : " + r.num_rows + chr(10);
+        buf = buf + "  blocks       : " + r.blocks + chr(10);
+        buf = buf + "  avg row len  : " + r.avg_row_len + " bytes" + chr(10);
+        buf = buf + "  last analyzed: " + r.analyzed + r.stale + chr(10);
+        buf = buf + "  sample size  : " + r.sample_size + chr(10);
+    }
+    return buf;
+}
+
+// Per-column cardinality: distinct values, NULLs, density (1/NDV-ish),
+// and whether a histogram exists and of what kind. High-density,
+// low-NDV columns are histogram candidates; this is where skew lives.
+pub fn column_stats(table_name: text) -> text {
+    var buf: text = rpad("column", 30, " ") + rpad("distinct", 12, " ")
+                  + rpad("nulls", 10, " ") + rpad("histogram", 16, " ")
+                  + "buckets" + chr(10);
+    buf = buf + rpad("-", 75, "-") + chr(10);
+    for r in sql! {
+        select column_name,
+               num_distinct,
+               num_nulls,
+               histogram,
+               num_buckets
+          from user_tab_col_statistics
+         where table_name = upper(:table_name)
+         order by column_name
+    } {
+        buf = buf + rpad(r.column_name, 30, " ")
+                  + rpad(r.num_distinct, 12, " ")
+                  + rpad(r.num_nulls, 10, " ")
+                  + rpad(r.histogram, 16, " ")
+                  + r.num_buckets + chr(10);
+    }
+    return buf;
+}
+
+// Histogram buckets for one column. For FREQUENCY histograms each row is
+// a value and its cumulative frequency; the per-bucket count (this minus
+// the previous cumulative) shows how many rows carry each value — the
+// data skew the optimizer sees.
+pub fn histogram(table_name: text, column_name: text) -> text {
+    var buf: text = "HISTOGRAM " + upper(table_name) + "." + upper(column_name) + chr(10);
+    buf = buf + rpad("endpoint value", 40, " ") + rpad("cumulative", 14, " ")
+              + "bucket" + chr(10);
+    buf = buf + rpad("-", 62, "-") + chr(10);
+    for r in sql! {
+        select nvl(endpoint_actual_value, to_char(endpoint_value)) as val,
+               endpoint_number as cumulative,
+               endpoint_number
+                 - nvl(lag(endpoint_number) over (order by endpoint_number), 0)
+                 as bucket_count
+          from user_tab_histograms
+         where table_name = upper(:table_name)
+           and column_name = upper(:column_name)
+         order by endpoint_number
+    } {
+        buf = buf + rpad(r.val, 40, " ") + rpad(r.cumulative, 14, " ")
+                  + r.bucket_count + chr(10);
+    }
+    return buf;
+}
+
+// Combined report: table summary followed by column cardinalities.
+pub fn report(table_name: text) -> text {
+    return summary(table_name) + chr(10) + column_stats(table_name);
+}
+
+// Print the full report for a table to DBMS_OUTPUT.
+pub fn show(table_name: text) {
+    dbms_output::put_line(report(table_name));
+}

@@ -1,0 +1,87 @@
+module stats_repl;
+
+import table_stats;
+import dbms_output;
+
+// ---------------------------------------------------------------------------
+// stats_repl — a guided statistics report for your whole schema.
+//
+// Companion to `table_stats`. Built for the REPL: load it, then call the
+// fns below to survey every table you own, spot stale or missing stats,
+// and zoom into the histograms that reveal data skew.
+//
+//   $ ./pell repl
+//   [1]> \load compiler/examples/35_stats_repl.pell
+//   [2]> stats_repl::overview();          -- one line per table
+//   [3]> stats_repl::stale();             -- tables whose stats are old
+//   [4]> stats_repl::histogrammed();      -- columns carrying a histogram
+//   [5]> p(table_stats::report("ORDERS"));         -- drill into one table
+//   [6]> p(table_stats::histogram("ORDERS","STATUS"));
+//
+// Or one-shot from a terminal:
+//   ./pell exec -e 'import stats_repl; stats_repl::overview();'
+// ---------------------------------------------------------------------------
+
+// One line per table you own: rows, blocks, and when stats were last
+// gathered. NULL row counts mean stats were never gathered — gather them
+// before trusting any plan.
+pub fn overview() {
+    dbms_output::put_line(
+        rpad("table", 30, " ") + rpad("rows", 12, " ")
+      + rpad("blocks", 10, " ") + "last analyzed");
+    dbms_output::put_line(rpad("-", 70, "-"));
+    for r in sql! {
+        select table_name,
+               nvl(to_char(num_rows), '(none)') as num_rows,
+               nvl(to_char(blocks), '-') as blocks,
+               nvl(to_char(last_analyzed, 'YYYY-MM-DD HH24:MI'),
+                   'never gathered') as analyzed
+          from user_tables
+         order by num_rows desc nulls first
+    } {
+        dbms_output::put_line(
+            rpad(r.table_name, 30, " ") + rpad(r.num_rows, 12, " ")
+          + rpad(r.blocks, 10, " ") + r.analyzed);
+    }
+}
+
+// Tables whose statistics Oracle considers stale (enough rows changed
+// since the last gather that plans may be wrong). These are the gather
+// candidates.
+pub fn stale() {
+    var any: number = 0;
+    for r in sql! {
+        select table_name, stale_stats
+          from user_tab_statistics
+         where partition_name is null
+           and stale_stats = 'YES'
+         order by table_name
+    } {
+        dbms_output::put_line("STALE: " + r.table_name);
+        any = 1;
+    }
+    if any == 0 {
+        dbms_output::put_line("No stale stats — every table is fresh.");
+    }
+}
+
+// Every column that carries a histogram, with its kind and bucket count.
+// Histograms are what let the optimizer see skew; this is the map of
+// where you've told it to look.
+pub fn histogrammed() {
+    dbms_output::put_line(
+        rpad("table.column", 44, " ") + rpad("histogram", 16, " ") + "buckets");
+    dbms_output::put_line(rpad("-", 70, "-"));
+    for r in sql! {
+        select table_name || '.' || column_name as col,
+               histogram,
+               num_buckets
+          from user_tab_col_statistics
+         where histogram is not null
+           and histogram != 'NONE'
+         order by table_name, column_name
+    } {
+        dbms_output::put_line(
+            rpad(r.col, 44, " ") + rpad(r.histogram, 16, " ") + r.num_buckets);
+    }
+}
