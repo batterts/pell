@@ -1097,6 +1097,75 @@ def cmd_debug_source(args: argparse.Namespace) -> int:
         conn.close()
 
 
+_UT_REPORTERS = {
+    "doc": "ut_documentation_reporter()",
+    "junit": "ut_junit_reporter()",
+    "sonar": "ut_sonar_test_reporter()",
+    "teamcity": "ut_teamcity_reporter()",
+    "coverage": "ut_coverage_html_reporter()",
+    "cobertura": "ut_coverage_cobertura_reporter()",
+}
+
+
+def cmd_test(args: argparse.Namespace) -> int:
+    """Run a utPLSQL suite (`@suite` pell module or any annotated
+    package) and emit the chosen report.
+
+        pell test ut_pell_examples                      # console (doc)
+        pell test ut_pell_examples --reporter junit -o results.xml
+        pell test ut_pell_examples --reporter coverage -o cov.html
+
+    Coverage runs instrument the tested code database-side; line
+    numbers refer to the deployed PL/SQL (pair with `pell srcmap` to
+    read them against pell source).
+    """
+    try:
+        from . import driver
+    except ImportError as e:
+        print(f"pell: needs the driver dependency (pip install -e .[repl])\n  ({e})",
+              file=sys.stderr)
+        return 2
+    reporter = _UT_REPORTERS[args.reporter]
+    suite = args.suite
+    if args.reporter in ("coverage", "cobertura"):
+        # Limit instrumentation to the schemas under test, or coverage
+        # reports drown in SYS noise.
+        block = (
+            "begin ut.run('" + suite + "', " + reporter + ", "
+            "a_coverage_schemes => ut_varchar2_list(USER)); end;"
+        )
+    else:
+        block = "begin ut.run('" + suite + "', " + reporter + "); end;"
+    try:
+        conn = driver.connect(args.connect)
+    except Exception as e:
+        print(f"pell: connection failed: {e}", file=sys.stderr)
+        return 1
+    try:
+        lines = conn.run_block(block)
+    except Exception as e:
+        print(f"pell: ut.run failed: {e}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    text = "\n".join(lines)
+    if args.output:
+        Path(args.output).write_text(text)
+        print(f"  → {args.output} ({len(lines)} lines)")
+    else:
+        print(text)
+    # Exit code mirrors the run: the doc reporter prints a summary line;
+    # structured reporters carry failures in their own format, so query
+    # the summary separately when we can't parse one.
+    import re as _re
+    m = _re.search(r"(\d+) tests?, (\d+) failed, (\d+) errored", text)
+    if m:
+        return 1 if (int(m.group(2)) or int(m.group(3))) else 0
+    if args.reporter == "junit":
+        return 1 if _re.search(r'<(failure|error)[ >]', text) else 0
+    return 0
+
+
 def cmd_debug_serve(args: argparse.Namespace) -> int:
     """SQL-transport debug engine (DBMS_DEBUG over two outbound
     connections) speaking JSON lines on stdin/stdout. See
@@ -1363,6 +1432,19 @@ def main(argv: list[str] | None = None) -> int:
                     help="map the file as an exec script (anonymous block) "
                          "instead of a module — unit lines are block lines")
     sm.set_defaults(func=cmd_srcmap)
+
+    tst = sub.add_parser(
+        "test",
+        help="run a utPLSQL suite (@suite pell module) and emit a report "
+             "(doc/junit/sonar/teamcity/coverage/cobertura)",
+    )
+    tst.add_argument("suite", help="suite path for ut.run — package name, "
+                     "schema.package, or schema.package.test_fn")
+    tst.add_argument("--reporter", choices=sorted(_UT_REPORTERS), default="doc")
+    tst.add_argument("-o", "--output", help="write the report to this file "
+                     "(default: stdout)")
+    tst.add_argument("-c", "--connect", help="user/pass@host:port/service (or set PELL_DB_URL)")
+    tst.set_defaults(func=cmd_test)
 
     ds = sub.add_parser(
         "debug-source",

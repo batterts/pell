@@ -54,5 +54,18 @@ END;
 /
 SQL
 
+echo "→ coverage tables for pell_test (DBMS_PLSQL_CODE_COVERAGE)"
+$COMPOSE exec -T oracle sqlplus -S pell_test/pell_test@FREEPDB1 <<'SQL'
+SET FEEDBACK OFF
+BEGIN
+  DBMS_PLSQL_CODE_COVERAGE.CREATE_COVERAGE_TABLES;
+EXCEPTION WHEN OTHERS THEN NULL;  -- already created
+END;
+/
+SQL
+
 rm -rf "$WORK"
-echo "utPLSQL ready — ut.expect/ut.run callable from any schema."
+echo "utPLSQL ready — ut.run callable from any schema; reports via:"
+echo "  pell test ut_pell_examples                       # console"
+echo "  pell test ut_pell_examples --reporter junit -o results.xml"
+echo "  pell test ut_pell_examples --reporter coverage -o cov.html"
