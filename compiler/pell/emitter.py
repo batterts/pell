@@ -354,6 +354,11 @@ class Emitter:
         self._current_fn: Optional[A.FnDef] = None
         # local-name -> declared PL/SQL type (so we can pick record-field projections)
         self._local_types: dict[str, str] = {}
+        # Debug shadow scalars: PL/SQL names of opaque-typed locals that
+        # got a `<name>__pdbg VARCHAR2` companion in this fn (debug builds
+        # only). The debugger reads the companion to show the real value
+        # of a type GET_VALUE/JDI can't (JSON, etc.). Reset per fn body.
+        self._dbg_shadows: set[str] = set()
         # module-level list-of-T types we've already declared (so we don't redeclare)
         self._list_types_emitted: set[str] = set()
         # list-type declarations to inject into the package body header
@@ -1657,6 +1662,7 @@ class Emitter:
         self._params = {p.name for p in fn.params}
         self._current_fn = fn
         self._local_types = {}
+        self._dbg_shadows = set()
         self._list_locals = {}
         self._cursor_params = {}
         for p in fn.params:
@@ -1843,6 +1849,47 @@ class Emitter:
             return ""
         return f"  -- @pell:{loc.line}"
 
+    # Opaque PL/SQL types whose VALUE neither debug API can read, paired
+    # with a PL/SQL expression that stringifies the variable into a
+    # scalar the debugger CAN read. Debug builds emit a `<name>__pdbg
+    # VARCHAR2` companion updated at each assignment; the IDE shows it as
+    # the variable's value. (JSON first; records/lists are future work.)
+    _DBG_SHADOW_EXPR = {
+        "JSON": "SUBSTR(JSON_SERIALIZE({v}), 1, 32767)",
+    }
+
+    def _dbg_register_shadow(self, pell_name: str, pl_type: Optional[str]) -> None:
+        """In debug builds, declare a `<pl_name>__pdbg VARCHAR2(32767)`
+        companion for an opaque-typed local so its value is inspectable."""
+        if not self.debug_markers or not pl_type:
+            return
+        base = pl_type.split("(")[0].strip().upper()
+        if base not in self._DBG_SHADOW_EXPR:
+            return
+        pl_name = local_name(pell_name)
+        self._decl(f"{pl_name}__pdbg VARCHAR2(32767);")
+        self._dbg_shadows.add(pl_name)
+
+    def _dbg_shadow_update(self, pl_name: str, indent: str) -> list[str]:
+        """The companion-assignment line(s) to run after `pl_name` is
+        assigned, refreshing its readable shadow. Empty unless the local
+        has a registered shadow."""
+        if pl_name not in self._dbg_shadows:
+            return []
+        pl_type = self._local_types.get(self._pell_name_for(pl_name), "")
+        expr = self._DBG_SHADOW_EXPR.get((pl_type or "").split("(")[0].strip().upper())
+        if not expr:
+            return []
+        return [f"{indent}{pl_name}__pdbg := {expr.format(v=pl_name)};"]
+
+    def _pell_name_for(self, pl_name: str) -> str:
+        """Reverse local_name(): find the pell local whose lowering is
+        `pl_name`. Falls back to stripping the `l_` prefix."""
+        for nm in self._local_types:
+            if local_name(nm) == pl_name:
+                return nm
+        return pl_name[2:] if pl_name.startswith("l_") else pl_name
+
     def _emit_stmt(self, s: A.Stmt, indent: str) -> list[str]:
         lines = self._emit_stmt_inner(s, indent)
         loc = getattr(s, "loc", None)
@@ -1964,6 +2011,7 @@ class Emitter:
         else:
             self._decl(f"{nm} {ty};")
         self._local_types[s.name] = ty
+        self._dbg_register_shadow(s.name, ty)
         # if value present, emit assignment
         if s.value is None:
             return []
@@ -2148,6 +2196,14 @@ class Emitter:
         return lines
 
     def _emit_assign_to(self, target: str, expr: A.Expr, indent: str) -> list[str]:
+        """Emit one or more PL/SQL statements that assign `expr` to
+        `target`, plus (in debug builds) refresh `target`'s readable
+        shadow scalar when it has one."""
+        lines = self._emit_assign_to_inner(target, expr, indent)
+        lines += self._dbg_shadow_update(target, indent)
+        return lines
+
+    def _emit_assign_to_inner(self, target: str, expr: A.Expr, indent: str) -> list[str]:
         """Emit one or more PL/SQL statements that assign `expr` to `target`."""
         if isinstance(expr, A.PipelineExpr):
             expr = self._reduce_pipeline(expr)

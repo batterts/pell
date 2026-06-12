@@ -154,10 +154,11 @@ def test_stop_aborts_target(tmp_path):
         s.close()
 
 
-def test_temporaries_hidden_and_opaque_labeled(tmp_path):
-    """Compiler scaffolding (l_pell_jobj_*) is hidden from the
-    variables view, and opaque object locals (JSON — unreadable by
-    either Oracle debug API) are labeled by type instead of <OPAQUE>."""
+def test_json_local_value_via_debug_shadow(tmp_path):
+    """Debug builds emit a `<name>__pdbg` scalar shadow for opaque
+    locals; the debugger reads it so a JSON local shows its actual
+    value (not <OPAQUE>), and the shadow + compiler temporaries stay
+    hidden."""
     script = tmp_path / "stub.pell"
     script.write_text(
         "import json_demo;\n"
@@ -167,9 +168,11 @@ def test_temporaries_hidden_and_opaque_labeled(tmp_path):
     s = Serve(script)
     try:
         assert s.recv()["event"] == "ready"
-        # build_simple body: RETURN l_j is unit line 60 (the @pell:96 marker).
+        # build_simple: break on RETURN l_j (unit line 62, the @pell:96
+        # marker) — by then the shadow `l_j__pdbg := ...` on line 61 has
+        # run, so the shadow holds the current value.
         s.send(cmd="set_breakpoint", owner=None, name="JSON_DEMO", namespace=2,
-               line=60, id="bp1")
+               line=62, id="bp1")
         assert s.recv()["event"] == "bp_set"
         s.send(cmd="run")
         ev = s.recv()
@@ -179,13 +182,13 @@ def test_temporaries_hidden_and_opaque_labeled(tmp_path):
         ev = s.recv()
         assert ev["event"] == "locals", ev
         byname = {v["name"]: v for v in ev["values"]}
-        # Compiler temporaries (l_pell_jobj_0..N) never surface.
+        # Compiler temporaries and the shadow itself never surface.
         assert not any(n.startswith("L_PELL_") for n in byname), list(byname)
-        # The user's JSON local is shown, labeled by its type (its value
-        # is opaque to both Oracle debug APIs).
+        assert not any(n.endswith("__PDBG") for n in byname), list(byname)
+        # The user's JSON local now shows its ACTUAL value.
         assert "L_J" in byname, list(byname)
-        assert byname["L_J"].get("opaque") is True, byname["L_J"]
-        assert "JSON" in byname["L_J"]["value"].upper(), byname["L_J"]
+        val = byname["L_J"]["value"]
+        assert val.startswith("{") and "Alice" in val, byname["L_J"]
 
         s.send(cmd="continue")
         ev = s.recv(timeout=90)

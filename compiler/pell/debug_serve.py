@@ -227,7 +227,10 @@ def candidate_locals(source: str, line: int, max_names: int = 40) -> list[dict]:
 
     def add(name: str, type_text: str):
         nm = name.lower()
-        if nm in seen or nm in _KEYWORDS or _is_internal(nm):
+        # Skip compiler scaffolding and the debug shadow scalars
+        # (<name>__pdbg) — the latter are read on demand for their
+        # opaque sibling, never shown as variables themselves.
+        if nm in seen or nm in _KEYWORDS or _is_internal(nm) or nm.endswith("__pdbg"):
             return
         seen.add(nm)
         base_type = type_text.strip().split("(")[0].split()[0].upper() if type_text.strip() else ""
@@ -448,15 +451,20 @@ def serve(block: str, connect_str: str | None) -> int:
                 values = []
                 for var in candidate_locals(src, last["line"] or 1):
                     nm = var["name"]
-                    # Opaque object types (JSON, JSON_OBJECT_T, collections,
-                    # records, ADTs) have NO readable value through either
-                    # Oracle debug API: GET_VALUE handles only scalars, and
-                    # DBMS_DEBUG.EXECUTE can't reach frame-locals (runs at
-                    # global scope only). Show the declared type so the var
-                    # is at least identified, rather than a bare <OPAQUE>.
                     if var["opaque"]:
-                        values.append({"name": nm, "value": f"<{var['type']}>",
-                                       "type": var["type"], "opaque": True})
+                        # Opaque object types (JSON, collections, records)
+                        # have no readable value through either Oracle
+                        # debug API. Debug builds emit a `<name>__pdbg`
+                        # scalar shadow holding the stringified value —
+                        # read THAT. Falls back to the type label when no
+                        # shadow exists (non-debug build / unshadowed type).
+                        st, sv = probe.get_value(nm + "__PDBG", frame)
+                        if st == 0 and sv is not None:
+                            values.append({"name": nm, "value": sv,
+                                           "type": var["type"]})
+                        else:
+                            values.append({"name": nm, "value": f"<{var['type']}>",
+                                           "type": var["type"], "opaque": True})
                         continue
                     try:
                         st, v = probe.get_value(nm, frame)

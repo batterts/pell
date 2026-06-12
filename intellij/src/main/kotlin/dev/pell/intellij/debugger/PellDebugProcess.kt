@@ -509,13 +509,22 @@ class PellDebugProcess(
             ApplicationManager.getApplication().executeOnPooledThread {
                 val children = XValueChildrenList()
                 runCatching {
-                    for (v in frame.visibleVariables()) {
+                    val vars = frame.visibleVariables()
+                    // Debug builds emit a `<name>__pdbg VARCHAR2` shadow
+                    // holding the stringified value of each opaque local
+                    // (JSON etc.) — the one thing JDI can read. Pair them up.
+                    val shadows = vars.filter { it.name().lowercase().endsWith("__pdbg") }
+                        .associateBy { it.name().lowercase().removeSuffix("__pdbg") }
+                    for (v in vars) {
+                        val lname = v.name().lowercase()
                         // Hide compiler scaffolding (l_pell_jobj_N JSON DOM
-                        // temporaries, sql cursor temporaries) — the user
-                        // never wrote these.
-                        if (v.name().lowercase().startsWith("l_pell_")) continue
+                        // temporaries) and the shadow scalars themselves.
+                        if (lname.startsWith("l_pell_") || lname.endsWith("__pdbg")) continue
                         val value = runCatching { frame.getValue(v) }.getOrNull()
-                        children.add(PellValue(v.name(), value))
+                        val shadow = shadows[lname]?.let { sv ->
+                            runCatching { frame.getValue(sv) }.getOrNull()
+                        }
+                        children.add(PellValue(v.name(), value, shadow))
                     }
                 }
                 node.addChildren(children, true)
@@ -550,11 +559,27 @@ class PellDebugProcess(
         return vf
     }
 
-    private class PellValue(name: String, private val value: com.sun.jdi.Value?) : XNamedValue(name) {
+    private class PellValue(
+        name: String,
+        private val value: com.sun.jdi.Value?,
+        private val shadow: com.sun.jdi.Value? = null,
+    ) : XNamedValue(name) {
         override fun computePresentation(node: XValueNode, place: XValuePlace) {
+            // When the real value is opaque (JSON etc.) but a debug shadow
+            // scalar exists, show the shadow's stringified value instead.
+            if (shadow is StringReference && isOpaque(value)) {
+                node.setPresentation(com.intellij.icons.AllIcons.Debugger.Value,
+                    null, shadow.value(), false)
+                return
+            }
             val (text, type) = render(value)
             node.setPresentation(com.intellij.icons.AllIcons.Debugger.Value, type, text, false)
         }
+
+        private fun isOpaque(v: com.sun.jdi.Value?): Boolean =
+            v is ObjectReference &&
+                v.referenceType().name().removePrefix("\$Oracle.Builtin.")
+                    .equals("OPAQUE", ignoreCase = true)
 
         private fun render(v: com.sun.jdi.Value?): Pair<String, String?> = when (v) {
             null -> "null" to null

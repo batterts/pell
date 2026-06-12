@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.8.3</version>
+    <version>0.8.4</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,15 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.8.4 — JSON values are readable in the debugger</h3>
+        <ul><li><b>Opaque object locals now show their real value.</b>
+        Debug builds emit a <code>VARCHAR2</code> shadow scalar for each
+        opaque local (JSON to start) holding its stringified value —
+        the one thing both Oracle debug APIs can read. A <code>json</code>
+        local now shows <code>{"name":"Alice",...}</code> in the
+        Variables view instead of <code>&lt;OPAQUE&gt;</code>, on both
+        transports. The shadow and compiler temporaries stay hidden.</li></ul>
+
         <h3>0.8.3 — cleaner debugger variables view</h3>
         <ul><li>Compiler-internal temporaries (the <code>l_pell_jobj_*</code>
         JSON DOM scaffolding and friends) are hidden from the Variables
