@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import re as _re_mod
 from dataclasses import fields, is_dataclass
 from typing import Optional
 
@@ -32,7 +33,7 @@ from . import semantic_tokens as _semtok
 
 
 SERVER_NAME = "pell-lsp"
-SERVER_VERSION = "0.7.0"
+SERVER_VERSION = "0.7.1"
 
 logger = logging.getLogger(SERVER_NAME)
 
@@ -739,7 +740,7 @@ def _format_type(t: A.TypeRef) -> str:
 # ---------------------------------------------------------------------------
 
 # Triggered after `.`, `@`, `(`.
-COMPLETION_TRIGGER_CHARS = [".", "@", ":"]
+COMPLETION_TRIGGER_CHARS = [".", "@", ":", "{"]
 
 
 KEYWORDS = [
@@ -842,10 +843,76 @@ def on_completion(params: lsp.CompletionParams) -> lsp.CompletionList:
     return lsp.CompletionList(is_incomplete=False, items=items)
 
 
+_STRUCT_LIT_RE = _re_mod.compile(
+    r"([A-Za-z_][A-Za-z0-9_:]*)\s*\{([^{}]*)$"
+)
+
+
+def _struct_lit_completions(
+    line: str, doc_path: Optional[str],
+) -> Optional[list[lsp.CompletionItem]]:
+    """Field-name completion inside a record constructor.
+
+    `Transfer{` (or `pkg::Transfer{ from_id: 1, `) → offer an
+    "all fields" snippet with tab stops, plus the individual fields
+    not yet present. Returns None when the caret isn't in a struct
+    literal, so the caller falls through to the other contexts.
+    """
+    m = _STRUCT_LIT_RE.search(line)
+    if m is None:
+        return None
+    type_name, inside = m.group(1), m.group(2)
+    if "::" in type_name:
+        pkg, _, rec_name = type_name.rpartition("::")
+        pkg = pkg.replace("::", "_").replace(".", "_")
+    else:
+        pkg, rec_name = None, type_name
+    if not rec_name or not rec_name[0].isupper():
+        return None  # records are Capitalized; skip `if {` etc.
+    _sigs, recs, _defs, _refs, _mods = _get_project_ctx(doc_path)
+    matches = [(p_, r) for (p_, n), r in recs.items() if n == rec_name
+               and (pkg is None or p_ == pkg)]
+    if len(matches) != 1:
+        return None
+    rec = matches[0][1]
+    present = set(_re_mod.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*:", inside))
+    missing = [f for f in rec.fields if f.name not in present]
+    items: list[lsp.CompletionItem] = []
+    if missing and not inside.strip():
+        # Whole-shape snippet — lands the caret on each value in turn.
+        snippet = ", ".join(
+            f"{f.name}: ${{{i + 1}}}" for i, f in enumerate(missing)
+        ) + "$0"
+        items.append(lsp.CompletionItem(
+            label=f"{rec_name} fields ({', '.join(f.name for f in missing)})",
+            kind=lsp.CompletionItemKind.Snippet,
+            insert_text=snippet,
+            insert_text_format=lsp.InsertTextFormat.Snippet,
+            sort_text="0",   # first in the list
+            detail=f"expand all {len(missing)} fields",
+        ))
+    for f in missing:
+        ftype = getattr(f, "type_ref", None)
+        items.append(lsp.CompletionItem(
+            label=f.name,
+            kind=lsp.CompletionItemKind.Field,
+            insert_text=f"{f.name}: ",
+            sort_text="1" + f.name,
+            detail=_render_type(ftype) if ftype is not None else None,
+        ))
+    return items
+
+
 def _completions_for_line_prefix(
     line: str, src: str, uri: str,
     line_no: int = 0, char_no: int = 0,
 ) -> list[lsp.CompletionItem]:
+    # Record constructor context — `Transfer{` / `pkg::Transfer{ a: 1,`
+    doc_path = uri.removeprefix("file://") if uri.startswith("file://") else None
+    struct_items = _struct_lit_completions(line, doc_path)
+    if struct_items is not None:
+        return struct_items
+
     # `@` context — annotation list
     if line.rstrip().endswith("@"):
         return [
