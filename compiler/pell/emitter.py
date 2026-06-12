@@ -1976,6 +1976,12 @@ class Emitter:
             if xpkg is not None:
                 return xpkg
             tgt = self._emit_expr(s.target)
+            # `j = j.set(...).append(...);` — json dot-chain reassignment
+            # lowers through the JSON_OBJECT_T mutation path, same as the
+            # let form. (Without this it UFCS-rewrites to `set(j, ...)`.)
+            chain = self._maybe_emit_json_chain(tgt, s.value, indent)
+            if chain is not None:
+                return chain
             val = self._emit_expr(s.value)
             return [f"{indent}{tgt} := {val};"]
         if isinstance(s, A.ReturnStmt):
@@ -2565,6 +2571,12 @@ class Emitter:
     }
 
     def _infer_call_type(self, call: A.Call) -> Optional[str]:
+        # `.set/.remove/.append` chain on a json-typed base → JSON
+        # (e.g. `let done = acc.set("n", nrows);`).
+        if (isinstance(call.callee, A.MemberAccess)
+                and call.callee.field in self._JSON_CHAIN_METHODS
+                and self._is_json_typed(call)):
+            return "JSON"
         # Bare Oracle builtin (upper/replace/length/…) — return its known
         # result type. Skipped when the name is a user fn in this module
         # (those resolve through the normal free-fn path below) or a
@@ -3032,53 +3044,63 @@ class Emitter:
         lines = [f"{indent}{tmp} := JSON_OBJECT_T({base_sql});"]
 
         for method, args, loc in ops:
+            # Path arg: a string LITERAL gets dotted-path auto-vivify
+            # treatment; any other expression is a runtime KEY (top-level
+            # only — JSON_OBJECT_T.put/remove/get_array all take VARCHAR2
+            # keys at runtime, so `obj.set(key_var, v)` is fine).
             if method == "set":
                 if len(args) != 2:
                     raise EmitError(
                         f"json .set() takes (path, value), got {len(args)} args",
                         loc,
                     )
-                path_text = self._json_chain_path_text(args[0], loc)
                 val_sql = self._emit_expr(args[1])
-                if "." in path_text and "[" not in path_text:
-                    # Nested path: auto-vivify intermediate objects
-                    lines.extend(self._emit_json_obj_nested_put(
-                        tmp, path_text, val_sql, indent,
-                    ))
+                if isinstance(args[0], A.TextLit):
+                    path_text = args[0].value
+                    if "." in path_text and "[" not in path_text:
+                        # Nested path: auto-vivify intermediate objects
+                        lines.extend(self._emit_json_obj_nested_put(
+                            tmp, path_text, val_sql, indent,
+                        ))
+                    else:
+                        lines.append(
+                            f"{indent}{tmp}.put({_sql_string(path_text)}, {val_sql});"
+                        )
                 else:
-                    lines.append(
-                        f"{indent}{tmp}.put({_sql_string(path_text)}, {val_sql});"
-                    )
+                    key_sql = self._emit_expr(args[0])
+                    lines.append(f"{indent}{tmp}.put({key_sql}, {val_sql});")
             elif method == "remove":
                 if len(args) != 1:
                     raise EmitError(
                         f"json .remove() takes (path), got {len(args)} args",
                         loc,
                     )
-                path_text = self._json_chain_path_text(args[0], loc)
-                lines.append(
-                    f"{indent}{tmp}.remove({_sql_string(path_text)});"
-                )
+                key_sql = (_sql_string(args[0].value)
+                           if isinstance(args[0], A.TextLit)
+                           else self._emit_expr(args[0]))
+                lines.append(f"{indent}{tmp}.remove({key_sql});")
             elif method == "append":
                 if len(args) != 2:
                     raise EmitError(
                         f"json .append() takes (path, value), got {len(args)} args",
                         loc,
                     )
-                path_text = self._json_chain_path_text(args[0], loc)
+                key_sql = (_sql_string(args[0].value)
+                           if isinstance(args[0], A.TextLit)
+                           else self._emit_expr(args[0]))
                 val_sql = self._emit_expr(args[1])
                 # Get or create the array, then append to it.
                 arr_tmp = f"l_pell_jarr_{self._sql_var_counter}"
                 self._sql_var_counter += 1
                 self._decl(f"{arr_tmp} JSON_ARRAY_T;")
                 lines.extend([
-                    f"{indent}IF {tmp}.has({_sql_string(path_text)}) THEN",
-                    f"{indent}  {arr_tmp} := {tmp}.get_array({_sql_string(path_text)});",
+                    f"{indent}IF {tmp}.has({key_sql}) THEN",
+                    f"{indent}  {arr_tmp} := {tmp}.get_array({key_sql});",
                     f"{indent}ELSE",
                     f"{indent}  {arr_tmp} := JSON_ARRAY_T();",
                     f"{indent}END IF;",
                     f"{indent}{arr_tmp}.append({val_sql});",
-                    f"{indent}{tmp}.put({_sql_string(path_text)}, {arr_tmp});",
+                    f"{indent}{tmp}.put({key_sql}, {arr_tmp});",
                 ])
 
         # Convert back to JSON type (23ai) or VARCHAR2 (19c).
@@ -4296,10 +4318,24 @@ class Emitter:
                 return self._emit_cursor_call_iteration(
                     s, call_ret.params[0], indent,
                 )
-        # for x in <list-typed local>: iterate via assoc-array FOR loop
-        if isinstance(s.iterable, A.Ident) and s.iterable.name in self._list_locals:
-            list_local = local_name(s.iterable.name)
-            elem_pell = self._list_locals[s.iterable.name]  # pell-surface, e.g. "text" or "ColumnInfo"
+        # for x in <list-typed local or parameter>: iterate via the
+        # assoc-array FIRST/NEXT walk.
+        iter_elem: Optional[str] = None
+        if isinstance(s.iterable, A.Ident):
+            if s.iterable.name in self._list_locals:
+                iter_elem = self._list_locals[s.iterable.name]
+            elif self._current_fn is not None:
+                for fp in self._current_fn.params:
+                    if (fp.name == s.iterable.name
+                            and isinstance(fp.type_ref, A.GenericType)
+                            and fp.type_ref.base == "list"
+                            and len(fp.type_ref.params) == 1):
+                        iter_elem = _render_type(fp.type_ref.params[0])
+                        break
+        if iter_elem is not None:
+            # Standard ident emission resolves locals vs params (l_ vs p_).
+            list_local = self._emit_expr(s.iterable)
+            elem_pell = iter_elem  # pell-surface, e.g. "text" or "ColumnInfo"
             # Distinguish primitive vs record element types. Records
             # lower to t_<name>; primitives use their pell name. If the
             # list local is foreign-typed (e.g. catalog.t_columninfo_list),
@@ -5101,6 +5137,31 @@ class Emitter:
         # built-ins, opaque OBJECT methods) stay permissive because we
         # don't have signatures for them.
         self._reject_unused_return(e, s.loc)
+        # `xs.append(v);` / `xs.extend(ys);` on a list-typed local.
+        # List locals are dense assoc arrays (INDEX BY PLS_INTEGER,
+        # 1..COUNT), so append is the `.COUNT + 1` idiom and extend is
+        # an element-copy loop — same lowering aggregates use for
+        # `self.<field>`, now available on free locals too.
+        if (isinstance(e, A.Call)
+                and isinstance(e.callee, A.MemberAccess)
+                and isinstance(e.callee.obj, A.Ident)
+                and e.callee.obj.name in self._list_locals
+                and e.callee.field in ("append", "extend")
+                and len(e.args) == 1):
+            tgt = self._emit_expr(e.callee.obj)
+            if e.callee.field == "append":
+                val = self._emit_expr(e.args[0])
+                return [f"{indent}{tgt}({tgt}.COUNT + 1) := {val};"]
+            src = self._emit_expr(e.args[0])
+            idx = self._sql_var_counter
+            self._sql_var_counter += 1
+            return [
+                f"{indent}IF {src}.COUNT > 0 THEN",
+                f"{indent}  FOR i_{idx} IN 1 .. {src}.COUNT LOOP",
+                f"{indent}    {tgt}({tgt}.COUNT + 1) := {src}(i_{idx});",
+                f"{indent}  END LOOP;",
+                f"{indent}END IF;",
+            ]
         # Side-effecting expression (Call / pipeline / try-call / etc.).
         # If it's a Call with ListLit args, lift them to pre-declared
         # locals so the emitter doesn't fall through to /* TODO: ListLit

@@ -1,68 +1,234 @@
 module data::csv;
 // ---------------------------------------------------------------------------
-// Tiny CSV parser — splits a single CSV line into fields, then a multi-line
-// CSV document into a list of records.
+// csv — a real CSV library (RFC 4180), arbitrary column counts.
 //
-// Caveat: this is the "simple" CSV that doesn't need to handle quoted
-// commas, embedded newlines, or RFC-4180 escapes. For real-world CSV
-// you almost certainly want EXTERNAL TABLE + UTL_FILE on the server side,
-// or a dedicated library client-side. Use this for trusted-source data
-// (operator paste-ins, exported reports, sanitized fixtures).
+// Parsing walks the text with a single state machine, so it handles what
+// naive split() can't: quoted fields, embedded commas, escaped double
+// quotes ("" inside a quoted field), embedded newlines inside quotes,
+// and CRLF line endings.
 //
-// Exercises:
-//   - `.split(delim)` lowers to a per-package REGEXP_SUBSTR helper
-//   - `let xs: list<text> = ...` declares the assoc-array type once
-//   - bulk constructor pattern that builds a list<Row> by iteration
+// One line → a real list of cells:
+//
+//     let cells = csv::parse_line("a,\"b,c\",d");   // 3 cells
+//
+// A whole document → a json container (the one shape that crosses
+// package boundaries cleanly at any width):
+//
+//     { "n": <row_count>, "rows": [ { "w": <cells>, "c": ["a","b",...] }, ... ] }
+//
+// You rarely touch that shape directly — use the accessors:
+//
+//     let p = csv::parse("x,y\n1,2");
+//     csv::row_count(p)          -- 2
+//     csv::col_count(p, 1)       -- 2
+//     csv::cell(p, 2, 1)         -- "1"     (row, col are 1-based)
+//
+// Header mode keys each data row by the first line instead:
+//
+//     let h = csv::parse_with_header("name,age\nAnn,34");
+//     csv::field(h, 1, "age")    -- "34"
+//
+// And it round-trips: csv::to_csv(p) writes RFC-4180 output with fields
+// quoted only when they need it.
 // ---------------------------------------------------------------------------
 
-pub record Row {
-    a: text,
-    b: text,
-    c: text,
-}
-
-// Split one CSV line into its comma-separated cells.
+// Split one CSV line into its cells, honoring quotes: `a,"b,c",d` is
+// three cells, `"say ""hi"""` unescapes to `say "hi"`. For multi-line
+// documents (which may carry newlines inside quoted fields) use parse().
 pub fn parse_line(line: text) -> list<text> {
-    let cells: list<text> = line.split(",");
+    var cells: list<text> = [];
+    var cur: text = "";
+    var in_quotes: bool = false;
+    var skip: number = 0;
+    let n = nvl(length(line), 0);
+    for idx in 1..=n {
+        if skip > 0 {
+            skip = skip - 1;
+        } else {
+            let ch = substr(line, idx, 1);
+            if in_quotes {
+                if ch == "\"" {
+                    if idx < n && substr(line, idx + 1, 1) == "\"" {
+                        cur = cur + "\"";
+                        skip = 1;            // consume the escape pair
+                    } else {
+                        in_quotes = false;
+                    }
+                } else {
+                    cur = cur + ch;
+                }
+            } else if ch == "\"" {
+                in_quotes = true;
+            } else if ch == "," {
+                cells.append(cur);
+                cur = "";
+            } else {
+                cur = cur + ch;
+            }
+        }
+    }
+    cells.append(cur);
     return cells;
 }
 
-// Parse a multi-line CSV document (rows joined with newline) into a list
-// of 3-cell Rows. Rows with too few cells fill remaining fields with NULL;
-// rows with too many cells discard the extras. Header rows are NOT
-// skipped — caller decides whether the first row is data or a header.
-pub fn parse_doc(doc: text) -> list<Row> {
-    let lines: list<text> = doc.split("\n");
-    var rows: list<Row> = [];
-    for i in lines.indices() {
-        let line: text = lines.at(i);
-        let cells: list<text> = line.split(",");
-        var r: Row = Row { a: "", b: "", c: "" };
-        if cells.len() >= 1 { r.a = cells.at(cells.first()); }
-        if cells.len() >= 2 { r.b = cells.at(cells.first() + 1); }
-        if cells.len() >= 3 { r.c = cells.at(cells.first() + 2); }
-        // pell-side append on a plain list isn't special-cased; the
-        // canonical mutation is via the assoc-array .COUNT+1 idiom that
-        // the emitter recognises only for `self.<field>` inside aggregates,
-        // not for free locals. Workaround: bulk-collect from a UNION ALL
-        // generated SQL, or assemble per-line via sql! INSERT. For this
-        // small helper we accept that the API is "list of cells", not
-        // "list of rows", and leave full document parsing for a follow-up
-        // once .append() on a `var list<T>` lands.
+// Parse a whole document into the json row container described above.
+// Handles CRLF, quoted fields containing commas / escaped quotes /
+// embedded newlines. A trailing newline does not produce a phantom row.
+pub fn parse(doc: text) -> json {
+    var acc = json::object();
+    var row = json::object();
+    var cur: text = "";
+    var in_quotes: bool = false;
+    var pending: bool = false;      // current row has unflushed content
+    var nrows: number = 0;
+    var ncells: number = 0;         // cells already flushed into this row
+    var skip: number = 0;
+    let n = nvl(length(doc), 0);
+    for idx in 1..=n {
+        if skip > 0 {
+            skip = skip - 1;
+        } else {
+            let ch = substr(doc, idx, 1);
+            if in_quotes {
+                if ch == "\"" {
+                    if idx < n && substr(doc, idx + 1, 1) == "\"" {
+                        cur = cur + "\"";
+                        skip = 1;            // consume the escape pair
+                    } else {
+                        in_quotes = false;
+                    }
+                } else {
+                    cur = cur + ch;          // commas/newlines kept verbatim
+                }
+            } else if ch == "\"" {
+                in_quotes = true;
+                pending = true;              // "" alone is a (empty) cell
+            } else if ch == "," {
+                row = row.append("c", cur);
+                ncells = ncells + 1;
+                cur = "";
+                pending = true;
+            } else if ch == "\r" || ch == "\n" {
+                if ch == "\r" && idx < n && substr(doc, idx + 1, 1) == "\n" {
+                    skip = 1;                // CRLF counts as one break
+                }
+                if pending {
+                    row = row.append("c", cur).set("w", ncells + 1);
+                    acc = acc.append("rows", row);
+                    nrows = nrows + 1;
+                }
+                row = json::object();
+                cur = "";
+                ncells = 0;
+                pending = false;
+            } else {
+                cur = cur + ch;
+                pending = true;
+            }
+        }
     }
-    return rows;
+    if pending {
+        row = row.append("c", cur).set("w", ncells + 1);
+        acc = acc.append("rows", row);
+        nrows = nrows + 1;
+    }
+    let done = acc.set("n", nrows);
+    return done;
 }
 
-// Quote one field per RFC 4180: wrap in double quotes if the value
-// contains a comma, double-quote, or newline; double any embedded
-// double-quotes inside the wrapped form. Pure NULL-safe text-only path.
+// Number of data rows in a parsed document.
+pub fn row_count(p: json) -> number {
+    return nvl(json::get_number(p, "$.n"), 0);
+}
+
+// Number of cells in row `r` (1-based). Reads the width parse() stamped
+// on the row — PL/SQL's JSON_VALUE can't evaluate `.size()` item methods.
+pub fn col_count(p: json, r: number) -> number {
+    let path = "$.rows[" + (r - 1) + "].w";
+    return nvl(json::get_number(p, path), 0);
+}
+
+// Cell at (row, col), both 1-based. NULL when out of range — and note
+// Oracle's '' IS NULL: an empty CSV cell also comes back as NULL.
+pub fn cell(p: json, r: number, c: number) -> text {
+    let path = "$.rows[" + (r - 1) + "].c[" + (c - 1) + "]";
+    return json::get_text(p, path);
+}
+
+// Parse with the first line as headers. Each data row becomes an object
+// keyed by header name:
 //
-// Note: pell `||` lowers to BOOLEAN OR (logical), not string concat —
-// use `"... {expr} ..."` interpolation for concatenation.
+//     { "n": <data_rows>, "rows": [ {"name":"Ann","age":"34"}, ... ] }
+pub fn parse_with_header(doc: text) -> json {
+    let raw = parse(doc);
+    let total = row_count(raw);
+    var acc = json::object();
+    var nrows: number = 0;
+    if total >= 1 {
+        let ncols = col_count(raw, 1);
+        for r in 2..=total {
+            var obj = json::object();
+            for c in 1..=ncols {
+                let key = cell(raw, 1, c);
+                obj = obj.set(key, cell(raw, r, c));
+            }
+            acc = acc.append("rows", obj);
+            nrows = nrows + 1;
+        }
+    }
+    let done = acc.set("n", nrows);
+    return done;
+}
+
+// Header-mode accessor: field named `key` of data row `r` (1-based over
+// DATA rows — the header line is not row 1).
+pub fn field(p: json, r: number, key: text) -> text {
+    let path = "$.rows[" + (r - 1) + "]." + key;
+    return json::get_text(p, path);
+}
+
+// Quote one field per RFC 4180: wrapped in double quotes only when it
+// contains a comma, quote, or newline; embedded quotes doubled.
 pub fn quote_field(s: text) -> text {
     if s.contains(",") || s.contains("\"") || s.contains("\n") {
         let doubled: text = replace(s, "\"", "\"\"");
         return "\"{doubled}\"";
     }
     return s;
+}
+
+// Join cells back into one CSV line (inverse of parse_line).
+pub fn to_line(cells: list<text>) -> text {
+    var line: text = "";
+    var seen: number = 0;
+    for c in cells {
+        if seen > 0 {
+            line = line + ",";
+        }
+        line = line + quote_field(nvl(c, ""));
+        seen = seen + 1;
+    }
+    return line;
+}
+
+// Serialize a parsed document (the parse() shape) back to CSV text —
+// rows joined with \n, fields quoted only when needed.
+pub fn to_csv(p: json) -> text {
+    var acc: text = "";
+    let nrows = row_count(p);
+    for r in 1..=nrows {
+        var line: text = "";
+        let ncols = col_count(p, r);
+        for c in 1..=ncols {
+            if c > 1 {
+                line = line + ",";
+            }
+            line = line + quote_field(nvl(cell(p, r, c), ""));
+        }
+        if r > 1 {
+            acc = acc + "\n";
+        }
+        acc = acc + line;
+    }
+    return acc;
 }

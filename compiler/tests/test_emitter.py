@@ -1029,17 +1029,18 @@ def test_json_chain_on_non_json_falls_through():
     assert "JSON_OBJECT_T" not in sql
 
 
-def test_json_chain_runtime_path_errors():
-    """Path must be a string literal — runtime paths are rejected at compile time."""
-    from pell.emitter import EmitError
-    with pytest.raises(EmitError):
-        compile_to_sql("""
-            module m;
-            pub fn f(p: text) -> json {
-                let j: json = json::object().set(p, "x");
-                return j;
-            }
-        """)
+def test_json_chain_runtime_key_lowers_to_put():
+    """A non-literal path arg is a runtime KEY (top-level only) — it lowers
+    to JSON_OBJECT_T.put(<expr>, ...) instead of erroring. Only string
+    LITERALS get the dotted-path auto-vivify treatment."""
+    sql = compile_to_sql("""
+        module m;
+        pub fn f(p: text) -> json {
+            let j: json = json::object().set(p, "x");
+            return j;
+        }
+    """)
+    assert ".put(p_p, 'x')" in sql
 
 
 def test_json_object_kwargs_become_json_object():
@@ -2371,3 +2372,56 @@ def test_foreign_object_chain_dispatches_natively():
     # native dot dispatch, not UFCS free-fn style
     assert "ut.expect('a').to_equal('a');" in sql
     assert "to_equal(ut.expect" not in sql
+
+
+def test_free_local_list_append_and_extend():
+    """`xs.append(v)` / `xs.extend(ys)` on a list-typed LOCAL lower to the
+    dense assoc-array idiom — previously aggregate-only (`self.<field>`)."""
+    sql = compile_to_sql("""
+        module m;
+        pub fn f() -> number {
+            var xs: list<text> = [];
+            xs.append("a");
+            var ys: list<text> = [];
+            ys.append("b");
+            xs.extend(ys);
+            return xs.len();
+        }
+    """)
+    assert "l_xs(l_xs.COUNT + 1) := 'a';" in sql
+    assert "l_xs(l_xs.COUNT + 1) := l_ys(i_0);" in sql
+    assert "append(l_xs" not in sql      # no UFCS fallthrough
+
+
+def test_json_chain_in_assignment_statement():
+    """`j = j.set(...).append(...);` (reassignment, not let) routes through
+    the JSON_OBJECT_T mutation path instead of UFCS-rewriting to set(j,...)."""
+    sql = compile_to_sql("""
+        module m;
+        pub fn f() -> json {
+            var j = json::object();
+            j = j.set("a", 1).append("xs", "v");
+            return j;
+        }
+    """)
+    assert "JSON_OBJECT_T(l_j)" in sql
+    assert ".put('a', 1);" in sql
+    assert "set(l_j" not in sql          # no UFCS fallthrough
+
+
+def test_for_over_list_parameter():
+    """Iterating a list-typed PARAMETER walks p_<name> via FIRST/NEXT —
+    not the (undeclared) l_<name> a local would use."""
+    sql = compile_to_sql("""
+        module m;
+        pub fn join_all(cells: list<text>) -> text {
+            var acc: text = "";
+            for c in cells {
+                acc = acc + c;
+            }
+            return acc;
+        }
+    """)
+    assert "i_c := p_cells.FIRST;" in sql
+    assert "p_cells.NEXT(i_c)" in sql
+    assert "l_cells" not in sql

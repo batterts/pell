@@ -333,12 +333,30 @@ pub fn t_paging() {
     sql! { delete from orders.orders where status = 'UTP' };
 }
 
-@test("data::csv: split, quote, parse documents")
+@test("data::csv: RFC-4180 parse, header mode, round-trip")
 pub fn t_csv() {
-    let cells = csv::parse_line("a,b,c");
+    // quote-aware line split: embedded commas and "" escapes
+    let cells = csv::parse_line("a,\"b,c\",\"say \"\"hi\"\"\"");
     ut::expect(cells.len()).to_equal(3);
-    ut::expect(cells.at(2)).to_equal("b");
-    ut::expect(csv::quote_field("a,b")).to_be_like("\"%\"");
+    ut::expect(cells.at(2)).to_equal("b,c");
+    ut::expect(cells.at(3)).to_equal("say \"hi\"");
+    // whole-document parse: CRLF rows, arbitrary widths
+    let p = csv::parse("a,b,c,d,e\r\nx,\"y\ny\",z\n");
+    ut::expect(csv::row_count(p)).to_equal(2);
+    ut::expect(csv::col_count(p, 1)).to_equal(5);
+    ut::expect(csv::col_count(p, 2)).to_equal(3);
+    ut::expect(csv::cell(p, 2, 2)).to_equal("y\ny");
+    // header mode keys data rows by the first line
+    let h = csv::parse_with_header("name,age\nAnn,34\nBob,55");
+    ut::expect(csv::row_count(h)).to_equal(2);
+    ut::expect(csv::field(h, 2, "age")).to_equal("55");
+    // serialization quotes only when needed and round-trips
+    ut::expect(csv::quote_field("a,b")).to_equal("\"a,b\"");
+    ut::expect(csv::quote_field("plain")).to_equal("plain");
+    let rt = csv::parse("a,\"b,c\"\nd,e");
+    ut::expect(csv::to_csv(rt)).to_equal("a,\"b,c\"\nd,e");
+    let line = csv::to_line(cells);
+    ut::expect(line).to_equal("a,\"b,c\",\"say \"\"hi\"\"\"");
 }
 
 @test("repl_demo: records in, records out")
