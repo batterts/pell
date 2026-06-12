@@ -32,6 +32,22 @@ class PellSettings : PersistentStateComponent<PellSettings.State> {
          * save, and `pell deploy` reads from here. Default: `plsql`.
          */
         var targetDirName: String = "plsql",
+        /**
+         * Debugger (jdwp transport): fixed listener port — needed when
+         * the connect-back arrives through a reverse SSH tunnel
+         * (`ssh -R 9040:...`). Blank = ephemeral port.
+         */
+        var debugJdwpPort: String = "",
+        /**
+         * Debugger (jdwp transport): the address the DATABASE dials to
+         * reach the IDE. Blank = auto (host.docker.internal for a local
+         * container, the route-interface IP otherwise). For a reverse
+         * tunnel: 127.0.0.1.
+         */
+        var debugCallbackHost: String = "",
+        /** Debugger transport: "jdwp" (default) or "sql" (outbound-only
+         *  via DBMS_DEBUG — for tunnels/NAT/no-ACL instances). */
+        var debugTransport: String = "jdwp",
     )
 
     private var state = State()
@@ -47,6 +63,18 @@ class PellSettings : PersistentStateComponent<PellSettings.State> {
         set(value) {
             state.targetDirName = value.trim().ifBlank { "plsql" }
         }
+
+    var debugJdwpPort: String
+        get() = state.debugJdwpPort.trim()
+        set(value) { state.debugJdwpPort = value.trim() }
+
+    var debugCallbackHost: String
+        get() = state.debugCallbackHost.trim()
+        set(value) { state.debugCallbackHost = value.trim() }
+
+    var debugTransport: String
+        get() = state.debugTransport.trim().ifBlank { "jdwp" }
+        set(value) { state.debugTransport = value.trim().lowercase().ifBlank { "jdwp" } }
 
     companion object {
         @JvmStatic

@@ -180,10 +180,13 @@ class PellDebugProcess(
             val cargs = conn.defaultArguments()
             cargs["localAddress"]?.setValue("0.0.0.0")
             // Pin the port when the connect-back arrives through a
-            // reverse SSH tunnel (ssh -R needs a fixed port). Default:
-            // ephemeral.
-            System.getenv("PELL_DEBUG_JDWP_PORT")?.takeIf { it.isNotBlank() }?.let {
-                cargs["port"]?.setValue(it)
+            // reverse SSH tunnel (ssh -R needs a fixed port). Settings
+            // page first (env propagation to GUI apps on macOS is
+            // unreliable), env var as fallback. Default: ephemeral.
+            val pinnedPort = dev.pell.intellij.settings.PellSettings.getInstance(project)
+                .debugJdwpPort.ifBlank { System.getenv("PELL_DEBUG_JDWP_PORT") ?: "" }
+            if (pinnedPort.isNotBlank()) {
+                cargs["port"]?.setValue(pinnedPort)
             }
             connectorArgs = cargs
             val address = conn.startListening(cargs)
@@ -243,6 +246,8 @@ class PellDebugProcess(
      *  override, else host.docker.internal for a local container, else
      *  the local interface used to reach the DB host. */
     private fun callbackHost(): String {
+        dev.pell.intellij.settings.PellSettings.getInstance(project)
+            .debugCallbackHost.takeIf { it.isNotBlank() }?.let { return it }
         System.getenv("PELL_DEBUG_CALLBACK_HOST")?.takeIf { it.isNotBlank() }?.let { return it }
         val dbUrl = System.getenv("PELL_DB_URL") ?: ""
         val dbHost = dbUrl.substringAfter("@", "").substringBefore(":").substringBefore("/")

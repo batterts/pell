@@ -30,7 +30,9 @@ class PellDebugRunner : GenericProgramRunner<RunnerSettings>() {
         //   experience (script breakpoints, exact frames).
         // sql: everything over outbound connections via DBMS_DEBUG —
         //   for tunnels/NAT/no-ACL instances. PELL_DEBUG_TRANSPORT=sql.
-        val transport = System.getenv("PELL_DEBUG_TRANSPORT")?.lowercase() ?: "jdwp"
+        val transport = dev.pell.intellij.settings.PellSettings.getInstance(env.project)
+            .debugTransport.takeIf { it.isNotBlank() && it != "jdwp" }
+            ?: System.getenv("PELL_DEBUG_TRANSPORT")?.lowercase() ?: "jdwp"
         val session = XDebuggerManager.getInstance(env.project).startSession(
             env,
             object : XDebugProcessStarter() {

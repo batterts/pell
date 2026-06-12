@@ -36,6 +36,11 @@ class PellSettingsConfigurable(private val project: Project) : Configurable {
 
     private val settings = PellSettings.getInstance(project)
     private val targetDirField = JBTextField(settings.targetDirName, 20)
+    private val jdwpPortField = JBTextField(settings.debugJdwpPort, 8)
+    private val callbackHostField = JBTextField(settings.debugCallbackHost, 20)
+    private val transportField = javax.swing.JComboBox(arrayOf("jdwp", "sql")).apply {
+        selectedItem = settings.debugTransport
+    }
     private val statusLabel = JBLabel("(checking…)")
     private val installButton = JButton("Install pell")
     private var dialogPanel: DialogPanel? = null
@@ -53,6 +58,30 @@ class PellSettingsConfigurable(private val project: Project) : Configurable {
                     "Where the lowered PL/SQL is written (relative to the project root). " +
                     "The split editor writes <code>&lt;name&gt;.sql</code> here on save; " +
                     "<code>pell deploy</code> reads from here. Default: <code>plsql</code>."
+                )
+            }
+            group("Debugger") {
+                row("Transport:") {
+                    cell(transportField).align(AlignX.LEFT)
+                }.rowComment(
+                    "<code>jdwp</code> (default): the database connects back to the IDE — " +
+                    "script breakpoints work; needs the JDWP network ACE. " +
+                    "<code>sql</code>: outbound-only via DBMS_DEBUG — works through " +
+                    "tunnels/NAT with just the DEBUG CONNECT SESSION grant."
+                )
+                row("JDWP listener port:") {
+                    cell(jdwpPortField).align(AlignX.LEFT)
+                }.rowComment(
+                    "Fixed port for the IDE's listener — set when the connect-back " +
+                    "arrives through a reverse SSH tunnel (<code>ssh -R 9040:…</code>). " +
+                    "Blank = ephemeral."
+                )
+                row("Callback host:") {
+                    cell(callbackHostField).align(AlignX.LEFT)
+                }.rowComment(
+                    "The address the DATABASE dials to reach the IDE. Blank = auto " +
+                    "(<code>host.docker.internal</code> for a local container, the " +
+                    "route-interface IP otherwise). Reverse tunnel: <code>127.0.0.1</code>."
                 )
             }
             group("pell CLI") {
@@ -159,7 +188,10 @@ class PellSettingsConfigurable(private val project: Project) : Configurable {
     }
 
     override fun isModified(): Boolean =
-        targetDirField.text.trim() != settings.targetDirName
+        targetDirField.text.trim() != settings.targetDirName ||
+        jdwpPortField.text.trim() != settings.debugJdwpPort ||
+        callbackHostField.text.trim() != settings.debugCallbackHost ||
+        (transportField.selectedItem as String) != settings.debugTransport
 
     @Throws(ConfigurationException::class)
     override fun apply() {
@@ -170,9 +202,18 @@ class PellSettingsConfigurable(private val project: Project) : Configurable {
             throw ConfigurationException("Target directory must be relative to the project root")
         if (v.contains("..")) throw ConfigurationException("Target directory must not contain `..`")
         settings.targetDirName = v
+        val port = jdwpPortField.text.trim()
+        if (port.isNotBlank() && port.toIntOrNull() !in 1..65535)
+            throw ConfigurationException("JDWP listener port must be 1-65535 (or blank)")
+        settings.debugJdwpPort = port
+        settings.debugCallbackHost = callbackHostField.text.trim()
+        settings.debugTransport = transportField.selectedItem as String
     }
 
     override fun reset() {
         targetDirField.text = settings.targetDirName
+        jdwpPortField.text = settings.debugJdwpPort
+        callbackHostField.text = settings.debugCallbackHost
+        transportField.selectedItem = settings.debugTransport
     }
 }

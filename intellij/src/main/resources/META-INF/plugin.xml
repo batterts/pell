@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.8.0</version>
+    <version>0.8.1</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,12 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.8.1 — debugger settings in the UI</h3>
+        <ul><li>Settings → Tools → pell now has the debugger knobs:
+        transport (jdwp/sql), fixed JDWP listener port, and callback
+        host — no more wrestling env vars into GUI-launched IDEs for
+        reverse-tunnel setups. Env vars still work as fallback.</li></ul>
+
         <h3>0.8.0 — SQL-transport debugging (outbound-only)</h3>
         <p><b>Debug with nothing but outbound database connections.</b>
         Set <code>PELL_DEBUG_TRANSPORT=sql</code> and the debugger drives
