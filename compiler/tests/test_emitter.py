@@ -2340,3 +2340,34 @@ def test_reserved_word_ok_as_path_segment():
         pub fn ping() {}
     """)
     assert "CREATE OR REPLACE PACKAGE app_validate_rules AS" in sql
+
+
+def test_suite_and_test_annotations_emit_utplsql_markers():
+    sql = compile_to_sql("""
+        @suite("my suite")
+        module ut_demo;
+        import ut;
+
+        @test("adds")
+        pub fn t_add() {
+            ut::expect(1 + 1).to_equal(2);
+        }
+    """)
+    assert "--%suite(my suite)" in sql
+    assert "--%test(adds)" in sql
+    # the annotation precedes the spec declaration
+    assert sql.index("--%test(adds)") < sql.index("PROCEDURE t_add;")
+
+
+def test_foreign_object_chain_dispatches_natively():
+    sql = compile_to_sql("""
+        module ut_chain;
+        import ut;
+
+        pub fn t() {
+            ut::expect("a").to_equal("a");
+        }
+    """)
+    # native dot dispatch, not UFCS free-fn style
+    assert "ut.expect('a').to_equal('a');" in sql
+    assert "to_equal(ut.expect" not in sql

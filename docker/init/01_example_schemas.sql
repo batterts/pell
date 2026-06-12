@@ -118,6 +118,16 @@ BEGIN
     try('CREATE PUBLIC SYNONYM pell_runtime FOR pell_test.pell_runtime');
     try('CREATE PUBLIC SYNONYM logger FOR pell_test.logger');
     try('CREATE PUBLIC SYNONYM pell_re FOR pell_test.pell_re');
+    -- pell_test runs the ut vetting suite, which seeds/cleans demo rows.
+    FOR t IN (SELECT owner, table_name FROM dba_tables
+               WHERE owner IN ('HR','BILLING','REPORTS','LOOKUPS','ORDERS',
+                               'AUDITING','BULK','MARKET','INVENTORY')) LOOP
+        BEGIN
+            EXECUTE IMMEDIATE 'GRANT SELECT, INSERT, UPDATE, DELETE ON '
+                || t.owner || '.' || t.table_name || ' TO PELL_TEST';
+        EXCEPTION WHEN OTHERS THEN NULL;
+        END;
+    END LOOP;
 END;
 /
 

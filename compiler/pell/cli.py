@@ -332,7 +332,12 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     runtime_sql = out_dir / "pell_runtime.sql"
     if has_errors:
         print(f"pell deploy: generating pell_runtime.sql ...")
-        runtime_args = argparse.Namespace(input=str(project), output=str(runtime_sql))
+        # Aggregate from the whole PROJECT directory, even when deploying
+        # a single file — pell_runtime is shared; regenerating it from
+        # one file would drop every other module's exceptions and
+        # invalidate their packages.
+        runtime_scope = project if project.is_dir() else project.parent
+        runtime_args = argparse.Namespace(input=str(runtime_scope), output=str(runtime_sql))
         cmd_runtime(runtime_args)
 
     # Locate pell_re.sql if regex is in use. Look first in the repo's

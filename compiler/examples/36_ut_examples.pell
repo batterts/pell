@@ -1,0 +1,126 @@
+@suite("pell example vetting — every module behaves, not just compiles")
+module ut_pell_examples;
+
+import ut;
+import hello;
+import text_utils;
+import json_demo;
+import collections_linked_list;
+import staffing;
+import stock;
+import mermaid;
+import explain_plan;
+import stat_diff;
+
+// ---------------------------------------------------------------------------
+// ut_pell_examples — utPLSQL suite over the deployed examples.
+//
+// The deploy sweep proves the examples COMPILE; the execution tests
+// prove a handful compute. This suite is the systematic layer: every
+// public surface gets called with real arguments and its results
+// asserted, database-side, where the semantics actually live.
+//
+//   pell deploy compiler/examples
+//   pell exec -e 'ut::run("pell_test.ut_pell_examples");'
+//
+// Written in pell: `@suite` lowers to --%suite, `@test` to --%test, and
+// `ut::expect(...).to_equal(...)` lowers to the native utPLSQL call.
+// ---------------------------------------------------------------------------
+
+@test("hello::greet greets by name")
+pub fn t_greet() {
+    ut::expect(hello::greet("world")).to_equal("hello, world");
+}
+
+@test("text_utils basics: len/trim/case/contains")
+pub fn t_text_utils() {
+    ut::expect(text_utils::len("abc")).to_equal(3);
+    ut::expect(text_utils::trim_ws("  x  ")).to_equal("x");
+    ut::expect(text_utils::to_upper("abc")).to_equal("ABC");
+    ut::expect(text_utils::has("haystack", "hay")).to_be_true();
+    ut::expect(text_utils::is_blank("   ")).to_be_true();
+    ut::expect(text_utils::is_blank("x")).to_be_false();
+}
+
+@test("json_demo builds and reads nested documents")
+pub fn t_json_roundtrip() {
+    let j = json_demo::build_simple();
+    ut::expect(json::get_text(j, "$.name")).to_equal("Alice");
+    ut::expect(json::get_number(j, "$.age")).to_equal(30);
+    let n = json_demo::build_nested();
+    ut::expect(json::get_text(n, "$.user.address.city")).to_equal("NYC");
+    ut::expect(json_demo::extract_text(n, "$.user.name")).to_equal("Bob");
+    ut::expect(json_demo::has_path(n, "$.meta.created")).to_be_true();
+    ut::expect(json_demo::has_path(n, "$.meta.missing")).to_be_false();
+}
+
+@test("linked_list: build, summarize, reverse")
+pub fn t_linked_list() {
+    // Built via cons/nil: list<T> ARGUMENTS across packages still hit
+    // the nominal VARRAY mismatch (adapter exists for returns only).
+    let l = collections_linked_list::cons(3,
+            collections_linked_list::cons(1,
+            collections_linked_list::cons(7,
+            collections_linked_list::nil())));
+    let s = collections_linked_list::summarize(l);
+    ut::expect(s.total).to_equal(11);
+    ut::expect(s.count).to_equal(3);
+    let r = collections_linked_list::reversed(l);
+    let s2 = collections_linked_list::summarize(r);
+    ut::expect(s2.total).to_equal(11);
+    ut::expect(s2.count).to_equal(3);
+}
+
+@test("staffing: find, promote, and the NotFound path")
+pub fn t_staffing() {
+    sql! { delete from hr.employees where id = 9001 };
+    sql! { insert into hr.employees(id, name, email, grade)
+           values (9001, 'Test Person', 't@example.com', 3) };
+    let e = staffing::find_employee(9001)?;
+    ut::expect(e.name).to_equal("Test Person");
+    staffing::promote(9001)?;
+    let e2 = staffing::find_employee(9001)?;
+    ut::expect(e2.grade).to_equal(4);
+    sql! { delete from hr.employees where id = 9001 };
+}
+
+@test("stock::create_sku returns a sequence-assigned id")
+pub fn t_stock() {
+    let id = stock::create_sku("UT-TEST-1", 5);
+    ut::expect(id).to_be_not_null();
+    let qty: number = sql! {
+        select qty from inventory.skus where id = :id
+    }.one();
+    ut::expect(qty).to_equal(5);
+    sql! { delete from inventory.skus where id = :id };
+}
+
+@test("mermaid builders produce well-formed diagram text")
+pub fn t_mermaid() {
+    let d = mermaid::flowchart("TD")
+          + mermaid::node("a", "Start")
+          + mermaid::link("a", "a");
+    ut::expect(d).to_be_like("flowchart TD%a[\"Start\"]%a --> a%");
+    ut::expect(mermaid::esc("say \"hi\" [now]")).to_equal("say 'hi' (now)");
+    ut::expect(mermaid::fence("x")).to_be_like("```mermaid%x%```");
+}
+
+@test("explain_plan explains the common row sources in plain English")
+pub fn t_explain_op() {
+    ut::expect(explain_plan::explain_op("TABLE ACCESS", "FULL"))
+        .to_be_like("%full scan%");
+    ut::expect(explain_plan::explain_op("INDEX", "UNIQUE SCAN"))
+        .to_be_like("%unique index%");
+    ut::expect(explain_plan::explain_op("HASH JOIN", " "))
+        .to_be_like("%hash table%");
+}
+
+@test("stat_diff snapshots carry the headline statistics")
+pub fn t_stat_diff() {
+    let before = stat_diff::snapshot();
+    ut::expect(json::get_number(before, "$.logical_reads")).to_be_not_null();
+    ut::expect(json::get_number(before, "$.consistent_gets")).to_be_not_null();
+    let after = stat_diff::snapshot();
+    let r = stat_diff::report(before, after);
+    ut::expect(r).to_be_like("%statistic%before%after%delta%");
+}

@@ -1097,6 +1097,17 @@ class Emitter:
             out.append("AS")
         else:
             out.append(f"CREATE OR REPLACE PACKAGE {self._q(self.pkg)} AS")
+        # utPLSQL: `@suite` / `@suite("description")` on the module emits
+        # the --%suite annotation, making this package runnable with
+        # `ut.run('<pkg>')`. Test fns are marked with `@test` below.
+        suite = next((a for a in getattr(self.module, "annotations", [])
+                      if a.name == "suite"), None)
+        if suite is not None:
+            desc = self.pkg
+            if suite.args and isinstance(suite.args[0], A.TextLit):
+                desc = suite.args[0].value
+            out.append(f"  --%suite({desc})")
+            out.append("")
         # Enum constants — emitted before records so they can be referenced
         # from record field defaults (future) and from fn bodies.
         for e in self._enums:
@@ -1123,6 +1134,12 @@ class Emitter:
         # emitted into the package — see _is_stub_fn).
         for fn in self._fns:
             if fn.is_pub and not self._is_stub_fn(fn):
+                test = next((a for a in fn.annotations if a.name == "test"), None)
+                if test is not None:
+                    tdesc = fn.name
+                    if test.args and isinstance(test.args[0], A.TextLit):
+                        tdesc = test.args[0].value
+                    out.append(f"  --%test({tdesc})")
                 out.append("  " + self._fn_signature(fn) + ";")
         out.append(f"END {self.pkg};")
         out.append("/")
@@ -5458,6 +5475,19 @@ class Emitter:
         "std::println": "dbms_output.put_line",
     }
 
+    def _is_foreign_object_chain(self, recv: A.Expr) -> bool:
+        """True when `recv` is (a chain of member calls rooted at) a call
+        into a `pkg::fn` that pell has no signature for — i.e. a foreign
+        PL/SQL package whose return is an object with its own methods."""
+        node = recv
+        while (isinstance(node, A.Call)
+               and isinstance(node.callee, A.MemberAccess)):
+            node = node.callee.obj
+        return (isinstance(node, A.Call)
+                and isinstance(node.callee, A.Ident)
+                and "::" in node.callee.name
+                and node.callee.name not in self._project_signatures)
+
     def _emit_call_expr(self, e: A.Call) -> str:
         # Early check: the user wrote `pkg.fn(...)` (dot) when they
         # meant `pkg::fn(...)` (colon-colon). If pkg isn't a known
@@ -5619,6 +5649,14 @@ class Emitter:
                 recv_code = self._emit_expr(recv)
                 delim_code = self._emit_expr(e.args[0])
                 return f"pell_split_text({recv_code}, {delim_code})"
+            # Foreign-object chains — `ut::expect(x).to_equal(y)` and
+            # friends: the receiver is a call into a package pell didn't
+            # compile (utPLSQL, any hand-written PL/SQL returning an
+            # object). Its methods must dispatch natively
+            # (`recv.method(args)`), not UFCS — there is no free fn.
+            if self._is_foreign_object_chain(recv):
+                args_code = [self._emit_expr(a) for a in e.args]
+                return f"{self._emit_expr(recv)}.{method.lower()}({', '.join(args_code)})"
             # generic method call → free-function style with receiver as first arg
             args_code = [self._emit_expr(recv)] + [self._emit_expr(a) for a in e.args]
             return f"{method}({', '.join(args_code)})"
