@@ -2442,3 +2442,42 @@ def test_record_field_access_infers_decl_type():
     assert "l_from_id NUMBER;" in sql
     assert "l_memo VARCHAR2(4000);" in sql
     assert "TODO: inferred" not in sql
+
+
+def test_cross_pkg_list_arguments_adapt(tmp_path):
+    """Passing a list to a FOREIGN fn adapts to the callee's nominal
+    collection type — literals are lifted into a foreign-typed temp,
+    and locally-typed list locals transit-copy."""
+    import pell.emitter as E
+    from pell.parser import parse
+    lib = """
+        module strlib;
+        pub fn join(parts: list<text>, delim: text) -> text {
+            var acc: text = "";
+            for p_item in parts { acc = acc + p_item; }
+            return acc;
+        }
+    """
+    caller_src = """
+        module caller;
+        import strlib;
+        pub fn f() -> text {
+            let a = strlib::join(["x", "y"], "+");
+            var xs: list<text> = [];
+            xs.append("z");
+            let b = strlib::join(xs, "+");
+            return a + b;
+        }
+    """
+    lib_mod = parse(lib, "strlib.pell")
+    sigs = {}
+    for item in lib_mod.items:
+        if isinstance(item, __import__("pell.ast", fromlist=["A"]).FnDef) and item.is_pub:
+            sigs[f"strlib::{item.name}"] = item.return_type
+    mod = parse(caller_src, "caller.pell")
+    sql = E.emit(mod, project_signatures=sigs)
+    # literal arg: temp declared with the CALLEE's type
+    assert "strlib.t_text_list;" in sql
+    # local list arg: transit copy loop into a foreign-typed temp
+    assert "l_xs(l_xs.COUNT + 1) := 'z';" in sql
+    assert ":= l_xs(" in sql           # element copy from the local

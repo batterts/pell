@@ -3727,7 +3727,33 @@ class Emitter:
                     and a.type_name not in self._type_names
                     and self._resolve_struct_lit_record(a) is not None)
 
+        # Cross-package callee? PL/SQL collections are NOMINAL: the
+        # callee's `t_text_list` and ours are different types even with
+        # identical shapes. Lifted literals must be declared with the
+        # CALLEE's type, and list locals carrying a different nominal
+        # type need a transit copy.
+        foreign_qual: Optional[str] = None
+        if (isinstance(call.callee, A.Ident)
+                and "::" in call.callee.name
+                and call.callee.name in self._project_signatures
+                and not self._is_intrinsic_call(call.callee.name)):
+            segs = call.callee.name.split("::")
+            foreign_qual = self._qualify_pkg(".".join(segs[:-1]))
+
+        def _foreign_list_type(elem_pell: str) -> str:
+            return f"{foreign_qual}.t_{_safe(elem_pell.lower())}_list"
+
+        def _adaptable_list_ident(a: A.Expr) -> bool:
+            if foreign_qual is None or not isinstance(a, A.Ident):
+                return False
+            if a.name not in self._list_locals:
+                return False
+            expected = _foreign_list_type(self._list_locals[a.name])
+            actual = self._local_types.get(a.name, "")
+            return actual.lower() != expected.lower()
+
         if not any(isinstance(a, A.ListLit) or _liftable_struct(a)
+                   or _adaptable_list_ident(a)
                    for a in call.args):
             return [], call
         # Intrinsic callees (json::array, sql!{}, jq! macros, etc.)
@@ -3765,22 +3791,50 @@ class Emitter:
                         )
                 new_args.append(A.Ident(loc=arg.loc, name=tmp_name))
                 continue
+            # List local with the wrong nominal type for this callee:
+            # transit-copy into a temp declared with the CALLEE's
+            # collection type (dense 1..COUNT, matching how pell
+            # builds lists).
+            if _adaptable_list_ident(arg):
+                assert isinstance(arg, A.Ident)
+                src = self._emit_expr(arg)
+                expected = _foreign_list_type(self._list_locals[arg.name])
+                self._sql_var_counter += 1
+                tmp_name = f"pell_arg_{self._sql_var_counter}"
+                tmp = local_name(tmp_name)
+                self._decl(f"{tmp} {expected};")
+                idx = self._sql_var_counter
+                self._sql_var_counter += 1
+                pre_lines += [
+                    f"{indent}IF {src}.COUNT > 0 THEN",
+                    f"{indent}  FOR i_{idx} IN 1 .. {src}.COUNT LOOP",
+                    f"{indent}    {tmp}(i_{idx}) := {src}(i_{idx});",
+                    f"{indent}  END LOOP;",
+                    f"{indent}END IF;",
+                ]
+                new_args.append(A.Ident(loc=arg.loc, name=tmp_name))
+                continue
             if not isinstance(arg, A.ListLit):
                 new_args.append(arg)
                 continue
             elem_pell = self._infer_listlit_elem_type(arg)
             self._sql_var_counter += 1
             tmp_name = f"pell_arg_{self._sql_var_counter}"
-            elem_sql = self._lt(A.PrimType(loc=arg.loc, name=elem_pell))
-            list_type = f"t_{elem_pell}_list"
-            if list_type not in self._list_types_emitted:
-                self._list_type_decls.append(
-                    f"  TYPE {list_type} IS TABLE OF {elem_sql} "
-                    f"INDEX BY PLS_INTEGER;"
-                )
-                self._list_types_emitted.add(list_type)
             local_var = local_name(tmp_name)
-            self._decl(f"{local_var} {list_type};")
+            if foreign_qual is not None:
+                # Declare with the callee's nominal type — its spec
+                # already exposes t_<elem>_list for the param.
+                self._decl(f"{local_var} {_foreign_list_type(elem_pell)};")
+            else:
+                elem_sql = self._lt(A.PrimType(loc=arg.loc, name=elem_pell))
+                list_type = f"t_{elem_pell}_list"
+                if list_type not in self._list_types_emitted:
+                    self._list_type_decls.append(
+                        f"  TYPE {list_type} IS TABLE OF {elem_sql} "
+                        f"INDEX BY PLS_INTEGER;"
+                    )
+                    self._list_types_emitted.add(list_type)
+                self._decl(f"{local_var} {list_type};")
             for i, el in enumerate(arg.elements, start=1):
                 pre_lines.append(
                     f"{indent}{local_var}({i}) := {self._emit_expr(el)};"

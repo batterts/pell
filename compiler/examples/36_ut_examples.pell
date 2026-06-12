@@ -82,6 +82,15 @@ pub fn t_text_utils() {
     // split → join round-trip (join takes the list parameter directly)
     let parts = text_utils::split("a-b-c", "-");
     ut::expect(text_utils::join(parts, "+")).to_equal("a+b+c");
+    // cross-package list ARGUMENTS: a literal and a locally-built list
+    // both adapt to the callee's nominal collection type
+    let lit_join = text_utils::join(["x", "y", "z"], "-");
+    ut::expect(lit_join).to_equal("x-y-z");
+    var grown: list<text> = [];
+    grown.append("a");
+    grown.append("b");
+    let grown_line = csv::to_line(grown);
+    ut::expect(grown_line).to_equal("a,b");
 }
 
 @test("json_demo builds and reads nested documents")
