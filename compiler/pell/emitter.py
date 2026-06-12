@@ -2385,7 +2385,14 @@ class Emitter:
                 return "NUMBER"
             return None
         if isinstance(e, A.BinOp):
-            if e.op in ("+", "-", "*", "/", "%"):
+            if e.op == "+":
+                # Polymorphic +: text when either side is text (so chained
+                # `a + b + c` concats infer correctly), else numeric.
+                if (self._is_text_type(self._infer_expr_type(e.left))
+                        or self._is_text_type(self._infer_expr_type(e.right))):
+                    return "VARCHAR2(4000)"
+                return "NUMBER"
+            if e.op in ("-", "*", "/", "%"):
                 return "NUMBER"
             if e.op in ("==", "!=", "<", "<=", ">", ">=", "&&", "||"):
                 return "BOOLEAN"
@@ -2468,7 +2475,45 @@ class Emitter:
             return "NUMBER"
         return None
 
+    # Common Oracle scalar builtins, by the type they return. Lets the
+    # emitter declare `let x = upper(s)` as text instead of falling back
+    # to NUMBER + a "please annotate" TODO.
+    _BUILTIN_RETURN_TYPES: dict[str, str] = {
+        # text-returning
+        **{n: "VARCHAR2(4000)" for n in (
+            "upper", "lower", "initcap", "substr", "replace", "trim",
+            "ltrim", "rtrim", "lpad", "rpad", "concat", "translate",
+            "chr", "to_char", "nvl", "coalesce", "decode", "regexp_replace",
+            "regexp_substr", "soundex", "nls_initcap", "sys_guid",
+        )},
+        # number-returning
+        **{n: "NUMBER" for n in (
+            "length", "instr", "ascii", "round", "trunc", "floor", "ceil",
+            "mod", "abs", "sign", "power", "sqrt", "to_number", "nvl2",
+            "regexp_count", "bitand", "greatest", "least",
+        )},
+        # date-returning
+        **{n: "DATE" for n in ("sysdate", "trunc_date", "add_months",
+                               "last_day", "next_day", "to_date")},
+    }
+
     def _infer_call_type(self, call: A.Call) -> Optional[str]:
+        # Bare Oracle builtin (upper/replace/length/…) — return its known
+        # result type. Skipped when the name is a user fn in this module
+        # (those resolve through the normal free-fn path below) or a
+        # cross-package `::` call.
+        if (isinstance(call.callee, A.Ident)
+                and "::" not in call.callee.name
+                and call.callee.name.lower() in self._BUILTIN_RETURN_TYPES
+                and not any(f.name == call.callee.name for f in self._fns)):
+            # `nvl`/`coalesce`/`decode`/`greatest`/`least` are polymorphic —
+            # take the type from the first argument when we can infer it.
+            poly = {"nvl", "coalesce", "decode", "greatest", "least"}
+            if call.callee.name.lower() in poly and call.args:
+                arg_t = self._infer_expr_type(call.args[0])
+                if arg_t:
+                    return arg_t
+            return self._BUILTIN_RETURN_TYPES[call.callee.name.lower()]
         # Cross-package call into a fn we have a registered signature
         # for. Returns the foreign collection type for list returns
         # (e.g. "hello.t_text_list") so the local can be declared with
@@ -5138,9 +5183,27 @@ class Emitter:
         op = op_map.get(e.op, e.op)
         left = self._emit_expr(e.left)
         right = self._emit_expr(e.right)
+        # `+` is polymorphic: string concat when either operand is
+        # text-typed (modern-language ergonomics — `"n" + id`,
+        # `buf + piece`), arithmetic otherwise. Non-text operands in a
+        # concat are auto-stringified, so `"row " + n` Just Works.
+        if e.op == "+":
+            lt = self._infer_expr_type(e.left)
+            rt = self._infer_expr_type(e.right)
+            if self._is_text_type(lt) or self._is_text_type(rt):
+                l = self._auto_stringify(left, lt)
+                r = self._auto_stringify(right, rt)
+                return f"({l} || {r})"
         if op == "MOD":
             return f"MOD({left}, {right})"
         return f"({left} {op} {right})"
+
+    @staticmethod
+    def _is_text_type(pl_type: Optional[str]) -> bool:
+        if not pl_type:
+            return False
+        u = pl_type.upper()
+        return "VARCHAR" in u or "CHAR" in u or u == "CLOB"
 
     def _reduce_pipeline(self, pe: A.PipelineExpr) -> A.Expr:
         """Reduce `source |> target` to a non-pipeline AST node.

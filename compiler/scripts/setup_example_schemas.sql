@@ -78,6 +78,15 @@ BEGIN
 END;
 /
 
+-- Performance-introspection examples (stat_diff, table-stats reports,
+-- execution-plan visualizers) read the V$ dynamic views.
+GRANT SELECT ON SYS.V_$MYSTAT   TO PELL_TEST;
+GRANT SELECT ON SYS.V_$STATNAME TO PELL_TEST;
+GRANT SELECT ON SYS.V_$SESSTAT  TO PELL_TEST;
+GRANT SELECT ON SYS.V_$SESSION  TO PELL_TEST;
+GRANT SELECT ON SYS.V_$SQL      TO PELL_TEST;
+GRANT SELECT ON SYS.V_$SQL_PLAN TO PELL_TEST;
+
 -- Verify.
 PROMPT
 PROMPT Schemas created/confirmed. PELL_TEST can now deploy schema-qualified

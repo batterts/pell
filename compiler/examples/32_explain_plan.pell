@@ -1,0 +1,181 @@
+module explain_plan;
+
+import mermaid;
+import dbms_output;
+
+// ---------------------------------------------------------------------------
+// explain_plan — turn an Oracle execution plan into a readable picture.
+//
+// `EXPLAIN PLAN` fills PLAN_TABLE with a parent/child tree of operations.
+// Read raw it's a wall of indented text; this package renders it two ways:
+//
+//   as_mermaid(id)   -> a Mermaid flowchart (renders inline on GitHub,
+//                       wikis, and the IDE Markdown preview)
+//   as_tree(id)      -> an indented text tree, each step tagged with a
+//                       plain-English explanation of what it does
+//
+// Workflow:
+//   1. populate PLAN_TABLE — `explain_for(id, sql)` (dynamic) or run
+//      `EXPLAIN PLAN SET STATEMENT_ID='x' FOR <sql>` yourself.
+//   2. render — `p(explain_plan::as_tree('x'));`
+//                `p(explain_plan::as_mermaid('x'));`
+//
+// REPL taste:
+//   [1]> explain_plan::explain_for('q1', 'select * from emp where id=7');
+//   [2]> p(explain_plan::as_tree('q1'));
+//   [3]> p(mermaid::fence(explain_plan::as_mermaid('q1')));
+// ---------------------------------------------------------------------------
+
+// Plain-English gloss for an operation/options pair. Covers the common
+// row sources; falls back to echoing the raw operation so nothing is ever
+// unexplained.
+pub fn explain_op(operation: text, options: text) -> text {
+    let op = upper(operation);
+    let opt = upper(options);
+    if op == "SELECT STATEMENT" { return "The query result."; }
+    if op == "TABLE ACCESS" && opt == "FULL" {
+        return "Reads every row of the table (full scan) — fine for small tables, costly for big ones.";
+    }
+    if op == "TABLE ACCESS" && opt.contains("ROWID") {
+        return "Fetches table rows directly by rowid, handed up from an index.";
+    }
+    if op == "INDEX" && opt == "UNIQUE SCAN" {
+        return "Pinpoints a single row through a unique index — the fastest lookup.";
+    }
+    if op == "INDEX" && opt.contains("RANGE") {
+        return "Walks a contiguous range of index entries.";
+    }
+    if op == "INDEX" && opt.contains("FULL") {
+        return "Scans the whole index in order.";
+    }
+    if op == "INDEX" && opt.contains("SKIP") {
+        return "Uses a composite index without its leading column (skip scan).";
+    }
+    if op == "NESTED LOOPS" {
+        return "For each row from the first input, probes the second — good when the first input is small.";
+    }
+    if op == "HASH JOIN" {
+        return "Builds a hash table from one input, then probes it with the other — good for large joins.";
+    }
+    if op == "MERGE JOIN" {
+        return "Merges two already-sorted inputs.";
+    }
+    if op == "SORT" && opt == "ORDER BY" {
+        return "Sorts rows to satisfy ORDER BY.";
+    }
+    if op == "SORT" && opt.contains("AGGREGATE") {
+        return "Collapses all rows into one aggregate (COUNT/SUM/…).";
+    }
+    if op == "SORT" && opt.contains("UNIQUE") {
+        return "Sorts and removes duplicates (DISTINCT / set op).";
+    }
+    if op == "HASH" && opt.contains("GROUP") {
+        return "Groups rows with a hash table for GROUP BY.";
+    }
+    if op == "SORT" && opt.contains("GROUP") {
+        return "Groups rows by sorting them for GROUP BY.";
+    }
+    if op == "FILTER" {
+        return "Keeps only rows passing a predicate.";
+    }
+    if op == "COUNT" {
+        return "Counts / numbers rows (e.g. ROWNUM).";
+    }
+    if op == "VIEW" {
+        return "Materializes an inline view or subquery.";
+    }
+    if op == "PARTITION RANGE" {
+        return "Prunes to the relevant table partitions.";
+    }
+    if op == "CONNECT BY" {
+        return "Walks a hierarchy (CONNECT BY).";
+    }
+    return operation;
+}
+
+// A short, stable CSS class for an operation — drives node colour in the
+// Mermaid output. Full scans get flagged (often the thing to fix).
+fn op_class(operation: text, options: text) -> text {
+    let op = upper(operation);
+    let opt = upper(options);
+    if op == "TABLE ACCESS" && opt == "FULL" { return "fullscan"; }
+    if op == "INDEX" { return "index"; }
+    if op.contains("JOIN") || op == "NESTED LOOPS" { return "join"; }
+    return "plain";
+}
+
+// Render the plan in PLAN_TABLE under `stmt_id` as a Mermaid flowchart.
+// Each node shows the operation, object, estimated rows and cost; edges
+// run parent → child. Colour flags full table scans.
+pub fn as_mermaid(stmt_id: text) -> text {
+    var buf: text = mermaid::flowchart("TD");
+    buf = buf + mermaid::class_def("fullscan", "fill:#ffe0e0,stroke:#cc0000");
+    buf = buf + mermaid::class_def("index", "fill:#e0ffe0,stroke:#009900");
+    buf = buf + mermaid::class_def("join", "fill:#e0e8ff,stroke:#3355cc");
+    for row in sql! {
+        select id,
+               nvl(parent_id, -1) as parent_id,
+               operation,
+               nvl(options, ' ') as options,
+               operation
+                 || case when options is not null then ' ' || options else '' end
+                 || case when object_name is not null then chr(10) || object_name else '' end
+                 || case when cardinality is not null then chr(10) || 'rows=' || cardinality else '' end
+                 || case when cost is not null then ' cost=' || cost else '' end
+                 as label
+          from plan_table
+         where statement_id = :stmt_id
+         order by id
+    } {
+        let nid = "n{row.id}";
+        buf = buf + mermaid::node(nid, row.label);
+        buf = buf + mermaid::classify(nid, op_class(row.operation, row.options));
+        if row.parent_id >= 0 {
+            buf = buf + mermaid::link("n{row.parent_id}", nid);
+        }
+    }
+    return buf;
+}
+
+// Render the plan as an indented text tree, each line tagged with a
+// plain-English explanation. PLAN_TABLE.depth gives the indentation.
+pub fn as_tree(stmt_id: text) -> text {
+    var buf: text = "";
+    for row in sql! {
+        select depth,
+               operation,
+               nvl(options, ' ') as options,
+               rpad(' ', depth * 2, ' ') as indent,
+               operation
+                 || case when options is not null then ' ' || options else '' end
+                 || case when object_name is not null then ' ' || object_name else '' end
+                 || case when cardinality is not null then ' (rows=' || cardinality else '' end
+                 || case when cost is not null then ' cost=' || cost || ')'
+                         when cardinality is not null then ')' else '' end
+                 as step
+          from plan_table
+         where statement_id = :stmt_id
+         order by id
+    } {
+        buf = buf + row.indent + row.step + chr(10);
+        buf = buf + row.indent + "    -> " + explain_op(row.operation, row.options) + chr(10);
+    }
+    return buf;
+}
+
+// Convenience: populate PLAN_TABLE for `query` under `stmt_id` (clearing
+// any previous rows), so `as_mermaid` / `as_tree` can render it. Dynamic
+// because the analysed statement is supplied at runtime — hence `unsafe`.
+@touches(plan_table)
+pub unsafe fn explain_for(stmt_id: text, query: text) {
+    exec_dyn("delete from plan_table where statement_id = '{stmt_id}'");
+    exec_dyn("explain plan set statement_id = '{stmt_id}' for {query}");
+}
+
+// One-shot: explain `query` and print both renderings to DBMS_OUTPUT.
+@touches(plan_table)
+pub unsafe fn show(query: text) {
+    explain_for("pell_show", query);
+    dbms_output::put_line(as_tree("pell_show"));
+    dbms_output::put_line(mermaid::fence(as_mermaid("pell_show")));
+}

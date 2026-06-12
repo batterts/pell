@@ -1,0 +1,87 @@
+module mermaid;
+
+// ---------------------------------------------------------------------------
+// mermaid — build Mermaid.js diagram source from PL/SQL.
+//
+// Mermaid (https://mermaid.js.org) renders text into diagrams. GitHub,
+// many wikis, and most Markdown viewers render a fenced ```mermaid block
+// inline — so a pell fn that returns mermaid text turns query output,
+// execution plans, dependency graphs, and state machines into pictures
+// with zero tooling.
+//
+// This package is the low-level builder: small pure fns that produce the
+// individual lines. Higher-level packages (see explain_plan) assemble
+// them. Nothing here touches the database.
+//
+// Quick taste:
+//   let d = mermaid::flowchart("TD")
+//         + mermaid::node("a", "Start")
+//         + mermaid::node("b", "Done")
+//         + mermaid::link("a", "b");
+//   p(mermaid::fence(d));
+// ---------------------------------------------------------------------------
+
+// Newline — Mermaid is line-oriented. Kept as a fn so callers compose
+// with `+` without sprinkling chr(10) everywhere.
+fn nl() -> text {
+    return chr(10);
+}
+
+// Escape a label for the inside of a node. Mermaid chokes on raw double
+// quotes and square brackets inside labels; the safe form wraps the text
+// in quotes and replaces the troublemakers. Also collapses newlines to
+// the Mermaid line-break entity so multi-line labels render.
+pub fn esc(label: text) -> text {
+    let no_quote = replace(label, chr(34), chr(39));        // " -> '
+    let no_lbrack = replace(no_quote, "[", "(");
+    let no_rbrack = replace(no_lbrack, "]", ")");
+    return replace(no_rbrack, chr(10), "<br/>");
+}
+
+// Diagram header. `direction` is one of TD (top-down), LR (left-right),
+// BT, RL. Returns e.g. "flowchart TD\n".
+pub fn flowchart(direction: text) -> text {
+    return "flowchart " + direction + nl();
+}
+
+// A rectangular node:  id["label"]
+pub fn node(id: text, label: text) -> text {
+    return "    " + id + "[\"" + esc(label) + "\"]" + nl();
+}
+
+// A rounded node:  id("label")  — good for start/end states.
+pub fn rounded(id: text, label: text) -> text {
+    return "    " + id + "(\"" + esc(label) + "\")" + nl();
+}
+
+// A decision node:  id{"label"}  — diamond, for branches. (chr(123)/
+// chr(125) are `{`/`}` — literal braces would start pell interpolation.)
+pub fn decision(id: text, label: text) -> text {
+    return "    " + id + chr(123) + "\"" + esc(label) + "\"" + chr(125) + nl();
+}
+
+// A plain edge:  a --> b
+pub fn link(from_id: text, to_id: text) -> text {
+    return "    " + from_id + " --> " + to_id + nl();
+}
+
+// A labeled edge:  a -->|label| b
+pub fn link_labeled(from_id: text, to_id: text, label: text) -> text {
+    return "    " + from_id + " -->|" + esc(label) + "| " + to_id + nl();
+}
+
+// Assign a node to a CSS-like class for styling:  class id cls
+pub fn classify(id: text, cls: text) -> text {
+    return "    class " + id + " " + cls + nl();
+}
+
+// Define a style class:  classDef name <css>
+pub fn class_def(name: text, css: text) -> text {
+    return "    classDef " + name + " " + css + nl();
+}
+
+// Wrap a diagram body in a ```mermaid fence so it renders inline in
+// Markdown (GitHub, wikis, IDE preview).
+pub fn fence(body: text) -> text {
+    return "```mermaid" + nl() + body + "```";
+}

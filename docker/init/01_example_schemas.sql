@@ -50,6 +50,15 @@ GRANT CREATE ANY PROCEDURE, ALTER ANY PROCEDURE, DROP ANY PROCEDURE,
 -- A couple of examples reference DBMS_LOCK (retry/backoff sleeps).
 GRANT EXECUTE ON SYS.DBMS_LOCK TO pell_test;
 
+-- Performance-introspection examples (stat_diff, table-stats reports,
+-- execution-plan visualizers) read the V$ dynamic views.
+GRANT SELECT ON SYS.V_$MYSTAT   TO pell_test;
+GRANT SELECT ON SYS.V_$STATNAME TO pell_test;
+GRANT SELECT ON SYS.V_$SESSTAT  TO pell_test;
+GRANT SELECT ON SYS.V_$SESSION  TO pell_test;
+GRANT SELECT ON SYS.V_$SQL      TO pell_test;
+GRANT SELECT ON SYS.V_$SQL_PLAN TO pell_test;
+
 -- Debugger support: the pell debugger has the database session connect
 -- OUT to the IDE's JDWP listener (DBMS_DEBUG_JDWP.CONNECT_TCP — same
 -- mechanism SQL Developer uses). That needs the session privilege plus
