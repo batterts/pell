@@ -36,6 +36,7 @@ class PellSettingsConfigurable(private val project: Project) : Configurable {
 
     private val settings = PellSettings.getInstance(project)
     private val targetDirField = JBTextField(settings.targetDirName, 20)
+    private val dbUrlField = JBTextField(settings.dbUrl, 30)
     private val jdwpPortField = JBTextField(settings.debugJdwpPort, 8)
     private val callbackHostField = JBTextField(settings.debugCallbackHost, 20)
     private val transportField = javax.swing.JComboBox(arrayOf("jdwp", "sql")).apply {
@@ -58,6 +59,16 @@ class PellSettingsConfigurable(private val project: Project) : Configurable {
                     "Where the lowered PL/SQL is written (relative to the project root). " +
                     "The split editor writes <code>&lt;name&gt;.sql</code> here on save; " +
                     "<code>pell deploy</code> reads from here. Default: <code>plsql</code>."
+                )
+            }
+            group("Database") {
+                row("DB URL:") {
+                    cell(dbUrlField).align(AlignX.FILL)
+                }.rowComment(
+                    "Default <code>PELL_DB_URL</code> for everything the plugin runs " +
+                    "(exec, deploy, REPL target, debugger): " +
+                    "<code>user/pass@host:port/service</code>. Blank = inherit from the " +
+                    "IDE's environment. Per-run-config environment variables override this."
                 )
             }
             group("Debugger") {
@@ -189,6 +200,7 @@ class PellSettingsConfigurable(private val project: Project) : Configurable {
 
     override fun isModified(): Boolean =
         targetDirField.text.trim() != settings.targetDirName ||
+        dbUrlField.text.trim() != settings.dbUrl ||
         jdwpPortField.text.trim() != settings.debugJdwpPort ||
         callbackHostField.text.trim() != settings.debugCallbackHost ||
         (transportField.selectedItem as String) != settings.debugTransport
@@ -207,12 +219,14 @@ class PellSettingsConfigurable(private val project: Project) : Configurable {
             throw ConfigurationException("JDWP listener port must be 1-65535 (or blank)")
         settings.debugJdwpPort = port
         settings.debugCallbackHost = callbackHostField.text.trim()
+        settings.dbUrl = dbUrlField.text.trim()
         settings.debugTransport = transportField.selectedItem as String
     }
 
     override fun reset() {
         targetDirField.text = settings.targetDirName
         jdwpPortField.text = settings.debugJdwpPort
+        dbUrlField.text = settings.dbUrl
         callbackHostField.text = settings.debugCallbackHost
         transportField.selectedItem = settings.debugTransport
     }

@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.8.1</version>
+    <version>0.8.2</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,14 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.8.2 — per-config environment variables + DB URL setting</h3>
+        <ul><li>Run configurations now have an Environment field (the
+        standard env-vars editor) — set <code>PELL_DB_URL</code> per
+        config to target different databases. Settings → Tools → pell
+        also gained a project-default DB URL. Precedence: run-config
+        env &gt; settings DB URL &gt; the IDE's inherited environment.
+        Applies to exec/build runs and both debugger transports.</li></ul>
+
         <h3>0.8.1 — debugger settings in the UI</h3>
         <ul><li>Settings → Tools → pell now has the debugger knobs:
         transport (jdwp/sql), fixed JDWP listener port, and callback

@@ -197,6 +197,7 @@ class PellDebugProcess(
             val cmd = GeneralCommandLine(exe.absolutePath)
                 .withParameters("debug-target", script, "--jdwp", "$callback:$port", "--wait-for-go")
                 .withWorkDirectory(workDir)
+                .withEnvironment(PellCli.env(config, project))
                 .withCharset(Charsets.UTF_8)
             val handler = OSProcessHandler(cmd)
             processHandler = handler
@@ -582,10 +583,11 @@ class PellDebugProcess(
 
     private fun runPell(exe: File, vararg args: String): Pair<Int, String> {
         return try {
-            val p = ProcessBuilder(listOf(exe.absolutePath) + args)
+            val pb = ProcessBuilder(listOf(exe.absolutePath) + args)
                 .directory(workDir)
                 .redirectErrorStream(true)
-                .start()
+            pb.environment().putAll(PellCli.env(config, project))
+            val p = pb.start()
             val out = p.inputStream.bufferedReader().readText()
             p.waitFor(180, TimeUnit.SECONDS)
             p.exitValue() to out

@@ -1,5 +1,7 @@
 package dev.pell.intellij.run
 
+import com.intellij.execution.configuration.EnvironmentVariablesComponent
+import com.intellij.execution.configuration.EnvironmentVariablesData
 import com.intellij.openapi.options.SettingsEditor
 import com.intellij.ui.components.JBTextField
 import com.intellij.ui.dsl.builder.AlignX
@@ -23,6 +25,7 @@ class PellRunConfigurationEditor : SettingsEditor<PellRunConfiguration>() {
     private val filePathField = JBTextField()
     private val extraArgsField = JBTextField()
     private val pellHomeField = JBTextField()
+    private val envField = EnvironmentVariablesComponent()
 
     // Action dropdown — value is the actual CLI string to invoke.
     private val actions: Array<String> = arrayOf(
@@ -51,6 +54,14 @@ class PellRunConfigurationEditor : SettingsEditor<PellRunConfiguration>() {
         row("pell home:") {
             cell(pellHomeField).align(AlignX.FILL)
         }.rowComment("Optional. Repo root holding the `pell` script. Defaults to the project root.")
+
+        row("Environment:") {
+            cell(envField).align(AlignX.FILL)
+        }.rowComment(
+            "Passed to the spawned pell processes. Set <code>PELL_DB_URL</code> here to " +
+            "target a specific database per configuration — wins over the settings-page " +
+            "default and the IDE's inherited environment."
+        )
     }
 
     override fun createEditor(): JComponent = component
@@ -60,6 +71,7 @@ class PellRunConfigurationEditor : SettingsEditor<PellRunConfiguration>() {
         extraArgsField.text = c.extraArgs.orEmpty()
         pellHomeField.text = c.pellHome.orEmpty()
         actionCombo.selectedItem = c.action
+        envField.envData = EnvironmentVariablesData.create(c.envVars, true)
     }
 
     override fun applyEditorTo(c: PellRunConfiguration) {
@@ -67,5 +79,6 @@ class PellRunConfigurationEditor : SettingsEditor<PellRunConfiguration>() {
         c.extraArgs = extraArgsField.text.takeIf { it.isNotBlank() }
         c.pellHome = pellHomeField.text.takeIf { it.isNotBlank() }
         c.action = (actionCombo.selectedItem as? String) ?: "exec"
+        c.envVars = envField.envData.envs
     }
 }

@@ -48,6 +48,10 @@ class PellSettings : PersistentStateComponent<PellSettings.State> {
         /** Debugger transport: "jdwp" (default) or "sql" (outbound-only
          *  via DBMS_DEBUG — for tunnels/NAT/no-ACL instances). */
         var debugTransport: String = "jdwp",
+        /** Default PELL_DB_URL for spawned pell processes. Blank =
+         *  inherit from the IDE's environment. Per-run-config env
+         *  vars override this. */
+        var dbUrl: String = "",
     )
 
     private var state = State()
@@ -75,6 +79,10 @@ class PellSettings : PersistentStateComponent<PellSettings.State> {
     var debugTransport: String
         get() = state.debugTransport.trim().ifBlank { "jdwp" }
         set(value) { state.debugTransport = value.trim().lowercase().ifBlank { "jdwp" } }
+
+    var dbUrl: String
+        get() = state.dbUrl.trim()
+        set(value) { state.dbUrl = value.trim() }
 
     companion object {
         @JvmStatic

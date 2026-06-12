@@ -106,8 +106,10 @@ class PellSqlDebugProcess(
 
             val deployPath = config.options.deployPath ?: script
             console("pell debugger (sql transport): deploying $deployPath with --debug ...")
+            val env = PellCli.env(config, project)
             val deploy = PellCli.run(exe, workDir, "deploy", deployPath, "--debug",
-                                     "--out-dir", File(workDir, ".pell-debug/out").absolutePath)
+                                     "--out-dir", File(workDir, ".pell-debug/out").absolutePath,
+                                     extraEnv = env)
             if (deploy.first != 0) {
                 console("deploy --debug failed (continuing):\n${deploy.second}",
                         ConsoleViewContentType.ERROR_OUTPUT)
@@ -121,10 +123,11 @@ class PellSqlDebugProcess(
                 }
             }
 
-            val p = ProcessBuilder(exe.absolutePath, "debug-serve", script)
+            val servePb = ProcessBuilder(exe.absolutePath, "debug-serve", script)
                 .directory(workDir)
                 .redirectErrorStream(false)
-                .start()
+            servePb.environment().putAll(env)
+            val p = servePb.start()
             serve = p
             stdin = OutputStreamWriter(p.outputStream, Charsets.UTF_8)
             Thread({ p.errorStream.bufferedReader().forEachLine { /* diagnostics */ } },
@@ -365,6 +368,17 @@ class PellSqlDebugProcess(
 
 /** Shared pell CLI resolution + invocation. */
 object PellCli {
+    /** Process environment for spawned pell tools: run-config env vars
+     *  win, then the settings-page DB URL, then the IDE's inherited
+     *  environment (ProcessBuilder supplies that part itself). */
+    fun env(config: PellRunConfiguration, project: Project): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        val dbUrl = dev.pell.intellij.settings.PellSettings.getInstance(project).dbUrl
+        if (dbUrl.isNotBlank()) out["PELL_DB_URL"] = dbUrl
+        out.putAll(config.envVars)
+        return out
+    }
+
     fun resolve(config: PellRunConfiguration, project: Project): File? {
         config.pellHome?.takeIf { it.isNotBlank() }?.let { home ->
             File(home, "pell").takeIf { it.canExecute() }?.let { return it }
@@ -380,11 +394,13 @@ object PellCli {
         return null
     }
 
-    fun run(exe: File, workDir: File, vararg args: String): Pair<Int, String> = try {
-        val p = ProcessBuilder(listOf(exe.absolutePath) + args)
+    fun run(exe: File, workDir: File, vararg args: String,
+            extraEnv: Map<String, String> = emptyMap()): Pair<Int, String> = try {
+        val pb = ProcessBuilder(listOf(exe.absolutePath) + args)
             .directory(workDir)
             .redirectErrorStream(true)
-            .start()
+        pb.environment().putAll(extraEnv)
+        val p = pb.start()
         val out = p.inputStream.bufferedReader().readText()
         p.waitFor(180, TimeUnit.SECONDS)
         p.exitValue() to out

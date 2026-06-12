@@ -44,6 +44,13 @@ class PellRunConfiguration(
         get() = options.pellHome
         set(v) { options.pellHome = v }
 
+    var envVars: Map<String, String>
+        get() = options.envVars
+        set(v) {
+            options.envVars.clear()
+            options.envVars.putAll(v)
+        }
+
     override fun getConfigurationEditor(): SettingsEditor<out RunConfiguration> =
         PellRunConfigurationEditor()
 

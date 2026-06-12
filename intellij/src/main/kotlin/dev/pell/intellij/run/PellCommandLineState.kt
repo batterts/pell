@@ -63,9 +63,16 @@ class PellCommandLineState(
             args += it.split(Regex("\\s+")).filter { token -> token.isNotBlank() }
         }
 
+        // Env: run-config vars win, then the settings-page DB URL,
+        // then the IDE's inherited environment.
+        val extraEnv = LinkedHashMap<String, String>()
+        dev.pell.intellij.settings.PellSettings.getInstance(config.project)
+            .dbUrl.takeIf { it.isNotBlank() }?.let { extraEnv["PELL_DB_URL"] = it }
+        extraEnv.putAll(config.envVars)
         val cmd = GeneralCommandLine(pellExe.absolutePath)
             .withParameters(args)
             .withWorkDirectory(pellExe.parentFile)
+            .withEnvironment(extraEnv)
             .withCharset(Charsets.UTF_8)
 
         val handler = OSProcessHandler(cmd)

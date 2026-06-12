@@ -27,4 +27,9 @@ class PellRunConfigurationOptions : LocatableRunConfigurationOptions() {
     /** What `pell deploy --debug` deploys before a debug session — the
      *  module file the debug stub calls into. Defaults to filePath. */
     var deployPath: String? by string()
+
+    /** Environment variables for the spawned pell processes (exec,
+     *  debug-target, debug-serve, deploy). Win over the IDE's
+     *  inherited environment and the settings-page DB URL. */
+    var envVars: MutableMap<String, String> by map()
 }
