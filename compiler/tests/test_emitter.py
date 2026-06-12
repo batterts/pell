@@ -2425,3 +2425,20 @@ def test_for_over_list_parameter():
     assert "i_c := p_cells.FIRST;" in sql
     assert "p_cells.NEXT(i_c)" in sql
     assert "l_cells" not in sql
+
+
+def test_record_field_access_infers_decl_type():
+    """`let x = args.field;` infers the field's declared type — no
+    `-- TODO: inferred` fallback for record member access."""
+    sql = compile_to_sql("""
+        module m;
+        pub record Transfer { from_id: number, memo: text }
+        pub fn f(args: Transfer) -> text {
+            let from_id = args.from_id;
+            let memo = args.memo;
+            return memo;
+        }
+    """)
+    assert "l_from_id NUMBER;" in sql
+    assert "l_memo VARCHAR2(4000);" in sql
+    assert "TODO: inferred" not in sql

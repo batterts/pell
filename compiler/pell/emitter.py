@@ -2546,6 +2546,50 @@ class Emitter:
             and value.field in ("nextval", "currval")
         ):
             return "NUMBER"
+        # `args.field` — record field access on a record-typed param,
+        # local, or loop var: the declared field type is the answer.
+        if isinstance(value, A.MemberAccess) and isinstance(value.obj, A.Ident):
+            ft = self._record_field_type(value.obj.name, value.field)
+            if ft is not None:
+                return ft
+        return None
+
+    def _record_field_type(self, ident: str, field: str) -> Optional[str]:
+        """PL/SQL type of `<ident>.<field>` when `ident` resolves to a
+        record-typed parameter, local, or loop variable. None otherwise."""
+        rec: Optional[A.RecordDef] = None
+        # Parameter of the current fn.
+        if self._current_fn is not None:
+            for p in self._current_fn.params:
+                if p.name == ident and isinstance(p.type_ref, A.NamedType):
+                    rec = self._lookup_record(p.type_ref.name)
+                    break
+        # Loop variable (`for r in rows`) — tracked by pell-surface name.
+        if rec is None:
+            pell_t = self._loop_var_types.get(ident)
+            if pell_t and pell_t[:1].isupper():
+                rec = self._lookup_record(pell_t)
+        # Declared local — _local_types holds the LOWERED name
+        # (t_transfer, or pkg.t_transfer when foreign); match it back
+        # to a record def by its lowered spelling.
+        if rec is None:
+            pl_t = self._local_types.get(ident)
+            if pl_t:
+                base = pl_t.split(".")[-1]
+                for r in self._records:
+                    if _record_type_name(r.name) == base:
+                        rec = r
+                        break
+                if rec is None:
+                    for r in self._project_records.values():
+                        if _record_type_name(r.name) == base:
+                            rec = r
+                            break
+        if rec is None:
+            return None
+        for f in rec.fields:
+            if f.name == field:
+                return self._lt(f.type_ref)
         return None
 
     # Common Oracle scalar builtins, by the type they return. Lets the
