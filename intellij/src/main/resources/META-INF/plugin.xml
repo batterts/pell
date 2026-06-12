@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.8.7</version>
+    <version>0.8.8</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,17 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.8.8 — module-less scripts are first-class</h3>
+        <ul><li>A .pell file without a <code>module</code> declaration is
+        now a <b>script</b> (top-level statements — debug stubs, REPL
+        snippets, <code>pell exec</code> files) everywhere: the PSI
+        grammar accepts it (no more "module expected" red squiggles) and
+        the LSP validates it through the same anonymous-block path
+        <code>pell exec</code> uses. No marker annotation, no separate
+        file extension — if it starts with <code>module</code> it's a
+        package, otherwise it's a script. Restart the pell LSP server
+        after updating.</li></ul>
+
         <h3>0.8.7 — debugger restart + stub-preview fixes</h3>
         <ul><li><b>Restarting a debug session on a pinned port</b> no
         longer fails with "Already listening" — the stale listener is

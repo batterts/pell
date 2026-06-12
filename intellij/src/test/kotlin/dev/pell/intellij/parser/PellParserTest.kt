@@ -34,4 +34,5 @@ class PellParserTest : ParsingTestCase(
     fun testTurbofish() = doTest(true)
     fun testStructLit() = doTest(true)
     fun testQualifiedExpr() = doTest(true)
+    fun testScriptFile() = doTest(true)
 }

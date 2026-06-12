@@ -20,19 +20,19 @@ from lsprotocol import types as lsp
 # Imports from the compiler package — wrapper script puts compiler/ on PYTHONPATH.
 from pell import ast as A
 from pell.emitter import (
-    EmitError, emit, lower_type, scan_project_records,
+    EmitError, emit, emit_anon_block, lower_type, scan_project_records,
     scan_project_definitions, scan_project_references,
     scan_project_modules,
     _render_type,
 )
 from pell.lexer import LexError
-from pell.parser import ParseError, parse
+from pell.parser import ParseError, parse, parse_cell
 
 from . import semantic_tokens as _semtok
 
 
 SERVER_NAME = "pell-lsp"
-SERVER_VERSION = "0.6.0"
+SERVER_VERSION = "0.7.0"
 
 logger = logging.getLogger(SERVER_NAME)
 
@@ -145,12 +145,38 @@ def on_did_change_configuration(
     return None
 
 
+def _is_script(src: str) -> bool:
+    """True when the file is a module-less script (top-level statements
+    — debug stubs, REPL snippets, `pell exec` files). The first
+    non-comment line of a package file starts with `module` or an
+    annotation; anything else is script content."""
+    for line in src.splitlines():
+        t = line.strip()
+        if not t or t.startswith("//"):
+            continue
+        return not (t.startswith("module") or t.startswith("@"))
+    return False
+
+
 def _validate(uri: str) -> None:
     doc = server.workspace.get_text_document(uri)
     src = doc.source
     diagnostics: list[lsp.Diagnostic] = []
     module: Optional[A.Module] = None
     try:
+        if _is_script(src):
+            # Scripts lower to an anonymous block — validate through the
+            # same path `pell exec` uses so diagnostics match runtime.
+            items, stmts = parse_cell(src, doc.path or uri)
+            sigs, recs, _defs, _refs, _mods = _get_project_ctx(doc.path)
+            emit_anon_block(items, stmts, source_path=doc.path or uri,
+                            project_signatures=sigs, project_records=recs,
+                            project_modules=_mods)
+            _cache[uri] = None
+            server.text_document_publish_diagnostics(
+                lsp.PublishDiagnosticsParams(uri=uri, diagnostics=diagnostics)
+            )
+            return
         module = parse(src, doc.path or uri)
         # Run the emitter so EmitError-level checks (unused returns,
         # bare pure expressions, type mismatches, missing fields,

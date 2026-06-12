@@ -1,0 +1,9 @@
+// A module-less script — debug stub / REPL snippet / exec file.
+import json_demo;
+
+let j = json_demo::build_simple();
+p("{j}");
+
+for i in 1..=3 {
+    p("{i}");
+}

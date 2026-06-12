@@ -160,7 +160,17 @@
 
 // Module-level annotations (`@stub`, `@open`) may precede the module
 // declaration — mirrors the Python parser's parse_module.
-pellFile ::= annotation * moduleDecl item *
+// moduleDecl is optional: a file without one is a SCRIPT (top-level
+// statements — debug stubs, REPL snippets, `pell exec` files), which
+// lowers to an anonymous block. Scripts mix items (imports, fns,
+// records) with top-level statements, so both are accepted here —
+// mirrors the python parser's parse()/parse_cell() split; the LSP
+// routes by the same first-token rule.
+// stmt is tried FIRST: item carries recoverWhile, and a failed item
+// attempt at a stmt-leading token (let/if/for/…) would consume it as
+// an error before stmt could match. No stmt starts with an item
+// keyword, so module files are unaffected.
+pellFile ::= annotation * moduleDecl ? (stmt | item) *
 
 moduleDecl ::= KW_MODULE moduleName SEMI { pin = 1 }
 // `module [schema::] a.b.c;` — optional `IDENT ::` schema prefix, then
@@ -200,9 +210,14 @@ loopVarName   ::= IDENT
 // a fn-only modifier so it lives inside fnDef itself, not at item level.
 
 item ::= annotation * KW_PUB ? itemBody { recoverWhile = item_recover }
+// Stmt-start tokens included so item recovery stops at script
+// statements (scripts interleave items and stmts at top level).
 private item_recover ::= !(KW_PUB | KW_FN | KW_RECORD | KW_ERROR | KW_TYPE
                           | KW_SEALED | KW_AGGREGATE | KW_SEQ | KW_ENUM
-                          | KW_IMPORT | KW_UNSAFE | AT)
+                          | KW_IMPORT | KW_UNSAFE | AT
+                          | KW_LET | KW_VAR | KW_RETURN | KW_IF | KW_FOR
+                          | KW_FORALL | KW_MATCH | KW_TRANSACTION | KW_YIELD
+                          | KW_SELF | IDENT)
 
 private itemBody ::= importStmt
                    | fnDef

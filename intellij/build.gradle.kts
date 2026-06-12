@@ -26,7 +26,7 @@ plugins {
 }
 
 group = "dev.pell"
-version = "0.8.7"
+version = "0.8.8"
 
 repositories {
     mavenCentral()
