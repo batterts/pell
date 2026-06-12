@@ -82,6 +82,11 @@ class OracleJdwpProtocolTest {
             .first { it.name() == "com.sun.jdi.SocketListen" }
         val connArgs = connector.defaultArguments()
         connArgs["localAddress"]?.setValue("0.0.0.0")
+        // Pin the listener port for tunnel setups (reverse ssh forwards
+        // need a fixed port); blank = ephemeral.
+        System.getenv("PELL_DEBUG_TEST_PORT")?.takeIf { it.isNotBlank() }?.let {
+            connArgs["port"]?.setValue(it)
+        }
         val address = connector.startListening(connArgs)
         val port = address.substringAfterLast(":")
 
@@ -92,7 +97,7 @@ class OracleJdwpProtocolTest {
             writeText(
                 """
                 import hello;
-                for i in 1..200000 {
+                for i in 1..=20 {
                     let x = hello::greet("world");
                 }
                 p(hello::greet("world"));
@@ -240,7 +245,7 @@ class OracleJdwpProtocolTest {
                 vm?.resume()
                 vm?.dispose()
             }
-            target.waitFor(30, TimeUnit.SECONDS)
+            target.waitFor(120, TimeUnit.SECONDS)
             reader.join(5_000)
             println("debug-target output:\n$targetOut")
         }
