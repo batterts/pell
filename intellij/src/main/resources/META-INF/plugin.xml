@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.8.8</version>
+    <version>0.8.9</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,23 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.8.9 — readable values over JDWP, pell names, pell-sized steps</h3>
+        <ul><li><b>Scalar values now read correctly over JDWP.</b> Oracle's
+        variable mirrors carry the value in a <code>_value</code> field
+        (they have no methods at all — the prior toString approach could
+        never work). <code>name = "world"</code> instead of
+        <code>{opaque}</code>.</li>
+        <li><b>Variables show pell names</b> — <code>name</code>, not
+        <code>P_NAME</code>; <code>j</code>, not <code>L_J</code> — on
+        both transports.</li>
+        <li><b>Steps are pell-sized.</b> One pell statement can lower to
+        dozens of PL/SQL rows; step over/into/out now advance until the
+        mapped <i>pell line</i> changes. Raw PL/SQL-granular stepping
+        still applies automatically inside units with no pell source.</li>
+        <li>The execution marker in the deployed .sql gained a gutter
+        arrow + guaranteed-visible band (some themes render the standard
+        execution color background-less).</li></ul>
+
         <h3>0.8.8 — module-less scripts are first-class</h3>
         <ul><li>A .pell file without a <code>module</code> declaration is
         now a <b>script</b> (top-level statements — debug stubs, REPL

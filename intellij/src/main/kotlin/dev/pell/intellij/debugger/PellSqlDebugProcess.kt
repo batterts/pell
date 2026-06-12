@@ -65,6 +65,14 @@ class PellSqlDebugProcess(
 
     // request/response: locals replies land in this future
     @Volatile private var localsFuture: CompletableFuture<List<Pair<String, String?>>>? = null
+
+    // Active pell-granular step: keep re-sending the step command while
+    // the suspend event maps to the SAME pell line (pell statements span
+    // many PL/SQL rows). Unmapped (foreign) frames surface raw steps.
+    private data class ActiveStep(val cmd: String, val origin: Pair<String, Int>?,
+                                  var hops: Int = 0)
+    @Volatile private var activeStep: ActiveStep? = null
+    @Volatile private var lastSuspendPell: Pair<String, Int>? = null
     private val bpById = ConcurrentHashMap<String, XLineBreakpoint<*>>()
     private var bpCounter = 0
     private val queuedBreakpoints = mutableListOf<XLineBreakpoint<*>>()
@@ -186,8 +194,19 @@ class PellSqlDebugProcess(
                     }
                 }
                 "suspended" -> {
-                    val ctx = buildContext(ev)
                     val bp = matchBreakpoint(ev)
+                    val step = activeStep
+                    if (bp == null && step != null) {
+                        val cur = pellPosOf(ev)
+                        if (cur != null && cur == step.origin && step.hops < 256) {
+                            step.hops++
+                            send("cmd" to step.cmd)
+                            continue
+                        }
+                    }
+                    activeStep = null
+                    lastSuspendPell = pellPosOf(ev)
+                    val ctx = buildContext(ev)
                     updateSqlHighlight(ev)
                     ApplicationManager.getApplication().invokeLater {
                         if (bp != null) session.breakpointReached(bp, null, ctx)
@@ -355,10 +374,38 @@ class PellSqlDebugProcess(
         }
     }
 
-    override fun startStepInto(context: XSuspendContext?) { sqlHighlight.clear(); send("cmd" to "step_into") }
-    override fun startStepOut(context: XSuspendContext?) { sqlHighlight.clear(); send("cmd" to "step_out") }
-    override fun startStepOver(context: XSuspendContext?) { sqlHighlight.clear(); send("cmd" to "step_over") }
-    override fun resume(context: XSuspendContext?) { sqlHighlight.clear(); send("cmd" to "continue") }
+    /** Pell (file, line) of a suspend event, or null when unmapped. */
+    private fun pellPosOf(ev: JsonObject): Pair<String, Int>? {
+        val name = ev.get("name")?.takeIf { !it.isJsonNull }?.asString
+        val line = ev.get("line")?.takeIf { !it.isJsonNull }?.asInt ?: return null
+        if (name == null) {
+            val pellLine = scriptMap?.units?.firstOrNull()?.pellLineForUnit(line) ?: return null
+            return (config.filePath ?: return null) to pellLine
+        }
+        for ((path, map) in moduleMaps) {
+            val u = map.units.firstOrNull {
+                it.name.equals(name, true) && it.kind == "PACKAGE BODY"
+            } ?: continue
+            val pellLine = u.pellLineForUnit(line) ?: continue
+            return path to pellLine
+        }
+        return null
+    }
+
+    private fun beginStep(cmd: String) {
+        sqlHighlight.clear()
+        activeStep = ActiveStep(cmd, lastSuspendPell)
+        send("cmd" to cmd)
+    }
+
+    override fun startStepInto(context: XSuspendContext?) = beginStep("step_into")
+    override fun startStepOut(context: XSuspendContext?) = beginStep("step_out")
+    override fun startStepOver(context: XSuspendContext?) = beginStep("step_over")
+    override fun resume(context: XSuspendContext?) {
+        activeStep = null
+        sqlHighlight.clear()
+        send("cmd" to "continue")
+    }
 
     /** Paired execution marker in the deployed PL/SQL for the suspended
      *  unit line (package/type bodies; the anon block has no .sql). */

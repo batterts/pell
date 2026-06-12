@@ -44,12 +44,28 @@ class PellSqlExecutionMarker(private val project: Project) {
             if (line >= editor.document.lineCount) return@invokeLater
             val start = editor.document.getLineStartOffset(line)
             val end = editor.document.getLineEndOffset(line)
-            val attrs = editor.colorsScheme.getAttributes(
+            // Theme execution-point colors; some schemes leave them
+            // background-less, which renders invisibly — fall back to an
+            // explicit band so the line is always apparent.
+            var attrs = editor.colorsScheme.getAttributes(
                 com.intellij.xdebugger.ui.DebuggerColors.EXECUTIONPOINT_ATTRIBUTES)
+            if (attrs == null || attrs.backgroundColor == null) {
+                attrs = com.intellij.openapi.editor.markup.TextAttributes().apply {
+                    backgroundColor = com.intellij.ui.JBColor(0xCFE8FC, 0x2D4A5E)
+                }
+            }
             val hl = (editor.markupModel as MarkupModelEx).addRangeHighlighter(
                 start, end, HighlighterLayer.SELECTION - 1,
                 attrs, HighlighterTargetArea.LINES_IN_RANGE)
             hl.isGreedyToRight = true
+            // Gutter arrow — unmistakable even when the band blends in.
+            hl.gutterIconRenderer = object :
+                com.intellij.openapi.editor.markup.GutterIconRenderer() {
+                override fun getIcon() = com.intellij.icons.AllIcons.Debugger.NextStatement
+                override fun getTooltipText() = "pell execution point (lowered PL/SQL)"
+                override fun equals(other: Any?) = other === this
+                override fun hashCode() = System.identityHashCode(this)
+            }
             highlighter = hl
             markedEditor = editor
             editor.caretModel.moveToOffset(start)

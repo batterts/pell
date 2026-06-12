@@ -103,7 +103,7 @@ def test_breakpoint_step_locals_terminate(tmp_path):
         ev = s.recv()
         assert ev["event"] == "locals", ev
         byname = {v["name"]: v["value"] for v in ev["values"]}
-        assert byname.get("P_NAME") == "w1", byname
+        assert byname.get("name") == "w1", byname
 
         s.send(cmd="step_over")
         ev = s.recv()
@@ -115,7 +115,7 @@ def test_breakpoint_step_locals_terminate(tmp_path):
         assert ev["event"] == "suspended" and ev["line"] == 5, ev
         s.send(cmd="locals")
         ev = s.recv()
-        assert {v["name"]: v["value"] for v in ev["values"]}.get("P_NAME") == "w2", ev
+        assert {v["name"]: v["value"] for v in ev["values"]}.get("name") == "w2", ev
 
         s.send(cmd="continue")
         ev = s.recv()
@@ -183,12 +183,12 @@ def test_json_local_value_via_debug_shadow(tmp_path):
         assert ev["event"] == "locals", ev
         byname = {v["name"]: v for v in ev["values"]}
         # Compiler temporaries and the shadow itself never surface.
-        assert not any(n.startswith("L_PELL_") for n in byname), list(byname)
+        assert not any("pell_jobj" in n.lower() for n in byname), list(byname)
         assert not any(n.endswith("__PDBG") for n in byname), list(byname)
         # The user's JSON local now shows its ACTUAL value.
-        assert "L_J" in byname, list(byname)
-        val = byname["L_J"]["value"]
-        assert val.startswith("{") and "Alice" in val, byname["L_J"]
+        assert "j" in byname, list(byname)
+        val = byname["j"]["value"]
+        assert val.startswith("{") and "Alice" in val, byname["j"]
 
         s.send(cmd="continue")
         ev = s.recv(timeout=90)

@@ -123,6 +123,15 @@ class PellDebugProcess(
     @Volatile private var currentEventSet: EventSet? = null
     @Volatile private var currentThread: ThreadReference? = null
 
+    // Active pell-granular step: pell is concise, so one pell statement
+    // can be dozens of PL/SQL rows — a raw JDWP step is bewilderingly
+    // small. While a step is active we keep re-stepping until the top
+    // frame maps to a DIFFERENT pell position (file+line), then surface.
+    // Inside unmapped (foreign PL/SQL) frames, raw steps surface as-is.
+    private data class ActiveStep(val depth: Int, val origin: Pair<String, Int>?,
+                                  var hops: Int = 0)
+    @Volatile private var activeStep: ActiveStep? = null
+
     private val breakpointHandler = object :
         XBreakpointHandler<XLineBreakpoint<XBreakpointProperties<*>>>(PellLineBreakpointType::class.java) {
         override fun registerBreakpoint(bp: XLineBreakpoint<XBreakpointProperties<*>>) {
@@ -407,6 +416,7 @@ class PellDebugProcess(
                 when (ev) {
                     is ClassPrepareEvent -> armWhatWeCan()
                     is BreakpointEvent -> {
+                        activeStep = null   // a breakpoint mid-step surfaces
                         currentEventSet = events
                         currentThread = ev.thread()
                         val bp = armed[ev.request()]
@@ -422,6 +432,28 @@ class PellDebugProcess(
                         currentEventSet = events
                         currentThread = ev.thread()
                         runCatching { machine.eventRequestManager().deleteEventRequest(ev.request()) }
+                        val step = activeStep
+                        val loc = ev.location()
+                        val cur = mapToPell(loc.declaringType().name(), loc.lineNumber())
+                        // Same pell statement (or its scaffolding) — keep
+                        // stepping. Unmapped frames surface raw PL/SQL steps.
+                        if (step != null && cur != null && cur == step.origin &&
+                            step.hops < 256
+                        ) {
+                            step.hops++
+                            runCatching {
+                                machine.eventRequestManager().createStepRequest(
+                                    ev.thread(), StepRequest.STEP_LINE, step.depth,
+                                ).apply {
+                                    addCountFilter(1)
+                                    setSuspendPolicy(EventRequest.SUSPEND_ALL)
+                                    enable()
+                                }
+                            }
+                            runCatching { events.resume() }
+                            continue
+                        }
+                        activeStep = null
                         val ctx = buildSuspendContext(ev.thread())
                         suspendForUi = true
                         updateSqlHighlight(ev.thread())
@@ -438,6 +470,21 @@ class PellDebugProcess(
             stopped = true
             ApplicationManager.getApplication().invokeLater { session.stop() }
         }
+    }
+
+    /** Map a JDWP location to its pell (file, line), or null when the
+     *  unit has no pell source (foreign PL/SQL). */
+    private fun mapToPell(className: String, line: Int): Pair<String, Int>? {
+        if (className.contains(".Block.")) {
+            val pellLine = scriptMap?.units?.firstOrNull()?.pellLineForUnit(line) ?: return null
+            return (config.filePath ?: return null) to pellLine
+        }
+        for ((path, map) in moduleMaps) {
+            val unit = map.unitFor(className) ?: continue
+            val pellLine = unit.pellLineForUnit(line) ?: continue
+            return path to pellLine
+        }
+        return null
     }
 
     private fun clearSteps(machine: VirtualMachine) {
@@ -470,6 +517,13 @@ class PellDebugProcess(
         ApplicationManager.getApplication().executeOnPooledThread {
             runCatching {
                 clearSteps(machine)
+                // Where are we in PELL terms? The step loop re-steps until
+                // this changes (null = foreign PL/SQL: raw steps surface).
+                val origin = runCatching {
+                    val loc = thread.frames().firstOrNull()?.location()
+                    loc?.let { mapToPell(it.declaringType().name(), it.lineNumber()) }
+                }.getOrNull()
+                activeStep = ActiveStep(depth, origin)
                 machine.eventRequestManager().createStepRequest(
                     thread, StepRequest.STEP_LINE, depth,
                 ).apply {
@@ -487,6 +541,7 @@ class PellDebugProcess(
     override fun startStepOut(context: XSuspendContext?) = step(StepRequest.STEP_OUT)
 
     override fun resume(context: XSuspendContext?) {
+        activeStep = null
         ApplicationManager.getApplication().executeOnPooledThread {
             vm?.let { clearSteps(it) }
             resumeTarget()
@@ -583,7 +638,7 @@ class PellDebugProcess(
                         // The return-value shadow surfaces as "↩ return",
                         // but only once set (NULL before the fn returns).
                         if (lname == "pell\$ret") {
-                            if (value is StringReference) {
+                            if (PellValue.mirrorValue(value) != null) {
                                 children.add(PellValue("↩ return", value, null))
                             }
                             continue
@@ -591,7 +646,14 @@ class PellDebugProcess(
                         val shadow = shadows[lname]?.let { sv ->
                             runCatching { frame.getValue(sv) }.getOrNull()
                         }
-                        children.add(PellValue(v.name(), value, shadow))
+                        // Show the pell-surface name, not the lowering:
+                        // params lower to p_<name>, locals to l_<name>.
+                        val display = when {
+                            lname.startsWith("p_") -> lname.removePrefix("p_")
+                            lname.startsWith("l_") -> lname.removePrefix("l_")
+                            else -> lname
+                        }
+                        children.add(PellValue(display, value, shadow))
                     }
                 }
                 node.addChildren(children, true)
@@ -634,10 +696,12 @@ class PellDebugProcess(
         override fun computePresentation(node: XValueNode, place: XValuePlace) {
             // When the real value is opaque (JSON etc.) but a debug shadow
             // scalar exists, show the shadow's stringified value instead.
-            if (shadow is StringReference && isOpaque(value)) {
-                node.setPresentation(com.intellij.icons.AllIcons.Debugger.Value,
-                    null, shadow.value(), false)
-                return
+            if (isOpaque(value)) {
+                mirrorValue(shadow)?.let {
+                    node.setPresentation(com.intellij.icons.AllIcons.Debugger.Value,
+                        null, it, false)
+                    return
+                }
             }
             val (text, type) = render(value)
             node.setPresentation(com.intellij.icons.AllIcons.Debugger.Value, type, text, false)
@@ -656,28 +720,42 @@ class PellDebugProcess(
             else -> v.toString() to null
         }
 
-        /** Oracle boxes non-scalar PL/SQL locals (JSON, JSON_OBJECT_T,
-         *  collections, records, ADTs) as $Oracle.Builtin.OPAQUE — JDI
-         *  exposes no accessor or usable toString, so their VALUE is
-         *  unreadable over JDWP (an Oracle limitation; the sql transport
-         *  has the same ceiling on object types). Show an honest note
-         *  rather than a bare <OPAQUE>. Scalars never reach here. */
+        /** Oracle boxes every PL/SQL local as a $Oracle.Builtin.* mirror.
+         *  Scalar mirrors (VARCHAR2, NUMBER, DATE, BOOLEAN…) carry the
+         *  actual value in a `_value` FIELD (they have NO methods — the
+         *  earlier toString-invocation approach could never work; pinned
+         *  by OracleJdwpProtocolTest). OPAQUE boxes (JSON, collections,
+         *  records) have no value field — the debug-shadow pairing covers
+         *  those; here they get an honest note. */
         private fun renderObject(o: ObjectReference): Pair<String, String?> {
             val typeName = o.referenceType().name().removePrefix("\$Oracle.Builtin.")
-            // Some builtins do carry a usable toString (e.g. wrapped
-            // scalars) — try it, but never treat the generic OPAQUE box
-            // as renderable.
-            if (!typeName.equals("OPAQUE", ignoreCase = true)) {
-                runCatching {
-                    val m = o.referenceType().methodsByName("toString").firstOrNull()
-                        ?: return@runCatching null
-                    val thread = o.virtualMachine().allThreads().firstOrNull { it.isSuspended }
-                        ?: return@runCatching null
-                    val res = o.invokeMethod(thread, m, emptyList(), ObjectReference.INVOKE_SINGLE_THREADED)
-                    (res as? StringReference)?.value() ?: res?.toString()
-                }.getOrNull()?.let { return it to typeName }
+            mirrorValue(o)?.let { v ->
+                val text = if (typeName.equals("VARCHAR2", true) ||
+                               typeName.contains("CHAR", true)) "\"$v\"" else v
+                return text to typeName.lowercase()
             }
-            return "(opaque object — value not readable over JDWP)" to "opaque"
+            return "(opaque — set a breakpoint after assignment to see the " +
+                   "shadow value)" to "opaque"
+        }
+
+        companion object {
+            /** The `_value` field of an Oracle scalar mirror, rendered to
+             *  text; null for OPAQUE boxes / NULL values / non-mirrors. */
+            fun mirrorValue(v: com.sun.jdi.Value?): String? {
+                if (v is StringReference) return v.value()
+                if (v is PrimitiveValue) return v.toString()
+                if (v !is ObjectReference) return null
+                return runCatching {
+                    val f = v.referenceType().allFields().firstOrNull { it.name() == "_value" }
+                        ?: return null
+                    when (val fv = v.getValue(f)) {
+                        null -> null
+                        is StringReference -> fv.value()
+                        is PrimitiveValue -> fv.toString()
+                        else -> fv.toString()
+                    }
+                }.getOrNull()
+            }
         }
     }
 

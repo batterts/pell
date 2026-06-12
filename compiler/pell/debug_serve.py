@@ -242,9 +242,15 @@ def candidate_locals(source: str, line: int, max_names: int = 40) -> list[dict]:
             return
         seen.add(nm)
         base_type = type_text.strip().split("(")[0].split()[0].upper() if type_text.strip() else ""
+        # Show the pell-surface name, not the lowering: params lower to
+        # p_<name>, locals to l_<name>.
+        if nm.startswith("p_") or nm.startswith("l_"):
+            display = nm[2:]
+        else:
+            display = nm
         out.append({
             "name": name.upper(),
-            "display": name.upper(),
+            "display": display,
             "type": type_text.strip() or None,
             "opaque": _is_opaque_type(base_type),
         })

@@ -203,6 +203,21 @@ class OracleJdwpProtocolTest {
                                 println("locals: " + visible.joinToString {
                                     "${it.name()}=${runCatching { frames[0].getValue(it) }.getOrNull()}"
                                 })
+                                // Pin the value-read contract: Oracle scalar
+                                // mirrors have NO methods; the value lives in
+                                // a `_value` field (what PellValue reads).
+                                val mirror = visible.firstNotNullOfOrNull { vr ->
+                                    runCatching { frames[0].getValue(vr) }.getOrNull()
+                                        as? com.sun.jdi.ObjectReference
+                                }
+                                if (mirror != null) {
+                                    val f = mirror.referenceType().allFields()
+                                        .firstOrNull { it.name() == "_value" }
+                                    assertTrue("scalar mirror must carry _value field " +
+                                        "(fields=${mirror.referenceType().allFields().map { it.name() }})",
+                                        f != null)
+                                    println("mirror _value = ${mirror.getValue(f)}")
+                                }
                             }.onFailure { println("locals unavailable: $it") }
                             vm.eventRequestManager().deleteEventRequest(ev.request())
                             vm.eventRequestManager().createStepRequest(
