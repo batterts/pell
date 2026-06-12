@@ -52,6 +52,9 @@ class PellSqlDebugProcess(
     private val pellExe: File? = PellCli.resolve(config, project)
     private val workDir: File = pellExe?.parentFile ?: File(project.basePath ?: ".")
     private val dummyHandler = NopProcessHandler()
+    private val sqlHighlight = PellSqlExecutionMarker(project)
+    // owner.name -> deployed PL/SQL source (ALL_SOURCE), line N = unit line N
+    private val deployedSource = ConcurrentHashMap<String, com.intellij.testFramework.LightVirtualFile>()
 
     @Volatile private var serve: Process? = null
     private var stdin: OutputStreamWriter? = null
@@ -185,6 +188,7 @@ class PellSqlDebugProcess(
                 "suspended" -> {
                     val ctx = buildContext(ev)
                     val bp = matchBreakpoint(ev)
+                    updateSqlHighlight(ev)
                     ApplicationManager.getApplication().invokeLater {
                         if (bp != null) session.breakpointReached(bp, null, ctx)
                         else session.positionReached(ctx)
@@ -351,13 +355,38 @@ class PellSqlDebugProcess(
         }
     }
 
-    override fun startStepOver(context: XSuspendContext?) = send("cmd" to "step_over")
-    override fun startStepInto(context: XSuspendContext?) = send("cmd" to "step_into")
-    override fun startStepOut(context: XSuspendContext?) = send("cmd" to "step_out")
-    override fun resume(context: XSuspendContext?) = send("cmd" to "continue")
+    override fun startStepInto(context: XSuspendContext?) { sqlHighlight.clear(); send("cmd" to "step_into") }
+    override fun startStepOut(context: XSuspendContext?) { sqlHighlight.clear(); send("cmd" to "step_out") }
+    override fun startStepOver(context: XSuspendContext?) { sqlHighlight.clear(); send("cmd" to "step_over") }
+    override fun resume(context: XSuspendContext?) { sqlHighlight.clear(); send("cmd" to "continue") }
+
+    /** Paired execution marker in the deployed PL/SQL for the suspended
+     *  unit line (package/type bodies; the anon block has no .sql). */
+    private fun updateSqlHighlight(ev: JsonObject) {
+        val owner = ev.get("owner")?.takeIf { !it.isJsonNull }?.asString
+        val name = ev.get("name")?.takeIf { !it.isJsonNull }?.asString
+        val line = ev.get("line")?.takeIf { !it.isJsonNull }?.asInt
+        if (name == null || line == null) { sqlHighlight.clear(); return }
+        val vf = deployedSourceFile(owner, name) ?: run { sqlHighlight.clear(); return }
+        sqlHighlight.show(vf, (line - 1).coerceAtLeast(0))
+    }
+
+    private fun deployedSourceFile(owner: String?, name: String): com.intellij.testFramework.LightVirtualFile? {
+        val unit = if (owner != null) "$owner.$name" else name
+        deployedSource[unit]?.let { return it }
+        val exe = pellExe ?: return null
+        val r = PellCli.run(exe, workDir, "debug-source", unit, "--type", "PACKAGE_BODY",
+                            extraEnv = PellCli.env(config, project))
+        if (r.first != 0) return null
+        val vf = com.intellij.testFramework.LightVirtualFile("${unit}.sql", r.second)
+        vf.isWritable = false
+        deployedSource[unit] = vf
+        return vf
+    }
 
     override fun stop() {
         stopped = true
+        sqlHighlight.clear()
         runCatching { send("cmd" to "stop") }
         ApplicationManager.getApplication().executeOnPooledThread {
             val p = serve ?: return@executeOnPooledThread

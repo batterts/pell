@@ -110,6 +110,10 @@ class PellDebugProcess(
     // fetched PL/SQL source for foreign frames: class name -> (file, text)
     private val foreignSource = ConcurrentHashMap<String, LightVirtualFile>()
 
+    // The secondary "you are here" highlight in the deployed PL/SQL,
+    // paired with XDebugger's pell-source highlight. Lives on the EDT.
+    private val sqlHighlight = PellSqlExecutionMarker(project)
+
     @Volatile private var currentEventSet: EventSet? = null
     @Volatile private var currentThread: ThreadReference? = null
 
@@ -369,6 +373,7 @@ class PellDebugProcess(
                         val bp = armed[ev.request()]
                         val ctx = buildSuspendContext(ev.thread())
                         suspendForUi = true
+                        updateSqlHighlight(ev.thread())
                         ApplicationManager.getApplication().invokeLater {
                             if (bp != null) session.breakpointReached(bp, null, ctx)
                             else session.positionReached(ctx)
@@ -380,6 +385,7 @@ class PellDebugProcess(
                         runCatching { machine.eventRequestManager().deleteEventRequest(ev.request()) }
                         val ctx = buildSuspendContext(ev.thread())
                         suspendForUi = true
+                        updateSqlHighlight(ev.thread())
                         ApplicationManager.getApplication().invokeLater { session.positionReached(ctx) }
                     }
                     is VMDeathEvent, is VMDisconnectEvent -> stopped = true
@@ -401,9 +407,22 @@ class PellDebugProcess(
     }
 
     private fun resumeTarget() {
+        sqlHighlight.clear()
         val es = currentEventSet
         currentEventSet = null
         runCatching { es?.resume() } .onFailure { runCatching { vm?.resume() } }
+    }
+
+    /** Place the paired "you are here" marker on the deployed PL/SQL
+     *  for the current top frame's unit line. Block frames have no
+     *  deployed .sql (the pell file IS the source) — skip them. */
+    private fun updateSqlHighlight(thread: ThreadReference) {
+        val frame = runCatching { thread.frames().firstOrNull() }.getOrNull() ?: return
+        val loc = frame.location()
+        val className = loc.declaringType().name()
+        if (className.contains(".Block.")) { sqlHighlight.clear(); return }
+        val vf = foreignSourceFile(className) ?: run { sqlHighlight.clear(); return }
+        sqlHighlight.show(vf, (loc.lineNumber() - 1).coerceAtLeast(0))
     }
 
     private fun step(depth: Int) {
@@ -437,6 +456,7 @@ class PellDebugProcess(
 
     override fun stop() {
         stopped = true
+        sqlHighlight.clear()
         ApplicationManager.getApplication().executeOnPooledThread {
             runCatching { vm?.dispose() }
             runCatching {

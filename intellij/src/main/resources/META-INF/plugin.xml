@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.8.4</version>
+    <version>0.8.5</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,14 @@ END employees;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.8.5 — paired execution line in the lowered PL/SQL</h3>
+        <ul><li>While debugging, the deployed <code>.sql</code> opens
+        beside your pell source (read-only) with the current execution
+        line highlighted in sync — step on the left, watch the PL/SQL it
+        became light up on the right. Works on both transports; clears on
+        resume/stop. The .sql opens without stealing focus from the pell
+        editor.</li></ul>
+
         <h3>0.8.4 — JSON values are readable in the debugger</h3>
         <ul><li><b>Opaque object locals now show their real value.</b>
         Debug builds emit a <code>VARCHAR2</code> shadow scalar for each
