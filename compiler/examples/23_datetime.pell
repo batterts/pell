@@ -85,8 +85,9 @@ pub fn from_utc(ts: timestamp, dst_tz: text) -> timestamp {
 // decompose via EXTRACT (hidden behind pell's .day()/.hour()/.minute()/
 // .second() method aliases) and sum into a single NUMBER. The .second()
 // alias yields fractional seconds, so we TRUNC for the integer variant.
+// Elapsed seconds FROM a TO b (positive when b is later).
 pub fn seconds_between(a: timestamp, b: timestamp) -> number {
-    let d: interval = a - b;
+    let d: interval = b - a;
     let exact: number = d.day() * 86400 + d.hour() * 3600 + d.minute() * 60 + d.second();
     return trunc(exact);
 }
@@ -94,7 +95,7 @@ pub fn seconds_between(a: timestamp, b: timestamp) -> number {
 // Fractional seconds in (a - b). Preserves Oracle's sub-second precision
 // (up to 9 fractional digits depending on the underlying TIMESTAMP scale).
 pub fn subseconds_between(a: timestamp, b: timestamp) -> number {
-    let d: interval = a - b;
+    let d: interval = b - a;
     return d.day() * 86400 + d.hour() * 3600 + d.minute() * 60 + d.second();
 }
 
@@ -120,7 +121,7 @@ pub fn epoch(ts: timestamp) -> number {
         select cast(from_tz(timestamp '1970-01-01 00:00:00', 'UTC') as timestamp)
         from dual
     }.one();
-    return seconds_between(ts, origin);
+    return seconds_between(origin, ts);
 }
 
 pub fn from_epoch(secs: number) -> timestamp {

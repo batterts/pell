@@ -1,4 +1,4 @@
-@suite("pell example vetting — every module behaves, not just compiles")
+@suite("pell example vetting — every module behaves, not just compiles", rollback = "manual")
 module ut_pell_examples;
 
 import ut;
@@ -11,6 +11,29 @@ import stock;
 import mermaid;
 import explain_plan;
 import stat_diff;
+import charges;
+import charge_log;
+import country;
+import fulfillment;
+import demo;
+import emp_demo;
+import retry_demo;
+import dyn_demo;
+import pivot_demo;
+import jq_demo;
+import re_demo;
+import re_capture_demo;
+import datetime;
+import validation;
+import paging;
+import csv;
+import repl_demo;
+import dyn_cursor_demo;
+import source_stats;
+import table_stats;
+import stats_repl;
+import daily;
+import dbms_stats;
 
 // ---------------------------------------------------------------------------
 // ut_pell_examples — utPLSQL suite over the deployed examples.
@@ -123,4 +146,274 @@ pub fn t_stat_diff() {
     let after = stat_diff::snapshot();
     let r = stat_diff::report(before, after);
     ut::expect(r).to_be_like("%statistic%before%after%delta%");
+}
+
+@test("charges::transfer moves money between accounts")
+pub fn t_transfer() {
+    sql! { delete from billing.accounts where id in (9101, 9102) };
+    sql! { insert into billing.accounts(id, balance, frozen) values (9101, 100, 0) };
+    sql! { insert into billing.accounts(id, balance, frozen) values (9102, 10, 0) };
+    let xfer = charges::Transfer { from_id: 9101, to_id: 9102, amt: 40 };
+    charges::transfer(xfer)?;
+    let b1: number = sql! { select balance from billing.accounts where id = 9101 }.one();
+    let b2: number = sql! { select balance from billing.accounts where id = 9102 }.one();
+    ut::expect(b1).to_equal(60);
+    ut::expect(b2).to_equal(50);
+    sql! { delete from billing.accounts where id in (9101, 9102) };
+}
+
+@test("reports::daily prints recent orders without error")
+pub fn t_daily() {
+    sql! { delete from reports.orders where order_id = 9111 };
+    sql! { insert into reports.orders(order_id, total, created_at)
+           values (9111, 42, sysdate) };
+    daily::print_recent(datetime::add_days(datetime::today(), -1));
+    ut::expect(1).to_equal(1);
+    sql! { delete from reports.orders where order_id = 9111 };
+}
+
+@test("lookups::country resolves names and audits")
+pub fn t_country() {
+    sql! { delete from lookups.countries where code = 'ZZ' };
+    sql! { insert into lookups.countries(code, name) values ('ZZ', 'Testland') };
+    ut::expect(country::country_name("ZZ")).to_equal("Testland");
+    country::audit_log("ut probe");
+    sql! { delete from lookups.countries where code = 'ZZ' };
+}
+
+@test("orders::fulfillment: fetch, add line, count")
+pub fn t_fulfillment() {
+    sql! { delete from orders.order_lines where order_id = 9201 };
+    sql! { delete from orders.orders where id = 9201 };
+    sql! { delete from orders.skus where id = 9301 };
+    sql! { insert into orders.orders(id, customer_id, status, total, created_at)
+           values (9201, 1, 'NEW', 0, sysdate) };
+    sql! { insert into orders.skus(id, qty) values (9301, 10) };
+    let o = fulfillment::fetch_order(9201)?;
+    ut::expect(o.status).to_equal("NEW");
+    let line_id = fulfillment::add_line(9201, 9301, 2)?;
+    ut::expect(line_id).to_be_not_null();
+    ut::expect(fulfillment::count_lines(9201)).to_equal(1);
+    let qty: number = sql! { select qty from orders.skus where id = 9301 }.one();
+    ut::expect(qty).to_equal(8);
+    sql! { delete from orders.order_lines where order_id = 9201 };
+    sql! { delete from orders.orders where id = 9201 };
+    sql! { delete from orders.skus where id = 9301 };
+}
+
+@test("auditing::charge_log writes the ledger (finally path)")
+pub fn t_charge_account() {
+    sql! { delete from auditing.ledger where account_id = 9401 };
+    let id = charge_log::charge_account(9401, 25);
+    ut::expect(id).to_be_not_null();
+    let n: number = sql! {
+        select count(*) from auditing.ledger where account_id = 9401
+    }.one();
+    ut::expect(n).to_equal(1);
+    sql! { delete from auditing.ledger where account_id = 9401 };
+}
+
+@test("bulk::demo FORALL insert + BULK COLLECT read")
+pub fn t_bulk() {
+    sql! { delete from bulk.num_table };
+    demo::insert_many();
+    ut::expect(demo::read_all()).to_be_not_null();
+    let n: number = sql! { select count(*) from bulk.num_table }.one();
+    ut::expect(n > 0).to_be_true();
+}
+
+@test("emp_demo: nextval then currval agree")
+pub fn t_sequence() {
+    let a = emp_demo::next_employee_id();
+    let b = emp_demo::current_id();
+    ut::expect(b).to_equal(a);
+}
+
+@test("retry_demo: jobs and audit events persist")
+pub fn t_retry() {
+    sql! { delete from retry_jobs where name = 'ut-job' };
+    retry_demo::enqueue_job("ut-job")?;
+    let n: number = sql! {
+        select count(*) from retry_jobs where name = 'ut-job'
+    }.one();
+    ut::expect(n).to_equal(1);
+    retry_demo::audit_event("ut-event")?;
+    sql! { delete from retry_jobs where name = 'ut-job' };
+    sql! { delete from retry_audit_log where action = 'ut-event' };
+}
+
+@test("dyn_demo: dynamic count and update")
+pub fn t_dyn_sql() {
+    sql! { delete from dyn_orders };
+    sql! { insert into dyn_orders(id, status) values (1, 'NEW') };
+    sql! { insert into dyn_orders(id, status) values (2, 'NEW') };
+    ut::expect(dyn_demo::count_in("dyn_orders", "NEW")).to_equal(2);
+    dyn_demo::set_status("dyn_orders", "DONE", 1);
+    ut::expect(dyn_demo::count_in("dyn_orders", "NEW")).to_equal(1);
+    sql! { delete from dyn_orders };
+}
+
+@test("pivot_demo: typed pivot over seeded sales")
+pub fn t_pivot() {
+    sql! { delete from pivot_orders };
+    sql! { insert into pivot_orders(product, region, sales) values ('ut-w', 'EAST', 7) };
+    sql! { insert into pivot_orders(product, region, sales) values ('ut-w', 'WEST', 3) };
+    let totals = pivot_demo::list_totals();
+    ut::expect(totals.len()).to_equal(1);
+    sql! { delete from pivot_orders };
+}
+
+@test("jq_demo: jq! pipelines over a json document")
+pub fn t_jq() {
+    let j = json::parse(`{"users":[{"name":"Ann","age":34},{"name":"Kid","age":9}]}`);
+    let adults = jq_demo::adult_names(j);
+    ut::expect(adults.len()).to_equal(1);
+    ut::expect(adults.at(1)).to_equal("Ann");
+}
+
+@test("re_demo: match, extract, redact, split")
+pub fn t_re() {
+    ut::expect(re_demo::is_email("a@b.com")).to_be_true();
+    ut::expect(re_demo::is_email("nope")).to_be_false();
+    let nums = re_demo::all_numbers("a1b22c");
+    ut::expect(nums.len()).to_equal(2);
+    ut::expect(re_demo::redact_digits("a1b2").contains("1")).to_be_false();
+    let ws = re_demo::words("two words");
+    ut::expect(ws.len()).to_equal(2);
+}
+
+@test("re_capture_demo: named groups populate records")
+pub fn t_re_capture() {
+    let kv = re_capture_demo::parse_kv("color=blue");
+    ut::expect(kv.k).to_equal("color");
+    ut::expect(kv.v).to_equal("blue");
+    let e = re_capture_demo::parse_email("joe@example.com");
+    ut::expect(e.user).to_equal("joe");
+    ut::expect(e.domain).to_equal("example.com");
+}
+
+@test("std::datetime: arithmetic, epochs, iso round-trip")
+pub fn t_datetime() {
+    ut::expect(datetime::now()).to_be_not_null();
+    ut::expect(datetime::days_between(
+        datetime::today(), datetime::add_days(datetime::today(), 3))).to_equal(3);
+    let ts = datetime::parse_iso("2026-06-13T12:00:00");
+    ut::expect(datetime::format_iso(ts)).to_be_like("2026-06-13T12:00:00%");
+    ut::expect(datetime::epoch(datetime::from_epoch(1750000000))).to_equal(1750000000);
+}
+
+@test("signups::validation: checks pass and compose")
+pub fn t_validation() {
+    let t = validation::require_text("name", "Ann")?;
+    ut::expect(t).to_equal("Ann");
+    let e = validation::require_email("ann@example.com")?;
+    ut::expect(e).to_equal("ann@example.com");
+    let a = validation::require_age(30)?;
+    ut::expect(a).to_equal(30);
+    let sf = validation::SignupForm { name: "Ann", email: "ann@example.com", age: 30 };
+    let form = validation::validate_signup(sf)?;
+    ut::expect(form.name).to_equal("Ann");
+}
+
+@test("orders::paging: counts, page math, page contents")
+pub fn t_paging() {
+    sql! { delete from orders.orders where status = 'UTP' };
+    sql! { insert into orders.orders(id, customer_id, status, total, created_at)
+           values (9501, 1, 'UTP', 1, sysdate) };
+    sql! { insert into orders.orders(id, customer_id, status, total, created_at)
+           values (9502, 1, 'UTP', 2, sysdate) };
+    sql! { insert into orders.orders(id, customer_id, status, total, created_at)
+           values (9503, 1, 'UTP', 3, sysdate) };
+    ut::expect(paging::count_matching("UTP")).to_equal(3);
+    ut::expect(paging::page_count(3, 2)).to_equal(2);
+    ut::expect(paging::has_next_page(1, 2, 3)).to_be_true();
+    ut::expect(paging::has_next_page(2, 2, 3)).to_be_false();
+    let pg = paging::page_of("UTP", 1, 2);
+    ut::expect(pg.len()).to_equal(2);
+    sql! { delete from orders.orders where status = 'UTP' };
+}
+
+@test("data::csv: split, quote, parse documents")
+pub fn t_csv() {
+    let cells = csv::parse_line("a,b,c");
+    ut::expect(cells.len()).to_equal(3);
+    ut::expect(cells.at(2)).to_equal("b");
+    ut::expect(csv::quote_field("a,b")).to_be_like("\"%\"");
+}
+
+@test("repl_demo: records in, records out")
+pub fn t_repl_demo() {
+    ut::expect(repl_demo::greet("Ann")).to_be_like("%Ann%");
+    let emp = repl_demo::Employee { id: 1, name: "A", level: 1 };
+    let e = repl_demo::promote(emp);
+    ut::expect(e.level).to_equal(2);
+}
+
+@test("dyn_cursor_demo: dynamic pivot cursor yields rows")
+pub fn t_dyn_cursor() {
+    sql! { delete from pivot_orders };
+    sql! { insert into pivot_orders(product, region, sales) values ('ut-x', 'EAST', 5) };
+    var n: number = 0;
+    for row in dyn_cursor_demo::region_sales() {
+        n = n + 1;
+    }
+    ut::expect(n > 0).to_be_true();
+    sql! { delete from pivot_orders };
+}
+
+@test("source_stats: pivot of user_source has NAME per row")
+pub fn t_source_stats() {
+    var saw: number = 0;
+    for row in source_stats::lines_by_kind() {
+        if json::has(row, "$.NAME") {
+            saw = 1;
+        }
+    }
+    ut::expect(saw).to_equal(1);
+}
+
+@test("table_stats: summary and columns of an analyzed table")
+pub fn t_table_stats() {
+    dbms_stats::gather_table_stats("PELL_TEST", "RETRY_JOBS");
+    ut::expect(table_stats::summary("RETRY_JOBS")).to_be_like("%rows%");
+    ut::expect(table_stats::column_stats("RETRY_JOBS")).to_be_like("%NAME%");
+}
+
+@test("stats_repl: whole-schema survey runs")
+pub fn t_stats_repl() {
+    stats_repl::overview();
+    stats_repl::histogrammed();
+    ut::expect(1).to_equal(1);
+}
+
+@test("agg_library: SQL aggregates compute")
+pub fn t_agg_library() {
+    let bor: number = sql! {
+        select bitwise_or(column_value) from table(sys.odcinumberlist(1, 2, 4))
+    }.one();
+    ut::expect(bor).to_equal(7);
+    let rng: number = sql! {
+        select numeric_range(column_value) from table(sys.odcinumberlist(3, 9, 5))
+    }.one();
+    ut::expect(rng).to_equal(6);
+    let hm: number = sql! {
+        select round(harmonic_mean(column_value), 3) from table(sys.odcinumberlist(1, 2, 4))
+    }.one();
+    ut::expect(hm).to_equal(1.714);
+    let unq: text = sql! {
+        select unique_or_null(column_value) from table(sys.odcivarchar2list('a', 'a'))
+    }.one();
+    ut::expect(unq).to_equal("a");
+}
+
+@test("shapes_demo aggregates: total and sample count")
+pub fn t_shapes_aggs() {
+    let tot: number = sql! {
+        select total_amount(column_value) from table(sys.odcinumberlist(10, 20, 30))
+    }.one();
+    ut::expect(tot).to_equal(60);
+    let cnt: number = sql! {
+        select sample_count(column_value) from table(sys.odcinumberlist(1, 2, 3))
+    }.one();
+    ut::expect(cnt).to_equal(3);
 }

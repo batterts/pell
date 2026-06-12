@@ -43,7 +43,7 @@ PRIM_MAP = {
     "bool":      "BOOLEAN",
     "date":      "DATE",
     "timestamp": "TIMESTAMP",
-    "interval":  "INTERVAL DAY TO SECOND",
+    "interval":  "INTERVAL DAY(9) TO SECOND(9)",
     "bytes":     "RAW(2000)",
     "json":      "JSON",
     "Unit":      "",   # procedure return; never appears as a slot
@@ -59,7 +59,7 @@ PRIM_PARAM_MAP = {
     "bool":      "BOOLEAN",
     "date":      "DATE",
     "timestamp": "TIMESTAMP",
-    "interval":  "INTERVAL DAY TO SECOND",
+    "interval":  "INTERVAL DAY(9) TO SECOND(9)",
     "bytes":     "RAW",
     "json":      "JSON",
     "Unit":      "",
@@ -1107,6 +1107,12 @@ class Emitter:
             if suite.args and isinstance(suite.args[0], A.TextLit):
                 desc = suite.args[0].value
             out.append(f"  --%suite({desc})")
+            rb = suite.kwargs.get("rollback")
+            if rb is not None and isinstance(rb, A.TextLit):
+                # tests that COMMIT (pell transaction blocks) can't use
+                # utPLSQL's automatic savepoint rollback — they clean up
+                # for themselves.
+                out.append(f"  --%rollback({rb.value})")
             out.append("")
         # Enum constants — emitted before records so they can be referenced
         # from record field defaults (future) and from fn bodies.
@@ -2091,7 +2097,7 @@ class Emitter:
                 and isinstance(s.value.callee, A.Ident)
                 and "::" in s.value.callee.name):
             segs = s.value.callee.name.split("::")
-            pkg = ".".join(segs[:-1])
+            pkg = self._qualify_pkg(".".join(segs[:-1]))
             if s.value.callee.name in self._project_signatures:
                 foreign_type = f"{pkg}.{list_type}"
                 self._decl(f"{nm} {foreign_type};")
@@ -2148,7 +2154,7 @@ class Emitter:
         """
         assert isinstance(call.callee, A.Ident)
         segs = call.callee.name.split("::")
-        pkg = ".".join(segs[:-1])
+        pkg = self._qualify_pkg(".".join(segs[:-1]))
         foreign_type = f"{pkg}.{list_type}"
         tmp = f"l_pell_listadapter_{self._sql_var_counter}"
         self._sql_var_counter += 1
@@ -2512,6 +2518,15 @@ class Emitter:
         if isinstance(value, A.OkExpr):
             return self._infer_decl_type(value.inner)
         if isinstance(value, A.StructLit):
+            # Cross-package struct lit (`pkg::Record { … }`): the record
+            # type lives in the foreign package — qualify with the real
+            # (schema-qualified) package via the module registry.
+            if "::" in value.type_name:
+                pkg, _, rec_name = value.type_name.rpartition("::")
+                info = self._project_modules.get(pkg)
+                qual = (info.qualified_name.lower() if info is not None
+                        else pkg.replace("::", "."))
+                return f"{qual}.{_record_type_name(rec_name)}"
             return _record_type_name(value.type_name)
         # `a + b` etc. — defer to expression inference, which knows the
         # polymorphic `+` rule (text concat vs numeric).
@@ -2585,7 +2600,9 @@ class Emitter:
             if (isinstance(ret, A.GenericType) and ret.base == "list"
                     and len(ret.params) == 1):
                 elem = _render_type(ret.params[0])
-                return f"{pkg}.t_{_safe(elem)}_list"
+                info = self._project_modules.get(pkg)
+                qual = (info.qualified_name.lower() if info is not None else pkg)
+                return f"{qual}.t_{_safe(elem)}_list"
             # Record returns: the type lives in the FOREIGN package —
             # qualify it, or anon blocks / other packages declare a
             # nonexistent local t_<record> (PLS-00201). The short module
@@ -5474,6 +5491,15 @@ class Emitter:
         "std::print":   "dbms_output.put_line",
         "std::println": "dbms_output.put_line",
     }
+
+    def _qualify_pkg(self, pkg: str) -> str:
+        """Short module name -> real (schema-qualified) lowered package
+        name via the project registry; falls back to the given spelling
+        with `::` flattened to `.`."""
+        info = self._project_modules.get(pkg)
+        if info is not None:
+            return info.qualified_name.lower()
+        return pkg.replace("::", ".")
 
     def _is_foreign_object_chain(self, recv: A.Expr) -> bool:
         """True when `recv` is (a chain of member calls rooted at) a call

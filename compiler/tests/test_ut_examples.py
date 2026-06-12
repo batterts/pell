@@ -26,14 +26,9 @@ pytestmark = pytest.mark.skipif(
     reason="PELL_DB_URL not set — utPLSQL vetting skipped",
 )
 
-# Modules the suite imports, deployed fresh so the asserts test
-# CURRENT emitter output, not whatever was lying around.
-_NEEDED = [
-    "01_hello.pell", "24_strings.pell", "18_json.pell",
-    "22_linked_list.pell", "02_employees.pell", "04_inventory.pell",
-    "31_mermaid.pell", "32_explain_plan.pell", "33_stat_diff.pell",
-    "36_ut_examples.pell",
-]
+# The suite covers every example module — deploy the whole directory
+# fresh so the asserts test CURRENT emitter output.
+_NEEDED = ["."]
 
 
 def _ut_installed(conn) -> bool:
@@ -52,7 +47,8 @@ def test_ut_vetting_suite_passes():
         for name in _NEEDED:
             r = subprocess.run(
                 [sys.executable, "-m", "pell", "deploy",
-                 str(EXAMPLES / name), "--out-dir", tempfile.mkdtemp()],
+                 str(EXAMPLES / name), "--keep-going",
+                 "--out-dir", tempfile.mkdtemp()],
                 capture_output=True, text=True, cwd=COMPILER,
                 env={**os.environ, "PYTHONPATH": str(COMPILER)},
             )
@@ -64,7 +60,7 @@ def test_ut_vetting_suite_passes():
             r"(\d+) tests?, (\d+) failed, (\d+) errored", report)
         assert m, f"couldn't find the utPLSQL summary in:\n{report}"
         tests, failed, errored = (int(g) for g in m.groups())
-        assert tests >= 9, f"suite shrank to {tests} tests:\n{report}"
+        assert tests >= 33, f"suite shrank to {tests} tests:\n{report}"
         assert failed == 0 and errored == 0, (
             f"utPLSQL vetting found regressions:\n{report}"
         )

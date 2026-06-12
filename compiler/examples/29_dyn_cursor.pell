@@ -1,4 +1,4 @@
-module dyn_demo;
+module dyn_cursor_demo;
 
 // ---------------------------------------------------------------------------
 // `cursor<dyn>` — a cursor whose row shape is unknown at compile time.
