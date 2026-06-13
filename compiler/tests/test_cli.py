@@ -106,3 +106,18 @@ def test_utplsql_available_query(monkeypatch):
     cli._utplsql_available(c, "UT3")
     assert "owner = upper(:o)" in c.last[0]
     assert c.last[1] == {"o": "UT3"}
+
+
+def test_explain_debug_run_error_maps_internal_errors():
+    from pell import cli
+    # The user's actual ORA-00600 from debugging a FORALL-over-records.
+    real = ("DPY-4011: the database or network closed the connection\n"
+            "ORA-00600: internal error code, arguments: [15419], "
+            "[severe error during PL/SQL execution], [2649], [], [], []\n"
+            "ORA-06544: PL/SQL: internal error, arguments: [2649], []\n"
+            "ORA-06553: PLS-707: unsupported construct or internal error [2649]")
+    hint = cli._explain_debug_run_error(real)
+    assert hint is not None
+    assert "FORALL" in hint and "without --debug" in hint
+    # Ordinary errors don't trigger the hint.
+    assert cli._explain_debug_run_error("ORA-00942: table or view does not exist") is None

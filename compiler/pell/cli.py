@@ -1389,10 +1389,38 @@ def cmd_debug_target(args: argparse.Namespace) -> int:
         print("pell debug-target: block finished", flush=True)
         return 0
     except Exception as e:
-        print(f"pell: debug run failed: {e}", file=sys.stderr)
+        msg = str(e)
+        hint = _explain_debug_run_error(msg)
+        print(f"pell: debug run failed: {msg}", file=sys.stderr)
+        if hint:
+            print(hint, file=sys.stderr)
         return 1
     finally:
         conn.close()
+
+
+def _explain_debug_run_error(msg: str) -> Optional[str]:
+    """Map an opaque Oracle internal error from a debug run to an
+    actionable explanation. Oracle's JDWP debug VM can't *execute*
+    certain otherwise-valid constructs while attached — most often a
+    FORALL that binds individual fields of a collection of records
+    (what `forall x in <list<Record>>` lowers to). The package compiles
+    and runs fine without --debug; only live stepping trips it."""
+    m = msg.upper()
+    internal = ("ORA-00600" in m or "PLS-707" in m
+                or "[15419]" in m or "[2649]" in m
+                or "UNSUPPORTED CONSTRUCT" in m)
+    if not internal:
+        return None
+    return (
+        "  └─ This is an Oracle debugger limitation, not a fault in your\n"
+        "     code: the JDWP debug VM can't execute some constructs while\n"
+        "     attached — most commonly a FORALL over fields of a record\n"
+        "     collection (`forall x in <list<Record>> { ... :x.field ... }`).\n"
+        "     The package is valid and runs fine without --debug.\n"
+        "     Workarounds: debug a caller and step OVER the bulk operation,\n"
+        "     put the breakpoint after it, or run without the debugger."
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
