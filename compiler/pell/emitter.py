@@ -4968,26 +4968,6 @@ class Emitter:
             repl,
             sql.sql,
         ).strip().rstrip(";")
-        # Debug builds: emit a row-by-row FOR loop instead of FORALL.
-        # Oracle's JDWP debug VM throws ORA-00600 [15419]/PLS-707 while
-        # EXECUTING a FORALL that binds record-collection fields — so a
-        # debug-compiled FORALL makes every line at or after it
-        # unreachable (you can't step past it). The FOR loop runs the
-        # identical single-DML body once per row and IS steppable (same
-        # as a `for x in list { sql!{...} }`). Confined to --debug; the
-        # shipped artifact keeps the fast FORALL. See docs/DEBUGGER.md.
-        if self.debug_markers:
-            out = [
-                f"{indent}-- @pell-debug: FORALL lowered to a FOR loop so it's "
-                f"steppable (Oracle can't debug a FORALL over record fields)",
-                f"{indent}FOR {idx} IN {list_local}.FIRST .. {list_local}.LAST LOOP",
-            ]
-            for line in sql_text.splitlines():
-                out.append(f"{indent}  {line}")
-            if not out[-1].rstrip().endswith(";"):
-                out[-1] = out[-1] + ";"
-            out.append(f"{indent}END LOOP;")
-            return out
         out = [f"{indent}FORALL {idx} IN {list_local}.FIRST .. {list_local}.LAST"]
         for line in sql_text.splitlines():
             out.append(f"{indent}  {line}")
