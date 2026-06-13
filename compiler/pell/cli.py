@@ -1400,12 +1400,12 @@ def cmd_debug_target(args: argparse.Namespace) -> int:
 
 
 def _explain_debug_run_error(msg: str) -> Optional[str]:
-    """Map an opaque Oracle internal error from a debug run to an
-    actionable explanation. Oracle's JDWP debug VM can't *execute*
-    certain otherwise-valid constructs while attached — most often a
-    FORALL that binds individual fields of a collection of records
-    (what `forall x in <list<Record>>` lowers to). The package compiles
-    and runs fine without --debug; only live stepping trips it."""
+    """Map an opaque Oracle internal error from a debug run to a hint.
+    The classic trigger — a FORALL over a record collection crashing the
+    session — is handled by the IntelliJ plugin (it filters ClassPrepare
+    so Oracle's lazily-prepared collection types don't fire a crashing
+    event). If you still see this from the CLI, it's likely a
+    hand-written sql!{} construct the debug VM can't instrument."""
     m = msg.upper()
     internal = ("ORA-00600" in m or "PLS-707" in m
                 or "[15419]" in m or "[2649]" in m
@@ -1413,13 +1413,12 @@ def _explain_debug_run_error(msg: str) -> Optional[str]:
     if not internal:
         return None
     return (
-        "  └─ This is an Oracle debugger limitation, not a fault in your\n"
-        "     code: the JDWP debug VM can't execute some constructs while\n"
-        "     attached — most commonly a FORALL over fields of a record\n"
-        "     collection (`forall x in <list<Record>> { ... :x.field ... }`).\n"
-        "     The package is valid and runs fine without --debug.\n"
-        "     Workarounds: debug a caller and step OVER the bulk operation,\n"
-        "     put the breakpoint after it, or run without the debugger."
+        "  └─ Oracle's debug VM hit a construct it can't instrument while\n"
+        "     attached (ORA-00600/PLS-707). The code is valid and runs fine\n"
+        "     without --debug. In the IntelliJ plugin this is handled (it\n"
+        "     scopes ClassPrepare to your breakpoint's classes); from the\n"
+        "     CLI, run the unit without --debug, or simplify the offending\n"
+        "     hand-written sql!{} block."
     )
 
 

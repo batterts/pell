@@ -167,38 +167,39 @@ pell debug-target stub.pell --jdwp 192.168.1.10:5005 [--wait-for-go]
 pell debug-source HR.EMPLOYEES --type PACKAGE_BODY
 ```
 
-## Constructs Oracle's debugger can't step through
+## ClassPrepare must be filtered (the FORALL ORA-00600)
 
-A few otherwise-valid constructs throw an Oracle **internal** error
-while the JDWP debug VM is attached — even though the package compiles
-and runs fine without `--debug`. The signature:
+Debugging a unit with a `FORALL` over a record collection (`forall x in
+<list<Record>> { sql!{ insert ... :x.field ... } }`) once threw an Oracle
+internal error and dropped the connection:
 
 ```
 ORA-00600: internal error code, arguments: [15419], [severe error
            during PL/SQL execution], [2649], ...
-ORA-06544: PL/SQL: internal error, arguments: [2649], ...
 ORA-06553: PLS-707: unsupported construct or internal error [2649]
 DPY-4011: the database or network closed the connection
 ```
 
-The usual culprit is a **`FORALL` over the fields of a record
-collection** — what `forall x in <list<Record>> { ... :x.field ... }`
-lowers to (`FORALL i ... VALUES (rows(i).a, rows(i).b, ...)`). Oracle's
-debug VM can't execute the per-field collection bind while attached.
+The cause was **not** the FORALL and **not** the compile mode (it
+reproduces under both `PLSQL_DEBUG=TRUE` and the modern
+`PLSQL_OPTIMIZE_LEVEL=1`). It was a **blanket all-classes ClassPrepare
+request**. pell emits a record collection as a nested type
+(`$Oracle.PackageBody.SCHEMA.PKG.T_<rec>_LIST` plus a `$element` and
+array form), and Oracle prepares those types *lazily, mid-FORALL*. With
+a blanket ClassPrepare armed, delivering a prepare event for one of
+those nested types during FORALL execution crashes the session.
 
-This is an Oracle limitation, not a pell codegen fault — the code is
-valid and runs correctly outside the debugger. `pell debug-target`
-detects this error class and prints an explanation pointing here.
+The fix (in `PellDebugProcess`): arm ClassPrepare **only** for the exact
+classes our breakpoints target — `$Oracle.Block.*` for the stub block
+and `*.<PKG>` for each package body — never a blanket request. The
+collection types then prepare silently (no matching request, no event),
+and the FORALL is fully steppable: a breakpoint *after* it is reached
+and hit normally. This is what SQL Developer does; it never rewrites your
+code, and neither does pell.
 
-**Workarounds**
-
-- Debug a *caller* and step **over** the bulk operation, or put the
-  breakpoint *after* it — only executing the construct under the
-  attached VM trips the error.
-- Run the unit without `--debug` (it's valid; only live stepping fails).
-- If you must step the body, temporarily rewrite the `forall` as a
-  plain `for` loop with a per-row `sql!{ insert ... }` (row-by-row is
-  debuggable — that's the B1 vs B2 benchmark difference).
+`pell debug-target` still translates the raw ORA-00600 to a readable
+hint in case a hand-written `sql!{}` block trips a different
+debug-hostile construct.
 
 ## Protocol notes (pinned by OracleJdwpProtocolTest)
 

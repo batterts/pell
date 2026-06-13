@@ -260,11 +260,19 @@ class PellDebugProcess(
             val acceptedVm = conn.accept(cargs)
             vm = acceptedVm
             console("pell debugger: attached — ${acceptedVm.name()} ${acceptedVm.version()}")
-            acceptedVm.eventRequestManager().createClassPrepareRequest().apply {
-                setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD)
-                enable()
-            }
+            // Arm ClassPrepare ONLY for the classes our breakpoints target
+            // — never a blanket all-classes request. A blanket request also
+            // matches the record-collection types pell emits (t_<rec>_list
+            // and their $element/array forms), which Oracle prepares lazily
+            // *inside* a FORALL over a record collection. Delivering a
+            // ClassPrepare event for one of those mid-FORALL throws
+            // ORA-00600 [15419] / PLS-707 (severe error during PL/SQL
+            // execution) and drops the connection. Targeted filters let
+            // those internal types prepare silently — the construct is then
+            // fully debuggable, exactly as SQL Developer handles it.
             vmAttached.countDown()
+            synchronized(pending) { pending.map { it.map }.distinct() }
+                .forEach { ensureClassPrepareFor(it) }
             armWhatWeCan()
             acceptedVm.resume()
 
@@ -342,7 +350,45 @@ class PellDebugProcess(
             return
         }
         synchronized(pending) { pending.add(Pending(target.first, target.second, bp)) }
-        if (vmAttached.count == 0L) armWhatWeCan()
+        if (vmAttached.count == 0L) {
+            ensureClassPrepareFor(target.first)
+            armWhatWeCan()
+        }
+    }
+
+    /** ClassPrepare requests already armed, deduped by filter pattern. */
+    private val classPrepareFilters =
+        java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    /** Arm a ClassPrepare request scoped to exactly `u`'s class (never a
+     *  blanket request — see attach()). The filter matches the unit's own
+     *  class but NOT the nested record-collection types under it, so those
+     *  can prepare lazily inside a FORALL without a crashing event. */
+    private fun ensureClassPrepareFor(u: PellSrcMap.Unit) {
+        val machine = vm ?: return
+        val pat = if (u.kind == "BLOCK") {
+            "\$Oracle.Block.*"
+        } else {
+            val nm = u.name?.uppercase() ?: return
+            // Schema known → exact class name (no wildcard at all). Schema
+            // unknown → `*.NAME`: a trailing-segment match that catches the
+            // body but not `....NAME.T_X_LIST` (which ends in the type name).
+            if (u.schema != null)
+                "\$Oracle.${u.jdwpKind()}.${u.schema!!.uppercase()}.$nm"
+            else
+                "*.$nm"
+        }
+        if (!classPrepareFilters.add(pat)) return
+        try {
+            machine.eventRequestManager().createClassPrepareRequest().apply {
+                setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD)
+                addClassFilter(pat)
+                enable()
+            }
+        } catch (e: Exception) {
+            // A malformed pattern just means we fall back to armWhatWeCan's
+            // allClasses() rescan when something else prepares.
+        }
     }
 
     /** The srcmap that owns a file: the script's anon map, a cached

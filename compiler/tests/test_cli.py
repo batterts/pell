@@ -118,6 +118,6 @@ def test_explain_debug_run_error_maps_internal_errors():
             "ORA-06553: PLS-707: unsupported construct or internal error [2649]")
     hint = cli._explain_debug_run_error(real)
     assert hint is not None
-    assert "FORALL" in hint and "without --debug" in hint
+    assert "without --debug" in hint and "ClassPrepare" in hint
     # Ordinary errors don't trigger the hint.
     assert cli._explain_debug_run_error("ORA-00942: table or view does not exist") is None

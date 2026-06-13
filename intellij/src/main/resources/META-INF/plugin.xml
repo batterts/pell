@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.9.4</version>
+    <version>0.9.5</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,17 @@ END staffing;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.9.5 — debug FORALL / bulk code without crashing the session</h3>
+        <ul><li>Fixed an Oracle ORA-00600 [15419] / PLS-707 that killed the
+        debug session when stepping a unit containing a <code>FORALL</code>
+        over a record collection (BULK COLLECT + forall). Root cause was a
+        blanket all-classes ClassPrepare request: pell emits record
+        collections as nested types that Oracle prepares lazily inside the
+        FORALL, and delivering a prepare event for one mid-loop crashed the
+        session. The debugger now scopes ClassPrepare to exactly the classes
+        your breakpoints target, so those internal types prepare silently and
+        the FORALL is fully steppable — a breakpoint after it is hit normally.
+        (No code rewriting; this is how SQL Developer handles it.)</li></ul>
         <h3>0.9.4 — friendlier utPLSQL setup</h3>
         <ul><li><code>pell test</code> now fails fast with install
         instructions (the headless SYSDBA one-liner) when utPLSQL isn't
