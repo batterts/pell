@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.9.3</version>
+    <version>0.9.4</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,15 @@ END staffing;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.9.4 — friendlier utPLSQL setup</h3>
+        <ul><li><code>pell test</code> now fails fast with install
+        instructions (the headless SYSDBA one-liner) when utPLSQL isn't
+        present on the database, instead of a cryptic PLS-00201.</li>
+        <li>New <b>Settings &rarr; Tools &rarr; pell &rarr; utPLSQL schema</b>
+        field for the rare install that has no public synonyms — names the
+        owner schema (e.g. <code>UT3</code>) so <code>ut</code> / <code>ut_*</code>
+        get qualified. Plumbed as <code>PELL_UT_SCHEMA</code>; also available
+        as <code>pell test --ut-schema</code>.</li></ul>
         <h3>0.9.3 — utPLSQL "run test" gutter icons</h3>
         <ul><li>A green run arrow now appears in the gutter next to the
         <code>module</code> keyword of any <code>@suite</code> module (runs

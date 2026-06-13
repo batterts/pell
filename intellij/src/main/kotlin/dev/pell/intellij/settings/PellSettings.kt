@@ -52,6 +52,11 @@ class PellSettings : PersistentStateComponent<PellSettings.State> {
          *  inherit from the IDE's environment. Per-run-config env
          *  vars override this. */
         var dbUrl: String = "",
+        /** Schema utPLSQL is installed in, when it isn't reachable via
+         *  public synonym (the default install creates them, so this
+         *  stays blank for most setups). Passed to `pell test` as
+         *  PELL_UT_SCHEMA so `ut` / `ut_*` get qualified. */
+        var utSchema: String = "",
     )
 
     private var state = State()
@@ -83,6 +88,10 @@ class PellSettings : PersistentStateComponent<PellSettings.State> {
     var dbUrl: String
         get() = state.dbUrl.trim()
         set(value) { state.dbUrl = value.trim() }
+
+    var utSchema: String
+        get() = state.utSchema.trim()
+        set(value) { state.utSchema = value.trim() }
 
     companion object {
         @JvmStatic

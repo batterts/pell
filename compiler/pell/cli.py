@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -1107,6 +1108,68 @@ _UT_REPORTERS = {
 }
 
 
+_UT_NOT_INSTALLED_HELP = """\
+pell test: utPLSQL is not installed (or not reachable) on this database.
+
+  `pell test` runs your @suite / @test modules through utPLSQL's
+  ut.run(). It is a one-time, per-database install (do it as a DBA):
+
+    1. Download a release and unpack it:
+         https://github.com/utPLSQL/utPLSQL/releases/latest
+       (grab utPLSQL.tar.gz or utPLSQL.zip)
+
+    2. From the unpacked `source/` directory, connected as SYSDBA:
+         sqlplus sys/<password>@<db> as sysdba @install_headless.sql
+
+       That creates the UT3 schema WITH public synonyms and grants to
+       PUBLIC, so ut.run() is callable from every schema. Override the
+       schema / password / tablespace positionally if you like:
+         @install_headless.sql UT3 UT3 USERS
+
+  Install guide:
+    https://github.com/utPLSQL/utPLSQL/blob/develop/docs/userguide/install.md
+
+  Already installed, but in a schema WITHOUT public synonyms? Tell pell
+  where it lives:
+         pell test <suite> --ut-schema UT3
+    or set PELL_UT_SCHEMA=UT3 (in the IDE: Settings -> Tools -> pell).
+"""
+
+
+def _ut_owner(args: argparse.Namespace) -> Optional[str]:
+    """The schema utPLSQL is installed in, when it isn't reachable via
+    public synonym. CLI flag wins over the PELL_UT_SCHEMA env var; None
+    means "resolve `ut` unqualified" (the default public-synonym install)."""
+    flag = (getattr(args, "ut_schema", None) or "").strip()
+    if flag:
+        return flag
+    env = (os.environ.get("PELL_UT_SCHEMA") or "").strip()
+    return env or None
+
+
+def _utplsql_available(conn, owner: Optional[str]) -> bool:
+    """True when the UT package is visible to the connected schema —
+    either via public synonym (default install) or in `owner`. Cheap
+    pre-flight so a missing install yields actionable guidance instead
+    of a raw PLS-00201 from deep inside ut.run()."""
+    if owner:
+        rows = conn.run_query(
+            "select count(*) n from all_objects "
+            "where object_type = 'PACKAGE' and object_name = 'UT' "
+            "and owner = upper(:o)",
+            {"o": owner},
+        )
+    else:
+        # Any UT package the caller can see (own schema, public synonym,
+        # or a direct grant) counts — that's exactly what ut.run() needs
+        # to resolve unqualified.
+        rows = conn.run_query(
+            "select count(*) n from all_objects "
+            "where object_type = 'PACKAGE' and object_name = 'UT'"
+        )
+    return int(list(rows[0].values())[0]) > 0
+
+
 def cmd_test(args: argparse.Namespace) -> int:
     """Run a utPLSQL suite (`@suite` pell module or any annotated
     package) and emit the chosen report.
@@ -1125,23 +1188,34 @@ def cmd_test(args: argparse.Namespace) -> int:
         print(f"pell: needs the driver dependency (pip install -e .[repl])\n  ({e})",
               file=sys.stderr)
         return 2
-    reporter = _UT_REPORTERS[args.reporter]
+    # utPLSQL lives behind public synonyms in the default install, so
+    # `ut` / `ut_*` resolve unqualified. When it's installed to a schema
+    # without those synonyms, --ut-schema / PELL_UT_SCHEMA names the
+    # owner and we qualify every framework reference with it.
+    owner = _ut_owner(args)
+    pfx = f"{owner}." if owner else ""
+    reporter = pfx + _UT_REPORTERS[args.reporter]
     suite = args.suite
     if args.reporter in ("coverage", "cobertura"):
         # Limit instrumentation to the schemas under test, or coverage
         # reports drown in SYS noise.
         block = (
-            "begin ut.run('" + suite + "', " + reporter + ", "
-            "a_coverage_schemes => ut_varchar2_list(USER)); end;"
+            f"begin {pfx}ut.run('" + suite + "', " + reporter + ", "
+            f"a_coverage_schemes => {pfx}ut_varchar2_list(USER)); end;"
         )
     else:
-        block = "begin ut.run('" + suite + "', " + reporter + "); end;"
+        block = f"begin {pfx}ut.run('" + suite + "', " + reporter + "); end;"
     try:
         conn = driver.connect(args.connect)
     except Exception as e:
         print(f"pell: connection failed: {e}", file=sys.stderr)
         return 1
     try:
+        # Fail fast with install guidance rather than a cryptic
+        # PLS-00201 from inside ut.run() when utPLSQL isn't there.
+        if not _utplsql_available(conn, owner):
+            print(_UT_NOT_INSTALLED_HELP, file=sys.stderr)
+            return 3
         lines = conn.run_block(block)
     except Exception as e:
         print(f"pell: ut.run failed: {e}", file=sys.stderr)
@@ -1443,6 +1517,10 @@ def main(argv: list[str] | None = None) -> int:
     tst.add_argument("--reporter", choices=sorted(_UT_REPORTERS), default="doc")
     tst.add_argument("-o", "--output", help="write the report to this file "
                      "(default: stdout)")
+    tst.add_argument("--ut-schema", dest="ut_schema",
+                     help="schema utPLSQL is installed in, when it isn't "
+                          "reachable via public synonym (default: resolve "
+                          "`ut` unqualified; or set PELL_UT_SCHEMA)")
     tst.add_argument("-c", "--connect", help="user/pass@host:port/service (or set PELL_DB_URL)")
     tst.set_defaults(func=cmd_test)
 

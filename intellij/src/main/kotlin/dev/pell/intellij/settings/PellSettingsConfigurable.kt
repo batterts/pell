@@ -37,6 +37,7 @@ class PellSettingsConfigurable(private val project: Project) : Configurable {
     private val settings = PellSettings.getInstance(project)
     private val targetDirField = JBTextField(settings.targetDirName, 20)
     private val dbUrlField = JBTextField(settings.dbUrl, 30)
+    private val utSchemaField = JBTextField(settings.utSchema, 12)
     private val jdwpPortField = JBTextField(settings.debugJdwpPort, 8)
     private val callbackHostField = JBTextField(settings.debugCallbackHost, 20)
     private val transportField = javax.swing.JComboBox(arrayOf("jdwp", "sql")).apply {
@@ -69,6 +70,14 @@ class PellSettingsConfigurable(private val project: Project) : Configurable {
                     "(exec, deploy, REPL target, debugger): " +
                     "<code>user/pass@host:port/service</code>. Blank = inherit from the " +
                     "IDE's environment. Per-run-config environment variables override this."
+                )
+                row("utPLSQL schema:") {
+                    cell(utSchemaField).align(AlignX.LEFT)
+                }.rowComment(
+                    "Only for <code>pell test</code>. Leave blank for a normal utPLSQL " +
+                    "install — it creates public synonyms, so <code>ut.run()</code> " +
+                    "resolves unqualified. Set the owner schema (e.g. <code>UT3</code>) " +
+                    "only if utPLSQL was installed WITHOUT public synonyms."
                 )
             }
             group("Debugger") {
@@ -201,6 +210,7 @@ class PellSettingsConfigurable(private val project: Project) : Configurable {
     override fun isModified(): Boolean =
         targetDirField.text.trim() != settings.targetDirName ||
         dbUrlField.text.trim() != settings.dbUrl ||
+        utSchemaField.text.trim() != settings.utSchema ||
         jdwpPortField.text.trim() != settings.debugJdwpPort ||
         callbackHostField.text.trim() != settings.debugCallbackHost ||
         (transportField.selectedItem as String) != settings.debugTransport
@@ -220,6 +230,7 @@ class PellSettingsConfigurable(private val project: Project) : Configurable {
         settings.debugJdwpPort = port
         settings.debugCallbackHost = callbackHostField.text.trim()
         settings.dbUrl = dbUrlField.text.trim()
+        settings.utSchema = utSchemaField.text.trim()
         settings.debugTransport = transportField.selectedItem as String
     }
 
@@ -227,6 +238,7 @@ class PellSettingsConfigurable(private val project: Project) : Configurable {
         targetDirField.text = settings.targetDirName
         jdwpPortField.text = settings.debugJdwpPort
         dbUrlField.text = settings.dbUrl
+        utSchemaField.text = settings.utSchema
         callbackHostField.text = settings.debugCallbackHost
         transportField.selectedItem = settings.debugTransport
     }

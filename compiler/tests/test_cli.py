@@ -66,3 +66,43 @@ def test_parse_command():
     assert result.returncode == 0, result.stderr
     assert "Module" in result.stdout
     assert "FnDef" in result.stdout
+
+
+# --- pell test: utPLSQL owner resolution + availability pre-flight -------
+
+def test_ut_owner_resolution(monkeypatch):
+    import argparse
+    from pell import cli
+    monkeypatch.delenv("PELL_UT_SCHEMA", raising=False)
+    # No flag, no env → unqualified (None).
+    assert cli._ut_owner(argparse.Namespace(ut_schema=None)) is None
+    # Flag wins.
+    assert cli._ut_owner(argparse.Namespace(ut_schema="UT3")) == "UT3"
+    # Env when no flag.
+    monkeypatch.setenv("PELL_UT_SCHEMA", "MYUT")
+    assert cli._ut_owner(argparse.Namespace(ut_schema=None)) == "MYUT"
+    # Flag still wins over env; blanks normalize to None.
+    assert cli._ut_owner(argparse.Namespace(ut_schema="UT3")) == "UT3"
+    assert cli._ut_owner(argparse.Namespace(ut_schema="   ")) == "MYUT"
+
+
+def test_utplsql_available_query(monkeypatch):
+    from pell import cli
+
+    class FakeConn:
+        def __init__(self, count):
+            self.count = count
+            self.last = None
+        def run_query(self, sql, binds=None):
+            self.last = (sql, binds)
+            return [{"n": self.count}]
+
+    # Present.
+    assert cli._utplsql_available(FakeConn(1), None) is True
+    # Absent.
+    assert cli._utplsql_available(FakeConn(0), None) is False
+    # Owner-qualified path binds the owner.
+    c = FakeConn(1)
+    cli._utplsql_available(c, "UT3")
+    assert "owner = upper(:o)" in c.last[0]
+    assert c.last[1] == {"o": "UT3"}
