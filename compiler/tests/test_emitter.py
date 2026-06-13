@@ -2515,3 +2515,25 @@ def test_cross_pkg_list_arguments_adapt(tmp_path):
     # local list arg: transit copy loop into a foreign-typed temp
     assert "l_xs(l_xs.COUNT + 1) := 'z';" in sql
     assert ":= l_xs(" in sql           # element copy from the local
+
+
+def test_let_binding_unit_call_emits_statement():
+    """`let x = <Unit/procedure call>` has no value to bind — emit the call
+    as a statement, never a typeless `l_x ;` (the bug that bound a
+    Result<Unit,…> result and produced invalid PL/SQL)."""
+    sql = compile_to_sql("""
+        module t;
+        pub fn proc() {}
+        pub fn run() -> Result<Unit, E> { return Ok(()); }
+        pub error E { x: number }
+        pub fn go() {
+            let result = run()?;
+            let _ = proc();
+        }
+    """)
+    # the calls lower to bare statements...
+    assert "run();" in sql or "t.run();" in sql
+    assert "proc();" in sql
+    # ...and NO typeless / spurious binding local is declared
+    assert "l_result " not in sql
+    assert "l__ " not in sql

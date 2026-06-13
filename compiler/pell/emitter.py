@@ -2062,6 +2062,14 @@ class Emitter:
 
     def _emit_let(self, s: A.LetStmt, indent: str) -> list[str]:
         nm = local_name(s.name)
+        # `let _ = foo();` or `let x = <Unit/procedure call>;` — a Unit
+        # value has nothing to bind, so emit the call as a statement
+        # rather than a typeless `l_x ;` declaration (PLS-00103). This
+        # makes the `let _ = …` discard idiom work, and keeps the
+        # unused-return error's own suggested fix honest even when the
+        # callee turns out to be a procedure.
+        if s.value is not None and self._call_returns_unit(s.value):
+            return self._emit_expr_stmt(A.ExprStmt(loc=s.loc, expr=s.value), indent)
         # decide type for declaration
         ty = self._lt(s.type_annot) if s.type_annot else None
         # Special case: `let x: list<T> = [a, b, c];` — declare an INDEX BY
@@ -5350,6 +5358,30 @@ class Emitter:
             loc,
             code="pell.unused-return",
         )
+
+    def _call_returns_unit(self, e: A.Expr) -> bool:
+        """True when `e` is a call (optionally wrapped in `?` / Ok / Some)
+        to a resolvable fn whose return type is Unit — i.e. a PL/SQL
+        procedure. Same resolution as _reject_unused_return; returns
+        False for anything we can't type (be permissive)."""
+        inner: A.Expr = e
+        while isinstance(inner, (A.QuestionMark, A.OkExpr, A.SomeExpr)):
+            inner = inner.inner
+        if not (isinstance(inner, A.Call) and isinstance(inner.callee, A.Ident)):
+            return False
+        fn_name = inner.callee.name
+        ret_type: Optional[A.TypeRef] = None
+        found = False
+        for fn in self._fns:
+            if fn.name == fn_name:
+                ret_type, found = fn.return_type, True
+                break
+        if not found and "::" in fn_name and fn_name in self._project_signatures:
+            ret_type, found = self._project_signatures[fn_name], True
+        if not found:
+            return False  # unknown callee — be permissive
+        # ret_type None here means a found void procedure → Unit.
+        return self._is_unit_return(ret_type)
 
     @staticmethod
     def _is_unit_return(t: A.TypeRef) -> bool:
