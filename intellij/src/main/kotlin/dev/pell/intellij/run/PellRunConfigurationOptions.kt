@@ -15,8 +15,16 @@ class PellRunConfigurationOptions : LocatableRunConfigurationOptions() {
     /** Absolute path to the .pell file to run. */
     var filePath: String? by string()
 
-    /** "build", "exec", "parse", "tokens", or e.g. "build -o" / "exec --dry-run". */
+    /** "build", "exec", "parse", "tokens", "test", or e.g. "build -o" /
+     *  "exec --dry-run". */
     var action: String? by string("exec")
+
+    /** For `action == "test"`: the utPLSQL suite path passed to
+     *  `pell test` (`ut.run(...)`) — a package name (`ut_pell_examples`),
+     *  schema-qualified package (`hr.suite`), or a single test
+     *  (`ut_pell_examples.t_csv`). Ignored by other actions, which target
+     *  `filePath`. */
+    var suiteName: String? by string()
 
     /** Extra args appended to the pell command line (e.g. `--target 19c`). */
     var extraArgs: String? by string()

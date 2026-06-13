@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.9.2</version>
+    <version>0.9.3</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,19 @@ END staffing;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.9.3 — utPLSQL "run test" gutter icons</h3>
+        <ul><li>A green run arrow now appears in the gutter next to the
+        <code>module</code> keyword of any <code>@suite</code> module (runs
+        the whole suite) and next to every <code>@test pub fn</code> (runs
+        that single test). Backed by <code>pell test</code> &rarr;
+        <code>ut.run(...)</code> against the deployed package. Suite names
+        are derived from the module declaration
+        (<code>module hr::a.b.checks</code> &rarr; <code>hr.checks</code>).</li>
+        <li>These stack with the existing per-<code>pub fn</code> Run/Debug
+        stub icons, so a <code>@test</code> fn can be run as a utPLSQL test
+        or stepped through via a generated stub.</li>
+        <li>Fixed a latent gutter-marker contract violation for .pell files
+        whose first line is an annotation (e.g. <code>@suite</code>).</li></ul>
         <h3>0.9.2 — breakpoints bind to the right anonymous block</h3>
         <ul><li>Fixed breakpoints silently never firing in debug sessions:
         the <code>dbms_debug_jdwp.connect_tcp</code> call is itself an
@@ -887,6 +900,12 @@ END staffing;
         <runLineMarkerContributor
             language="pell"
             implementationClass="dev.pell.intellij.run.PellRunLineMarkerContributor" />
+        <!-- utPLSQL "run test" gutter icons: whole-suite on an @suite
+             module's `module` keyword, single-test on each @test pub fn.
+             Backed by `pell test` (ut.run against the deployed package). -->
+        <runLineMarkerContributor
+            language="pell"
+            implementationClass="dev.pell.intellij.run.PellTestRunLineMarkerContributor" />
 
         <!-- Debugger: gutter breakpoints in .pell files, a Debug
              executor for pell run configs (JDWP via DBMS_DEBUG_JDWP —

@@ -33,31 +33,44 @@ class PellCommandLineState(
                 "(\"pell home\") or place a `pell` script at the project root.",
             )
 
-        val filePath = config.filePath ?: throw ExecutionException(
-            "This run configuration has no file path set."
-        )
-        if (!File(filePath).isFile) {
-            throw ExecutionException("File not found: $filePath")
-        }
-
-        // pell's CLI shape is: `pell <subcmd> <file> [flags]`. Build the
-        // arg list in that order so flags like `-o`, `--dry-run` land
-        // after the input file, not between subcmd and file.
         val tokens = config.action.split(Regex("\\s+")).filter { it.isNotBlank() }
         val subcmd = tokens.firstOrNull() ?: throw ExecutionException("empty pell action")
         val flagsAfterSubcmd = tokens.drop(1)
 
         val args = mutableListOf<String>()
         args += subcmd
-        args += filePath
-        args += flagsAfterSubcmd
 
-        // `build -o` is a shorthand: append the canonical output path
-        // `<dir>/<name>.sql` (matches the External Tool variant).
-        if (subcmd == "build" && "-o" in flagsAfterSubcmd) {
-            val src = File(filePath)
-            val out = File(src.parentFile, src.nameWithoutExtension + ".sql")
-            args += out.absolutePath
+        if (subcmd == "test") {
+            // `pell test <suite> [flags]` — the target is a utPLSQL suite
+            // path (`ut.run(...)`), not a file. No file is read; the
+            // command connects to the DB and runs the deployed package.
+            val suite = config.suiteName?.takeIf { it.isNotBlank() }
+                ?: throw ExecutionException(
+                    "This test run configuration has no suite name set."
+                )
+            args += suite
+            args += flagsAfterSubcmd
+        } else {
+            val filePath = config.filePath ?: throw ExecutionException(
+                "This run configuration has no file path set."
+            )
+            if (!File(filePath).isFile) {
+                throw ExecutionException("File not found: $filePath")
+            }
+
+            // pell's CLI shape is: `pell <subcmd> <file> [flags]`. Build the
+            // arg list in that order so flags like `-o`, `--dry-run` land
+            // after the input file, not between subcmd and file.
+            args += filePath
+            args += flagsAfterSubcmd
+
+            // `build -o` is a shorthand: append the canonical output path
+            // `<dir>/<name>.sql` (matches the External Tool variant).
+            if (subcmd == "build" && "-o" in flagsAfterSubcmd) {
+                val src = File(filePath)
+                val out = File(src.parentFile, src.nameWithoutExtension + ".sql")
+                args += out.absolutePath
+            }
         }
         config.extraArgs?.let {
             args += it.split(Regex("\\s+")).filter { token -> token.isNotBlank() }

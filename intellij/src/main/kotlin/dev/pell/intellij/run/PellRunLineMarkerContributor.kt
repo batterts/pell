@@ -43,7 +43,12 @@ class PellRunLineMarkerContributor : RunLineMarkerContributor() {
     override fun getInfo(element: PsiElement): Info? {
         val file = element.containingFile ?: return null
         if (file.fileType !is PellFileType) return null
-        // One marker per file — on the first PSI leaf (offset 0).
+        // One marker per file — on the first PSI *leaf* (offset 0).
+        // Must be a leaf: when a file opens with `@suite`, the
+        // PellAnnotation node also starts at offset 0, and returning a
+        // marker for that non-leaf trips the platform's "leaf elements
+        // only" contract.
+        if (element.firstChild != null) return null
         if (element.textOffset != 0) return null
         return Info(
             AllIcons.Actions.Compile,

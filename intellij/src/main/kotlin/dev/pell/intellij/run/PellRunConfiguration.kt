@@ -31,10 +31,15 @@ class PellRunConfiguration(
         get() = options.filePath
         set(v) { options.filePath = v }
 
-    /** "build", "exec", "parse", or "tokens". */
+    /** "build", "exec", "parse", "tokens", or "test". */
     var action: String
         get() = options.action ?: "exec"
         set(v) { options.action = v }
+
+    /** utPLSQL suite path for `action == "test"` (see options doc). */
+    var suiteName: String?
+        get() = options.suiteName
+        set(v) { options.suiteName = v }
 
     var extraArgs: String?
         get() = options.extraArgs
