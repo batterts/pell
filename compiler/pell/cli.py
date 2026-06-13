@@ -1413,13 +1413,15 @@ def _explain_debug_run_error(msg: str) -> Optional[str]:
     if not internal:
         return None
     return (
-        "  └─ This is an Oracle debugger limitation, not a fault in your\n"
-        "     code: the JDWP debug VM can't execute some constructs while\n"
-        "     attached — most commonly a FORALL over fields of a record\n"
-        "     collection (`forall x in <list<Record>> { ... :x.field ... }`).\n"
-        "     The package is valid and runs fine without --debug.\n"
-        "     Workarounds: debug a caller and step OVER the bulk operation,\n"
-        "     put the breakpoint after it, or run without the debugger."
+        "  └─ This is an Oracle debugger limitation: its JDWP debug VM\n"
+        "     can't EXECUTE some constructs while attached — classically a\n"
+        "     FORALL over record-collection fields. pell already lowers its\n"
+        "     own `forall` to a steppable FOR loop in --debug builds, so a\n"
+        "     pell program shouldn't hit this; if you do, it's likely a\n"
+        "     hand-written sql!{} PL/SQL block or another such construct.\n"
+        "     The code is valid and runs fine without --debug. Redeploy\n"
+        "     that unit without --debug to run it natively, or rework the\n"
+        "     offending construct."
     )
 
 

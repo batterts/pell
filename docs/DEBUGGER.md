@@ -181,24 +181,27 @@ ORA-06553: PLS-707: unsupported construct or internal error [2649]
 DPY-4011: the database or network closed the connection
 ```
 
-The usual culprit is a **`FORALL` over the fields of a record
+The classic culprit is a **`FORALL` over the fields of a record
 collection** — what `forall x in <list<Record>> { ... :x.field ... }`
-lowers to (`FORALL i ... VALUES (rows(i).a, rows(i).b, ...)`). Oracle's
-debug VM can't execute the per-field collection bind while attached.
+lowers to (`FORALL i ... VALUES (rows(i).a, rows(i).b, ...)`). The debug
+VM can't execute the per-field collection bind while attached, and —
+crucially — the breakpoint location doesn't matter: to reach *any* line
+at or after the FORALL, Oracle has to execute it under the attached VM,
+so a breakpoint after it is simply unreachable.
 
-This is an Oracle limitation, not a pell codegen fault — the code is
-valid and runs correctly outside the debugger. `pell debug-target`
-detects this error class and prints an explanation pointing here.
+**pell handles its own `forall` automatically.** In `--debug` builds the
+emitter lowers `forall` to an equivalent row-by-row `FOR` loop (the same
+single-DML body, one row at a time — exactly the steppable B1 form),
+marked with a `-- @pell-debug:` comment in the generated SQL. The
+shipped (non-debug) artifact keeps the fast FORALL. So a pure-pell
+program is steppable straight through the bulk operation.
 
-**Workarounds**
-
-- Debug a *caller* and step **over** the bulk operation, or put the
-  breakpoint *after* it — only executing the construct under the
-  attached VM trips the error.
-- Run the unit without `--debug` (it's valid; only live stepping fails).
-- If you must step the body, temporarily rewrite the `forall` as a
-  plain `for` loop with a per-row `sql!{ insert ... }` (row-by-row is
-  debuggable — that's the B1 vs B2 benchmark difference).
+You can still hit the raw Oracle error from a construct pell *doesn't*
+rewrite — a hand-written `sql!{}` PL/SQL block, say. `pell debug-target`
+detects the error class and points here. In that case the only real
+fixes are to **run the unit without `--debug`** (it's valid; native
+execution is fine) or to rework the offending construct — a breakpoint
+"after" it can't help, because reaching it is what crashes.
 
 ## Protocol notes (pinned by OracleJdwpProtocolTest)
 

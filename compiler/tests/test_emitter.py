@@ -2537,3 +2537,32 @@ def test_let_binding_unit_call_emits_statement():
     # ...and NO typeless / spurious binding local is declared
     assert "l_result " not in sql
     assert "l__ " not in sql
+
+
+def test_forall_lowers_to_for_loop_in_debug_builds():
+    """Oracle's JDWP debug VM can't execute a FORALL over record-collection
+    fields (ORA-00600). Debug builds emit an equivalent row-by-row FOR
+    loop so the body is steppable; production builds keep the FORALL."""
+    src = """
+        module m;
+        pub record R { a: number }
+        pub fn go() {
+            let rows: list<R> = sql! { select x a from t }.collect();
+            forall x in rows {
+                sql! { insert into dst(a) values (:x.a) };
+            }
+        }
+    """
+    plain = compile_to_sql(src)
+    assert "FORALL i_x IN" in plain
+    assert "FOR i_x IN" not in plain
+
+    from pell.parser import parse
+    from pell.emitter import emit
+    debug = emit(parse(src, "<t>"), debug=True)
+    assert "FOR i_x IN l_rows.FIRST .. l_rows.LAST LOOP" in debug
+    assert "END LOOP;" in debug
+    assert "FORALL i_x IN" not in debug    # no actual FORALL statement
+    assert "@pell-debug" in debug          # the substitution is visible
+    # the single-DML body is preserved, binds rewritten the same way
+    assert "insert into dst(a) values (l_rows(i_x).a)" in debug.lower()
