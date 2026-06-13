@@ -385,6 +385,7 @@ class PellDebugProcess(
                 addClassFilter(pat)
                 enable()
             }
+            console("pell debugger: ClassPrepare scoped to $pat")
         } catch (e: Exception) {
             // A malformed pattern just means we fall back to armWhatWeCan's
             // allClasses() rescan when something else prepares.

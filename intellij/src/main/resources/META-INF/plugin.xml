@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.9.5</version>
+    <version>0.9.6</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,12 @@ END staffing;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.9.6 — ship the ClassPrepare fix for real (clean build)</h3>
+        <ul><li>0.9.5 carried the FORALL/bulk ClassPrepare fix in source but
+        an incremental build packaged a stale class, so installs still
+        crashed. This is a clean rebuild that actually contains it. The
+        debug console now prints <code>ClassPrepare scoped to &lt;class&gt;</code>
+        so you can confirm the scoping is active.</li></ul>
         <h3>0.9.5 — debug FORALL / bulk code without crashing the session</h3>
         <ul><li>Fixed an Oracle ORA-00600 [15419] / PLS-707 that killed the
         debug session when stepping a unit containing a <code>FORALL</code>
