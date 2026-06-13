@@ -171,6 +171,15 @@ class PellDebugProcess(
             val exe = pellExe ?: error("pell CLI not found — set pell home on the run config")
             val script = config.filePath ?: error("run configuration has no file")
 
+            // Identify both halves up front so a pasted log is unambiguous
+            // about which build is running.
+            val pluginVer = com.intellij.ide.plugins.PluginManagerCore
+                .getPlugin(com.intellij.openapi.extensions.PluginId.getId("dev.pell"))
+                ?.version ?: "?"
+            val cliVer = runCatching { runPell(exe, "--version").second.trim() }
+                .getOrDefault("").ifBlank { "?" }
+            console("pell debugger: plugin $pluginVer, CLI $exe ($cliVer)")
+
             // 1. debug-deploy the module under test (best-effort: the
             // script itself may be a plain exec script, not a module).
             val deployPath = config.options.deployPath ?: script
@@ -421,6 +430,10 @@ class PellDebugProcess(
                 // have PREPAREd yet), keep the breakpoint pending for the
                 // next ClassPrepare instead of dropping it.
                 val candidates = classes.filter { c -> p.map.matches(c.name()) }
+                if (candidates.isNotEmpty()) {
+                    console("pell debugger: bp @unit ${p.unitLine} candidates=" +
+                            candidates.joinToString { it.name() })
+                }
                 for (rt in candidates) {
                     if (armOn(rt, p)) { it.remove(); break }
                 }
@@ -448,6 +461,7 @@ class PellDebugProcess(
                 val req = vm!!.eventRequestManager().createBreakpointRequest(locs[0])
                 req.setSuspendPolicy(EventRequest.SUSPEND_ALL)
                 req.enable()
+                console("pell debugger: armed bp on ${rt.name()} at ${locs[0].method().name()}:$probe")
                 armed[req] = p.bp
                 session.updateBreakpointPresentation(
                     p.bp,

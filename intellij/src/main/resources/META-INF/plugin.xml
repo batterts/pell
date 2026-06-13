@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.9.6</version>
+    <version>0.9.7</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,15 @@ END staffing;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.9.7 — srcmap class match fix + debug diagnostics</h3>
+        <ul><li>Fixed PellSrcMap.matches() over-matching: it accepted nested
+        types (record collection types like T_X_LIST) as breakpoint
+        candidates, so the debugger could arm a breakpoint on a collection
+        accessor — a debug-hostile spot inside a FORALL. Now only the exact
+        package body / block class matches.</li>
+        <li>Debug start now prints the plugin + CLI version, the breakpoint
+        candidate classes, and where each breakpoint is armed — so a pasted
+        log pins down exactly what runs.</li></ul>
         <h3>0.9.6 — ship the ClassPrepare fix for real (clean build)</h3>
         <ul><li>0.9.5 carried the FORALL/bulk ClassPrepare fix in source but
         an incremental build packaged a stale class, so installs still

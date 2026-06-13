@@ -1424,6 +1424,7 @@ def _explain_debug_run_error(msg: str) -> Optional[str]:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="pell", description=f"pell compiler v{__version__}")
+    p.add_argument("--version", action="version", version=f"pell {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     b = sub.add_parser("build", help="compile .pell to PL/SQL")

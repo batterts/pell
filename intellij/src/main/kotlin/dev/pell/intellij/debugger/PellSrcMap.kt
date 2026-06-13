@@ -39,8 +39,15 @@ class PellSrcMap(val units: List<Unit>) {
             val parts = jdwpClassName.split(".")
             if (parts.size < 2 || parts[0] != "\$Oracle") return false
             if (parts[1] != jdwpKind()) return false
-            if (kind == "BLOCK") return true  // one anon block per session
-            if (parts.size < 4) return false
+            // Exact segment count only: a package body is
+            // `$Oracle.PackageBody.SCHEMA.NAME` (4) and a block is
+            // `$Oracle.Block.SCHEMA.HASH` (4). NESTED types — the record
+            // collection types pell emits (`….NAME.T_X_LIST`, `$element`,
+            // arrays) — have 5+ segments and must NOT match, or
+            // armWhatWeCan would try to set the breakpoint on a collection
+            // accessor (a debug-hostile spot inside a FORALL).
+            if (kind == "BLOCK") return parts.size == 4
+            if (parts.size != 4) return false
             val schemaOk = schema == null || parts[2].equals(schema, ignoreCase = true)
             return schemaOk && parts[3].equals(name, ignoreCase = true)
         }
