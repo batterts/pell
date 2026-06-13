@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.9.1</version>
+    <version>0.9.2</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,18 @@ END staffing;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.9.2 — breakpoints bind to the right anonymous block</h3>
+        <ul><li>Fixed breakpoints silently never firing in debug sessions:
+        the <code>dbms_debug_jdwp.connect_tcp</code> call is itself an
+        anonymous block, and at attach time it is the only
+        <code>$Oracle.Block</code> class visible — breakpoints were armed
+        against it, found "no code", and were permanently dropped before
+        the real script block ever PREPAREd. Arming now tries every
+        matching class and keeps breakpoints pending until a class that
+        actually has code at the mapped line appears.</li>
+        <li>The compiler no longer stamps a source marker on the
+        synthesized anon-block header line, so a breakpoint on the
+        script's first statement maps to the statement itself.</li></ul>
         <h3>0.9.1 — return-type-aware stubs + honest cross-schema deploys</h3>
         <ul><li>Generated debug stubs respect the fn's return type:
         procedures and <code>Result&lt;Unit,…&gt;</code> fns are called

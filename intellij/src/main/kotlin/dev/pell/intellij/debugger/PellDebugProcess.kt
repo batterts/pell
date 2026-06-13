@@ -366,12 +366,25 @@ class PellDebugProcess(
             val it = pending.iterator()
             while (it.hasNext()) {
                 val p = it.next()
-                val rt = classes.firstOrNull { c -> p.map.matches(c.name()) } ?: continue
-                if (armOn(rt, p)) it.remove()
+                // SEVERAL classes can match — a debug-target session always
+                // has at least TWO $Oracle.Block classes, because the
+                // `dbms_debug_jdwp.connect_tcp` call is itself an anonymous
+                // block. Arm on whichever candidate actually has code at
+                // the mapped line; if none does (the right class may not
+                // have PREPAREd yet), keep the breakpoint pending for the
+                // next ClassPrepare instead of dropping it.
+                val candidates = classes.filter { c -> p.map.matches(c.name()) }
+                for (rt in candidates) {
+                    if (armOn(rt, p)) { it.remove(); break }
+                }
             }
         }
     }
 
+    /** Try to arm `p` on `rt`. True only when a breakpoint request was
+     *  created — false when this class has no code at the mapped line
+     *  (wrong candidate class, or its line table isn't usable); the
+     *  caller keeps the breakpoint pending. */
     private fun armOn(rt: com.sun.jdi.ReferenceType, p: Pending): Boolean {
         return try {
             // Snap forward: markers can sit on declaration lines (no
@@ -383,9 +396,7 @@ class PellDebugProcess(
                 locs = runCatching { rt.locationsOfLine(probe) }.getOrDefault(emptyList())
             }
             if (locs.isEmpty()) {
-                console("pell debugger: ${rt.name()} has no code at unit line ${p.unitLine}",
-                        ConsoleViewContentType.ERROR_OUTPUT)
-                true  // drop it; never armable
+                false
             } else {
                 val req = vm!!.eventRequestManager().createBreakpointRequest(locs[0])
                 req.setSuspendPolicy(EventRequest.SUSPEND_ALL)

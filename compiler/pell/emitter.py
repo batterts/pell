@@ -1794,7 +1794,13 @@ class Emitter:
         body_pragmas = self._fn_body_pragmas(fn)
 
         out: list[str] = []
-        out.append(f"  {sig} IS{self._dbg_loc_marker(fn.loc)}")
+        # No marker on the synthesized anon-block main: its loc is
+        # borrowed from the first statement, so a header marker would
+        # shadow that statement's real entry in the srcmap (breakpoints
+        # would resolve to the PROCEDURE line instead of the code).
+        hdr_marker = ("" if fn.name == "pell_anon_main"
+                      else self._dbg_loc_marker(fn.loc))
+        out.append(f"  {sig} IS{hdr_marker}")
         for d in self._declares:
             out.append(f"    {d}")
         if has_finally:
