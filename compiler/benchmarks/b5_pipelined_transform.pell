@@ -4,6 +4,7 @@
 // noticeable cost over identity.
 
 module bench.b5;
+import dbms_utility;
 
 pub record Rating {
   user_id:  number,

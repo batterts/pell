@@ -3,6 +3,7 @@
 // Worst case — one round-trip per row at the SQL layer.
 
 module bench.b1;
+import dbms_utility;
 
 pub fn run() -> number {
   let t0: number = dbms_utility::get_time();

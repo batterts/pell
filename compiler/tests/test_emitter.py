@@ -2265,6 +2265,40 @@ def test_root_module_stays_public():
     assert "ACCESSIBLE BY" not in sql
 
 
+def test_no_root_in_domain_stays_public():
+    # `bench.b1`..`bench.b3` share the `bench` domain but there's no
+    # `bench` root module — they're independent entry points, not private
+    # helpers. With nothing to be private TO, no walls go up, so a driver
+    # / anon block can still call them (the bench.b1 regression).
+    from pell.parser import parse
+    from pell.emitter import emit
+    mods = _mk_modules((None, "bench.b1", False), (None, "bench.b2", False),
+                       (None, "bench.b3", False))
+    sql = emit(
+        parse("module bench.b1;\npub fn run() -> number { return 1; }", "<t>"),
+        project_modules=mods,
+    )
+    assert "ACCESSIBLE BY" not in sql
+
+
+def test_no_root_in_domain_allows_external_call():
+    # The compile-time access check must agree with the emission: an
+    # outside caller into a rootless domain is NOT rejected.
+    from pell.parser import parse
+    from pell.emitter import emit
+    mods = _mk_modules((None, "bench.b1", False), (None, "bench.b2", False),
+                       (None, "caller", False))
+    sql = emit(
+        parse(
+            "module caller;\nimport bench.b1;\n"
+            "pub fn go() -> number { return b1::run(); }",
+            "<t>",
+        ),
+        project_modules=mods,
+    )
+    assert "bench_b1.run()" in sql
+
+
 def test_open_module_skips_clause():
     from pell.parser import parse
     from pell.emitter import emit

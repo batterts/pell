@@ -89,18 +89,39 @@ END employees;
   `JSON_OBJECT_T` natively
 - **Notebook-style REPL** — variable persistence across cells,
   `\load` files, `catalog::` data dictionary helpers
+- **Deploy & test** — `pell deploy` installs to Oracle with honest
+  cross-schema error reporting; `pell test` runs utPLSQL `@suite` /
+  `@test` modules and emits doc / junit / sonar / coverage reports
+- **Step debugger** — breakpoints and variable inspection over
+  `DBMS_DEBUG_JDWP` (plus an outbound-only `DBMS_DEBUG` transport for
+  tunnels / NAT)
 - **Deployment artifact** — `.sql` output is SHA-anchored, byte-stable
   with `--reproducible`, meant to be committed
+
+## Commands
+
+```sh
+pell build <file|dir>     # compile to PL/SQL (-d <dir> for a tree, --target 19c)
+pell deploy <file|dir>    # build + install on PELL_DB_URL (--debug, --keep-going)
+pell test <suite>         # run a utPLSQL suite (--reporter, --ut-schema)
+pell exec <script>        # run an anonymous-block script (--dry-run to just print)
+pell repl                 # notebook-style REPL
+pell sql <file>           # run a .sql file, statement by statement
+pell srcmap <file>        # pell-line ↔ PL/SQL-line map (debugger support)
+pell parse|tokens <file>  # AST / token stream (debugging the compiler)
+```
 
 ## Learn more
 
 - **Docs & tutorial:** https://batterts.github.io/pell
 - **JetBrains IDE plugin:** https://plugins.jetbrains.com/plugin/31994-pell
-- **Examples** (30+ `.pell` files + their compiled output):
+- **Examples** (36 `.pell` files + their compiled output):
   https://github.com/batterts/pell/tree/main/compiler/examples
 - **Source:** https://github.com/batterts/pell
 - **Issues:** https://github.com/batterts/pell/issues
 
 ## License
 
-MIT — see [LICENSE](https://github.com/batterts/pell/blob/main/LICENSE).
+Apache License 2.0 — see [LICENSE](https://github.com/batterts/pell/blob/main/LICENSE).
+The PL/SQL the compiler emits is **not** a derivative work of pell and is
+yours to license as you choose.

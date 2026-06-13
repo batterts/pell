@@ -21,16 +21,28 @@ preview, gutter build/run buttons, REPL launcher, new-project wizard.
 
 ## Status
 
-- **[design.md](./design.md)** — the language spec (1900+ lines).
-  Status: draft 0.3.
+- **[design.md](./design.md)** — the language spec (3000+ lines).
 - **[GETTING_STARTED.md](./GETTING_STARTED.md)** — how to actually
-  compile a `.pell` file today.
-- **[compiler/](./compiler/)** — Python v0 MVP transpiler. ~1700 LOC.
-  75 tests passing. Implements a useful subset of the language.
-- **[compiler/examples/](./compiler/examples/)** — `.pell` programs and
-  their emitted `.sql`.
-- **[reviews/](./reviews/)** — five-reviewer critique reports plus a
-  SUMMARY of the design review.
+  compile, deploy, test, and debug a `.pell` file today.
+- **[compiler/](./compiler/)** — Python transpiler, ~14k LOC, 320+ tests
+  (offline snapshots + live deploy/execution sweeps against a real
+  Oracle). Implements a large, practical subset of the language.
+- **[compiler/examples/](./compiler/examples/)** — 36 `.pell` programs
+  and their emitted `.sql`, vetted end-to-end by a utPLSQL suite.
+- **[docs/reviews/](./docs/reviews/)** — five-reviewer critique reports
+  plus a SUMMARY of the design review.
+
+Beyond the compiler, the toolchain now covers the full edit→ship loop:
+
+- **`pell deploy`** — install to Oracle with honest cross-schema error
+  reporting; **`pell test`** — run utPLSQL `@suite`/`@test` modules and
+  emit doc/junit/sonar/coverage reports.
+- **Step debugger** — real breakpoints and variable inspection over
+  DBMS_DEBUG_JDWP (and an outbound-only DBMS_DEBUG transport for
+  tunnels/NAT). See [docs/DEBUGGER.md](./docs/DEBUGGER.md).
+- **REPL** — notebook-style cells with variable persistence.
+- **[JetBrains plugin](https://plugins.jetbrains.com/plugin/31994-pell)**
+  + an LSP server (diagnostics, hover, completion, go-to-def).
 
 ## Quick taste
 

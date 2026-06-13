@@ -3,6 +3,7 @@
 // when the transform is pure SQL.
 
 module bench.b3;
+import dbms_utility;
 
 pub fn run() -> number {
   let t0: number = dbms_utility::get_time();

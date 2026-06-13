@@ -12,3 +12,16 @@ Snap.*.trc
 *.dmp
 afiedt.buf
 .idea
+
+# pell build artifacts (generated; don't commit). The canonical
+# committed snapshots live in compiler/expected/ and compiler/benchmarks/sql/.
+/built/
+/plsql/
+/.pell-debug/
+.pell-debug/
+compiler/examples/built/
+compiler/examples/plsql/
+# stray IDE/editor swap files
+*.swp
+# Kotlin/Gradle build scratch
+.kotlin/

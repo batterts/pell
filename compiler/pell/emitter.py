@@ -844,6 +844,12 @@ class Emitter:
         target = self._project_modules.get(pkg)
         if target is None or target.is_root or target.is_open:
             return
+        # No root in the domain → no ACCESSIBLE BY was emitted (the
+        # dotted name is plain namespacing), so the target stays public.
+        # Must match _accessible_by_clause exactly or the pell-side check
+        # would reject calls Oracle happily allows.
+        if not self._domain_has_root(target.domain_key):
+            return
         # Domain has other members? (Dedupe registry rows — both the
         # package name and the short name map to the same ModuleInfo.)
         domain_pkgs = {
@@ -913,11 +919,15 @@ class Emitter:
             sha = hashlib.sha256(self.source_text.encode("utf-8")).hexdigest()
             lines.append(f"--   SHA-256:    {sha}")
         # Best-effort git provenance. Failures (no git, no .git) silently skip.
-        # In reproducible mode we keep the commit hash but drop the
-        # uncommitted-tree hash — otherwise every edit causes snapshot churn.
-        git_info = self._git_info(omit_dirty=self.reproducible)
-        if git_info:
-            lines.append(f"--   pell git:   {git_info}")
+        # Reproducible mode OMITS it entirely: the commit hash changes on
+        # every commit, so a committed snapshot embeds its own parent's
+        # hash and shows dirty on the very next build — 36 snapshots
+        # churning per commit for no signal. The SHA-256 above already
+        # pins content provenance. Normal builds keep the git line.
+        if not self.reproducible:
+            git_info = self._git_info(omit_dirty=False)
+            if git_info:
+                lines.append(f"--   pell git:   {git_info}")
         lines.append(f"--   Target:     Oracle {self.target}")
         lines.append(f"--   Schema:     {self.schema or '(none — unqualified)'}")
         if not self.reproducible:
@@ -1031,6 +1041,15 @@ class Emitter:
         if not self._project_modules:
             return None
         my_key = (self.module.schema or "", self.module.access_domain)
+        # ACCESSIBLE BY makes a submodule PRIVATE to its domain's public
+        # root. With no root module in the domain, the dotted name is
+        # just namespacing (e.g. `bench.b1`..`bench.b5` — five independent
+        # entry points, no `bench` root): there's nothing to be private
+        # to, so the `pub fn`s must stay externally callable. Walling
+        # them off here would make them uncallable from anywhere outside
+        # the domain — the opposite of what `pub` promises.
+        if not self._domain_has_root(my_key):
+            return None
         members = {
             info.qualified_name: info
             for info in self._project_modules.values()
@@ -1043,6 +1062,15 @@ class Emitter:
             f"PACKAGE {qn}" for qn in sorted(members)
         )
         return f"ACCESSIBLE BY ({accessors})"
+
+    def _domain_has_root(self, domain_key: tuple[str, str]) -> bool:
+        """True when some module in `domain_key` is a root (undotted)
+        module — the public interface the domain's submodules are
+        private to. Drives whether ACCESSIBLE BY walls go up at all."""
+        return any(
+            info.is_root and info.domain_key == domain_key
+            for info in self._project_modules.values()
+        )
 
     def _exception_name(self, err_name: str) -> str:
         # Exceptions land in the global pell_runtime package, so they have

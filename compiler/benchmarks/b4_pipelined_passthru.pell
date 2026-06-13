@@ -5,6 +5,7 @@
 // what would otherwise be B3.
 
 module bench.b4;
+import dbms_utility;
 
 pub record Rating {
   user_id:  number,

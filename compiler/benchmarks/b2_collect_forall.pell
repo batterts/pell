@@ -3,6 +3,7 @@
 // then a single FORALL inserts them in one bulk-bind operation.
 
 module bench.b2;
+import dbms_utility;
 
 pub record Rating {
   user_id:  number,

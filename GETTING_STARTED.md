@@ -1,46 +1,62 @@
-# Getting started with `pell` v0.1
+# Getting started with `pell`
 
-This is the **v0.1 MVP compiler** for the language designed in
+This is the compiler for the language designed in
 [`design.md`](./design.md). It is a Python-based transpiler that takes
-`.pell` source and emits Oracle PL/SQL 23. A future Rust implementation
-is the long-term plan; this exists so you can write code and see what
-comes out *today*.
+`.pell` source and emits Oracle PL/SQL 19c / 23ai, plus the tooling
+around it — deploy, test, REPL, and a step debugger. A future Rust
+implementation is the long-term plan; this exists so you can write,
+ship, and debug code *today*.
 
-> Status: hand-written subset compiler. 75 tests pass. 7 example
-> programs compile end-to-end. Around a dozen known limitations (see
-> "What doesn't work yet" below).
+> Status: ~14k LOC, 320+ tests (offline snapshots plus live deploy and
+> execution sweeps against a real Oracle). 36 example programs compile,
+> deploy, and pass a utPLSQL behavioral suite end-to-end. A handful of
+> known limitations remain (see "What doesn't work yet" below).
 
 ## Quickstart
 
 ```sh
-# from the repository root
+# from the repository root — the ./pell wrapper finds the project venv
+# and runs `python -m pell`, so no global install is needed.
 
-# compile a single file to stdout (default target is Oracle 23)
+# --- compile -------------------------------------------------------------
+# single file to stdout (default target is Oracle 23ai)
 ./pell build compiler/examples/01_hello.pell
 
 # target Oracle 19c instead — downgrades JSON to VARCHAR2(32767)
 # and BOOLEAN-in-OBJECT to NUMBER(1); everything else is the same
 ./pell build compiler/examples/01_hello.pell --target 19c
 
-# compile a single file to disk
+# single file to disk; or a whole directory to a tree
 ./pell build compiler/examples/02_employees.pell -o /tmp/employees.sql
+./pell build compiler/examples -d compiler/expected --reproducible
 
-# compile every .pell in a directory
-./pell build compiler/examples -d compiler/expected
+# --- run on a database (needs PELL_DB_URL=user/pass@host:port/service) ---
+# install package(s) on Oracle, with honest cross-schema error reporting
+./pell deploy compiler/examples/02_employees.pell
 
-# generate a merged pell_runtime.sql with EXCEPTION decls for every error variant
+# run a utPLSQL @suite / @test module and print the report
+./pell test ut_pell_examples                 # --reporter junit|sonar|coverage|...
+
+# run an anonymous-block script, or just print the block it would run
+./pell exec  myscript.pell                    # --dry-run to print only
+
+# notebook-style REPL, or run a .sql file statement by statement
+./pell repl
+./pell sql install.sql
+
+# --- compiler introspection / debugger support --------------------------
 ./pell runtime compiler/examples -o compiler/runtime/pell_runtime.sql
+./pell srcmap  compiler/examples/02_employees.pell   # pell↔PLSQL line map
+./pell parse   compiler/examples/02_employees.pell   # AST
+./pell tokens  compiler/examples/02_employees.pell   # token stream
 
-# print the AST or token stream (debugging)
-./pell parse  compiler/examples/02_employees.pell
-./pell tokens compiler/examples/02_employees.pell
-
-# run the test suite
-cd compiler && PYTHONPATH=. .venv/bin/python -m pytest tests/ -v
+# run the compiler's own test suite
+cd compiler && PYTHONPATH=. .venv/bin/python -m pytest tests/ -q
 ```
 
-The `pell` wrapper at the repo root finds the project's venv and runs
-`python -m pell` for you. No global install needed.
+Step debugging (breakpoints + variable inspection over DBMS_DEBUG_JDWP)
+runs from the JetBrains plugin; see [docs/DEBUGGER.md](./docs/DEBUGGER.md)
+for the architecture and the `pell debug-target` / `debug-serve` plumbing.
 
 ## Example: hello
 
