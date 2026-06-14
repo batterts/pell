@@ -2537,3 +2537,28 @@ def test_let_binding_unit_call_emits_statement():
     # ...and NO typeless / spurious binding local is declared
     assert "l_result " not in sql
     assert "l__ " not in sql
+
+
+def test_debug_build_emits_list_collection_shadow():
+    """Debug builds serialize a list<Record> local to a `<name>__pdbg`
+    JSON shadow so the opaque collection is inspectable; non-debug builds
+    emit neither the shadow nor the loop."""
+    from pell.parser import parse
+    from pell.emitter import emit
+    src = """
+        module m;
+        pub record R { a: number, b: text }
+        pub fn f() -> number {
+            let rows: list<R> = sql! { select x a, y b from t }.collect();
+            return rows.len();
+        }
+    """
+    debug = emit(parse(src, "<t>"), debug=True)
+    assert "l_rows__pdbg VARCHAR2(32767);" in debug
+    assert "JSON_ARRAY_T" in debug
+    assert "l_pell_pdbg_obj_0.put('a', l_rows(l_pell_pdbg_i_0).a);" in debug
+    assert "l_pell_pdbg_obj_0.put('b', l_rows(l_pell_pdbg_i_0).b);" in debug
+    assert "\"count\":' || l_rows.COUNT" in debug
+    plain = emit(parse(src, "<t>"), debug=False)
+    assert "__pdbg" not in plain
+    assert "JSON_ARRAY_T" not in plain

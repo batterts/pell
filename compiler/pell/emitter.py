@@ -1958,6 +1958,66 @@ class Emitter:
             expr = self._auto_stringify(name, t)
         return [f"{indent}pell$ret := SUBSTR({expr}, 1, 32767);"]
 
+    # Scalar pell types JSON_OBJECT_T.put / JSON_ARRAY_T.append accept
+    # directly when building a collection's debug shadow.
+    _DBG_SHADOW_SCALARS = {"number", "int", "text", "bigtext", "bool",
+                           "date", "timestamp"}
+    _DBG_SHADOW_SAMPLE = 50   # cap elements serialized into a shadow
+
+    def _dbg_list_shadow(self, pell_name: str, pl_name: str,
+                         indent: str) -> list[str]:
+        """In debug builds, emit a `<pl_name>__pdbg VARCHAR2` holding a
+        JSON snapshot of a list local — `{"count":N,"sample":[...]}` —
+        since Oracle boxes collections as OPAQUE (JDWP/GET_VALUE can't
+        read them). Records serialize field-by-field; scalar lists
+        serialize directly. Capped at _DBG_SHADOW_SAMPLE elements."""
+        if not self.debug_markers:
+            return []
+        elem_pell = self._list_locals.get(pell_name)
+        if not elem_pell:
+            return []
+        self._decl(f"{pl_name}__pdbg VARCHAR2(32767);")
+        self._dbg_shadows.add(pl_name)
+        n = self._sql_var_counter
+        self._sql_var_counter += 1
+        # `l_pell_` prefix so both transports' variable views hide these
+        # serialization temporaries as compiler scaffolding.
+        arr = f"l_pell_pdbg_arr_{n}"
+        obj = f"l_pell_pdbg_obj_{n}"
+        idx = f"l_pell_pdbg_i_{n}"
+        self._decl(f"{arr} JSON_ARRAY_T;")
+        self._decl(f"{idx} PLS_INTEGER;")
+        rec = self._lookup_record(elem_pell)
+        lines = [
+            f"{indent}{arr} := JSON_ARRAY_T();",
+            f"{indent}{idx} := {pl_name}.FIRST;",
+            f"{indent}WHILE {idx} IS NOT NULL "
+            f"AND {arr}.get_size() < {self._DBG_SHADOW_SAMPLE} LOOP",
+        ]
+        if rec is not None:
+            self._decl(f"{obj} JSON_OBJECT_T;")
+            lines.append(f"{indent}  {obj} := JSON_OBJECT_T();")
+            for f in rec.fields:
+                fn = f.name
+                col = f"{pl_name}({idx}).{fn.lower()}"
+                ftype = (getattr(f.type_ref, "name", "") or "").lower()
+                if ftype in self._DBG_SHADOW_SCALARS:
+                    lines.append(f"{indent}  {obj}.put('{fn}', {col});")
+                else:
+                    # nested record / json / list — opaque to put(); label it
+                    lines.append(f"{indent}  {obj}.put('{fn}', '({ftype or '?'})');")
+            lines.append(f"{indent}  {arr}.append({obj});")
+        else:
+            # list<scalar>: the element is the value itself
+            lines.append(f"{indent}  {arr}.append({pl_name}({idx}));")
+        lines += [
+            f"{indent}  {idx} := {pl_name}.NEXT({idx});",
+            f"{indent}END LOOP;",
+            f"{indent}{pl_name}__pdbg := SUBSTR('{{\"count\":' || {pl_name}.COUNT "
+            f"|| ',\"sample\":' || {arr}.to_string() || '}}', 1, 32767);",
+        ]
+        return lines
+
     def _dbg_shadow_update(self, pl_name: str, indent: str) -> list[str]:
         """The companion-assignment line(s) to run after `pl_name` is
         assigned, refreshing its readable shadow. Empty unless the local
@@ -2079,7 +2139,8 @@ class Emitter:
             and s.type_annot.base == "list"
             and isinstance(s.value, A.ListLit)
         ):
-            return self._emit_list_let(s, nm, indent)
+            return (self._emit_list_let(s, nm, indent)
+                    + self._dbg_list_shadow(s.name, nm, indent))
         # Special case: `let x: list<T> = <expr>;` where expr is not a list
         # literal (typically `sql!{...}.collect()`). Register the list type
         # and the local so subsequent for/forall loops over it work.
@@ -2087,7 +2148,8 @@ class Emitter:
             isinstance(s.type_annot, A.GenericType)
             and s.type_annot.base == "list"
         ):
-            return self._emit_list_let_from_expr(s, nm, indent)
+            return (self._emit_list_let_from_expr(s, nm, indent)
+                    + self._dbg_list_shadow(s.name, nm, indent))
         # No annotation but the RHS is a known cross-pkg list call —
         # route through the list-let path so the foreign type gets
         # declared AND _list_locals gets registered (so auto-stringify
@@ -2103,7 +2165,8 @@ class Emitter:
                 # has the elem type. (Doesn't mutate the user's source —
                 # this LetStmt is a copy at this point.)
                 s.type_annot = sig
-                return self._emit_list_let_from_expr(s, nm, indent)
+                return (self._emit_list_let_from_expr(s, nm, indent)
+                        + self._dbg_list_shadow(s.name, nm, indent))
         # generic type lookup if we can do it cheaply
         if ty is None:
             ty = self._infer_decl_type(s.value)
