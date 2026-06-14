@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.9.7</version>
+    <version>0.9.8</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,12 @@ END staffing;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.9.8 — debug stubs build record arguments for you</h3>
+        <ul><li>A `pub fn` taking a record argument now generates a stub that
+        binds the record first with a qualified struct literal —
+        <code>let args = mod::Rec { a: 1, b: "x", c: true }; mod::fn(args)</code>
+        — instead of an un-compilable <code>/* TODO */ ""</code> placeholder.
+        Edit the placeholder field values and Debug.</li></ul>
         <h3>0.9.7 — srcmap class match fix + debug diagnostics</h3>
         <ul><li>Fixed PellSrcMap.matches() over-matching: it accepted nested
         types (record collection types like T_X_LIST) as breakpoint

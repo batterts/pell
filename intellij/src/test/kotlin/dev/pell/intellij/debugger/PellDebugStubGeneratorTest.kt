@@ -46,4 +46,28 @@ class PellDebugStubGeneratorTest : BasePlatformTestCase() {
         assertTrue(stub.contains("jobs::run_nightly();"))
         assertFalse("void fn: no result binding", stub.contains("let result"))
     }
+
+    fun testStubBindsRecordArg() {
+        myFixture.configureByText(
+            "hello.pell",
+            """
+            module hello;
+
+            pub record XyzArgs { a: number, b: text, c: bool }
+
+            pub fn xyz(args: XyzArgs) -> number {
+                return args.a;
+            }
+            """.trimIndent(),
+        )
+        val fn = PsiTreeUtil.findChildrenOfType(myFixture.file, PellFnDef::class.java)
+            .first { it.name == "xyz" }
+        val stub = PellDebugStubGenerator.stubText(fn)
+        // The record arg is bound first with a qualified struct literal (= not :),
+        // then passed by name — valid pell, no `/* TODO */ ""`.
+        assertTrue("binds the record:\n$stub",
+                   stub.contains("let args = hello::XyzArgs { a: 1, b: \"x\", c: true };"))
+        assertTrue("passes the bound local:\n$stub", stub.contains("hello::xyz(args)"))
+        assertFalse("no TODO placeholder:\n$stub", stub.contains("TODO"))
+    }
 }
