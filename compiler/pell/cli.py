@@ -200,10 +200,16 @@ def cmd_tokens(args: argparse.Namespace) -> int:
 def _collect_inputs(input_arg: str) -> list[Path]:
     """Collect .pell files from a path. Directories are walked
     recursively, but a few well-known noise directories are skipped
-    (.git, .venv, node_modules, build, out, expected, __pycache__).
+    (.git, .venv, node_modules, build, out, expected, __pycache__,
+    .pell-debug).
+
+    `.pell-debug/` holds generated debug stubs — anonymous-block scripts
+    (no `module`), not deployable units. Walking into it makes
+    `pell build`/`deploy` try to parse a stub as a module, which fails
+    and aborts the whole install.
     """
     skip_dirs = {".git", ".venv", "node_modules", "build", "out",
-                 "expected", "__pycache__", "target"}
+                 "expected", "__pycache__", "target", ".pell-debug"}
     p = Path(input_arg)
     if p.is_file():
         return [p]
