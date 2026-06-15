@@ -1170,6 +1170,26 @@ def _utplsql_available(conn, owner: Optional[str]) -> bool:
     return int(list(rows[0].values())[0]) > 0
 
 
+def cmd_debug_eval(args: argparse.Namespace) -> int:
+    """Evaluate a collection-shadow query (debugger Evaluate box).
+
+    Reads the JSON shadow of a `list<Record>` local from stdin and
+    applies the expression — `rows[i].field`, `rows.where(pred).first()`,
+    etc. — locally (no DB). Prints the result as JSON. Used by the IDE:
+    it reads the variable's `__pdbg` shadow and pipes it here.
+    """
+    import json as _json
+    from .debug_query import eval_query, QueryError
+    shadow = sys.stdin.read()
+    try:
+        result = eval_query(shadow, args.expr)
+    except QueryError as e:
+        print(f"pell: {e}", file=sys.stderr)
+        return 1
+    print(_json.dumps(result))
+    return 0
+
+
 def cmd_test(args: argparse.Namespace) -> int:
     """Run a utPLSQL suite (`@suite` pell module or any annotated
     package) and emit the chosen report.
@@ -1551,6 +1571,13 @@ def main(argv: list[str] | None = None) -> int:
                           "`ut` unqualified; or set PELL_UT_SCHEMA)")
     tst.add_argument("-c", "--connect", help="user/pass@host:port/service (or set PELL_DB_URL)")
     tst.set_defaults(func=cmd_test)
+
+    de = sub.add_parser(
+        "debug-eval",
+        help="evaluate a collection-shadow query (reads JSON shadow on "
+             "stdin); used by the IDE's Evaluate box")
+    de.add_argument("expr", help="e.g. 'rows.where(user_id == 1).first().movie_id'")
+    de.set_defaults(func=cmd_debug_eval)
 
     ds = sub.add_parser(
         "debug-source",

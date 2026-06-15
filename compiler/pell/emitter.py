@@ -1962,7 +1962,8 @@ class Emitter:
     # directly when building a collection's debug shadow.
     _DBG_SHADOW_SCALARS = {"number", "int", "text", "bigtext", "bool",
                            "date", "timestamp"}
-    _DBG_SHADOW_SAMPLE = 50   # cap elements serialized into a shadow
+    _DBG_SHADOW_MAX_ELEMS = 5000   # hard element bound for a collection shadow
+    _DBG_SHADOW_MAX_CHARS = 30000  # stop serializing near the VARCHAR2 cap
 
     def _dbg_list_shadow(self, pell_name: str, pl_name: str,
                          indent: str) -> list[str]:
@@ -1991,8 +1992,13 @@ class Emitter:
         lines = [
             f"{indent}{arr} := JSON_ARRAY_T();",
             f"{indent}{idx} := {pl_name}.FIRST;",
+            # Serialize the WHOLE array, stopping only when the JSON nears
+            # the VARCHAR2(32767) cap (at a clean element boundary, so the
+            # JSON stays valid) or a hard element bound. `idx IS NOT NULL`
+            # afterward means it was truncated.
             f"{indent}WHILE {idx} IS NOT NULL "
-            f"AND {arr}.get_size() < {self._DBG_SHADOW_SAMPLE} LOOP",
+            f"AND {arr}.get_size() < {self._DBG_SHADOW_MAX_ELEMS} "
+            f"AND LENGTH({arr}.to_string()) < {self._DBG_SHADOW_MAX_CHARS} LOOP",
         ]
         if rec is not None:
             self._decl(f"{obj} JSON_OBJECT_T;")
@@ -2014,7 +2020,8 @@ class Emitter:
             f"{indent}  {idx} := {pl_name}.NEXT({idx});",
             f"{indent}END LOOP;",
             f"{indent}{pl_name}__pdbg := SUBSTR('{{\"count\":' || {pl_name}.COUNT "
-            f"|| ',\"sample\":' || {arr}.to_string() || '}}', 1, 32767);",
+            f"|| CASE WHEN {idx} IS NOT NULL THEN ',\"truncated\":true' ELSE '' END "
+            f"|| ',\"rows\":' || {arr}.to_string() || '}}', 1, 32767);",
         ]
         return lines
 
