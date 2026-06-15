@@ -581,6 +581,17 @@ def cmd_exec(args: argparse.Namespace) -> int:
     try:
         items, stmts = parse_cell(source, source_path)
     except (LexError, ParseError) as e:
+        # A `module …;` file is a deployable unit, not an anon-block
+        # script — point at the right command instead of a cryptic
+        # "expected item, got 'module'".
+        import re as _re
+        if _re.search(r"(?m)^\s*module\s", source):
+            where = source_path if source_path not in ("<-e>", "<stdin>") else "this input"
+            print(f"pell: {where} is a module, not an exec script. "
+                  "Use `pell build` to see its SQL, or `pell deploy` to "
+                  "install it. (`pell exec` runs anonymous-block scripts "
+                  "— files with no `module` declaration.)", file=sys.stderr)
+            return 2
         print(f"pell: {e}", file=sys.stderr)
         return 1
     if not items and not stmts:
