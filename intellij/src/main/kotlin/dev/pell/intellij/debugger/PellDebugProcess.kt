@@ -761,7 +761,89 @@ class PellDebugProcess(
                 node.addChildren(children, true)
             }
         }
+
+        /** Evaluate box / watches. A collection expression like
+         *  `rows.where(user_id == 1).first().movie_id` is evaluated by
+         *  reading the variable's `__pdbg` JSON shadow and piping it
+         *  through `pell debug-eval` (the query runs locally on the
+         *  snapshot — no live frame access, which Oracle doesn't allow).
+         *  A bare scalar variable falls back to its mirror value. */
+        override fun getEvaluator(): com.intellij.xdebugger.evaluation.XDebuggerEvaluator =
+            object : com.intellij.xdebugger.evaluation.XDebuggerEvaluator() {
+                override fun evaluate(
+                    expression: String,
+                    callback: XEvaluationCallback,
+                    expressionPosition: XSourcePosition?,
+                ) {
+                    ApplicationManager.getApplication().executeOnPooledThread {
+                        try {
+                            val ident = Regex("^[A-Za-z_][A-Za-z0-9_]*")
+                                .find(expression.trim())?.value
+                            if (ident == null) {
+                                callback.errorOccurred("expected an expression"); return@executeOnPooledThread
+                            }
+                            val vars = frame.visibleVariables()
+                            val want = ident.lowercase()
+                            val shadowVar = vars.firstOrNull {
+                                val base = it.name().lowercase().removeSuffix("__pdbg")
+                                it.name().lowercase().endsWith("__pdbg") &&
+                                    (base == "l_$want" || base == "p_$want" || base == want)
+                            }
+                            if (shadowVar != null) {
+                                val json = PellValue.mirrorValue(runCatching { frame.getValue(shadowVar) }.getOrNull())
+                                if (json == null) {
+                                    callback.errorOccurred("`$ident` has no readable shadow here " +
+                                        "(stop after the assignment)"); return@executeOnPooledThread
+                                }
+                                val exe = pellExe
+                                    ?: run { callback.errorOccurred("pell CLI not found"); return@executeOnPooledThread }
+                                val (code, out) = runPellStdin(exe, json, "debug-eval", expression)
+                                if (code == 0) callback.evaluated(PellTextValue(out.trim()))
+                                else callback.errorOccurred(out.trim().ifBlank { "evaluation failed" })
+                                return@executeOnPooledThread
+                            }
+                            // not a collection — bare scalar variable
+                            val v = vars.firstOrNull {
+                                val n = it.name().lowercase()
+                                n == "l_$want" || n == "p_$want" || n == want
+                            }?.let { runCatching { frame.getValue(it) }.getOrNull() }
+                            val scalar = PellValue.mirrorValue(v)
+                            if (scalar != null) callback.evaluated(PellTextValue(scalar))
+                            else callback.errorOccurred("can't evaluate `$expression` " +
+                                "(only collection/scalar locals are supported)")
+                        } catch (e: Exception) {
+                            callback.errorOccurred(e.message ?: "evaluation failed")
+                        }
+                    }
+                }
+            }
     }
+
+    /** A plain text result for the Evaluate box / watches. */
+    private class PellTextValue(private val text: String) : com.intellij.xdebugger.frame.XValue() {
+        override fun computePresentation(node: XValueNode, place: XValuePlace) {
+            node.setPresentation(com.intellij.icons.AllIcons.Debugger.Value, null, text, false)
+        }
+    }
+
+    /** Like runPell but pipes `stdin` to the process. */
+    private fun runPellStdin(exe: File, stdin: String, vararg args: String): Pair<Int, String> {
+        return try {
+            val pb = ProcessBuilder(listOf(exe.absolutePath) + args).withWorkDir()
+            pb.environment().putAll(PellCli.env(config, project))
+            val p = pb.start()
+            p.outputStream.bufferedWriter().use { it.write(stdin) }
+            val out = p.inputStream.bufferedReader().readText()
+            val err = p.errorStream.bufferedReader().readText()
+            p.waitFor(60, TimeUnit.SECONDS)
+            p.exitValue() to (if (p.exitValue() == 0) out else err.ifBlank { out })
+        } catch (e: Exception) {
+            1 to (e.message ?: "pell invocation failed")
+        }
+    }
+
+    private fun ProcessBuilder.withWorkDir(): ProcessBuilder =
+        also { it.directory(workDir) }
 
     /** Fetch (once) the deployed source of a foreign unit so stepping
      *  continues into plain PL/SQL when pell source runs out. */
