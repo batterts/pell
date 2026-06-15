@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.9.8</version>
+    <version>0.9.9</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,16 @@ END staffing;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.9.9 — collection/record values show via debug shadow</h3>
+        <ul><li>A list&lt;Record&gt; local (e.g. b2's <code>rows</code>) now
+        shows its JSON debug shadow in the Variables view instead of
+        "(opaque)". The shadow pairing was gated on the mirror type being
+        exactly <code>$Oracle.Builtin.OPAQUE</code> (true for JSON), but a
+        collection boxes under its own type name
+        (<code>$Oracle.PackageBody.S.PKG.T_X_LIST</code>), so the shadow was
+        never consulted. Now gated on "no readable scalar value", which
+        covers JSON, collections, and records alike. Pairs with the
+        emitter's collection JSON shadow (pull the CLI for that half).</li></ul>
         <h3>0.9.8 — debug stubs build record arguments for you</h3>
         <ul><li>A `pub fn` taking a record argument now generates a stub that
         binds the record first with a qualified struct literal —

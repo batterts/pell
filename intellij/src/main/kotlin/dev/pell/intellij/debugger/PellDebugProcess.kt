@@ -796,9 +796,14 @@ class PellDebugProcess(
         private val shadow: com.sun.jdi.Value? = null,
     ) : XNamedValue(name) {
         override fun computePresentation(node: XValueNode, place: XValuePlace) {
-            // When the real value is opaque (JSON etc.) but a debug shadow
-            // scalar exists, show the shadow's stringified value instead.
-            if (isOpaque(value)) {
+            // A value with no readable scalar (mirrorValue == null) is an
+            // opaque box — JSON, a collection, a record. When a `__pdbg`
+            // shadow scalar is paired, show that instead. We gate on
+            // mirrorValue, NOT the mirror's type name: JSON boxes as
+            // $Oracle.Builtin.OPAQUE, but a collection boxes under its OWN
+            // type (e.g. $Oracle.PackageBody.S.PKG.T_X_LIST), so a
+            // name == OPAQUE test missed collections entirely.
+            if (shadow != null && mirrorValue(value) == null) {
                 mirrorValue(shadow)?.let {
                     node.setPresentation(com.intellij.icons.AllIcons.Debugger.Value,
                         null, it, false)
@@ -808,11 +813,6 @@ class PellDebugProcess(
             val (text, type) = render(value)
             node.setPresentation(com.intellij.icons.AllIcons.Debugger.Value, type, text, false)
         }
-
-        private fun isOpaque(v: com.sun.jdi.Value?): Boolean =
-            v is ObjectReference &&
-                v.referenceType().name().removePrefix("\$Oracle.Builtin.")
-                    .equals("OPAQUE", ignoreCase = true)
 
         private fun render(v: com.sun.jdi.Value?): Pair<String, String?> = when (v) {
             null -> "null" to null
