@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.9.11</version>
+    <version>0.9.12</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,15 @@ END staffing;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.9.12 — preview pane works for annotated modules</h3>
+        <ul><li>The split-editor preview now lowers a module via
+        <code>pell build</code> even when the file opens with an annotation
+        (e.g. <code>@suite(…)</code> above <code>module …;</code>, as every
+        utPLSQL suite does). It previously checked only the first line, saw
+        the annotation, treated the file as a script, and ran
+        <code>pell exec</code> — which fails on a module. Module detection
+        now matches a top-level <code>module</code> declaration anywhere,
+        mirroring the CLI exactly.</li></ul>
         <h3>0.9.11 — stop flagging <code>Result&lt;Unit, E&gt;</code> calls</h3>
         <ul><li>The discarded-return inspection no longer false-positives on a
         function returning <code>Result&lt;Unit, E&gt;</code> called as a

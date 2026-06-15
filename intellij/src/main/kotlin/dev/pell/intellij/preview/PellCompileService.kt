@@ -85,12 +85,13 @@ class PellCompileService(private val project: Project) {
         // A module file lowers via `build`; a script (top-level
         // statements — e.g. a generated debug stub or a REPL snippet)
         // has no `module` and must lower via `exec --dry-run`, which
-        // emits the anonymous block. Pick based on the content.
-        val isModule = contentText.lineSequence()
-            .map { it.trim() }
-            .filter { it.isNotEmpty() && !it.startsWith("//") }
-            .firstOrNull()
-            ?.startsWith("module") == true
+        // emits the anonymous block. Detect a top-level `module …`
+        // declaration anywhere — it may sit below leading annotations
+        // (`@suite`, `@parallel`) or doc comments, so checking only the
+        // first significant line misses annotated modules. This mirrors
+        // the CLI's `pell exec` module guard exactly, so the preview
+        // picks `build` for precisely the files `exec` would reject.
+        val isModule = MODULE_DECL.containsMatchIn(contentText)
         // During a debug session the preview must show the DEBUG build —
         // identical to the deployed text — so execution lines align.
         val dbg = PellPreviewRegistry.isDebug(sourcePath)
@@ -154,6 +155,11 @@ class PellCompileService(private val project: Project) {
     companion object {
         fun getInstance(project: Project): PellCompileService =
             project.getService(PellCompileService::class.java)
+
+        /** A top-level `module …` declaration on its own line — the
+         *  signal that this file lowers via `build`, not `exec`. Mirrors
+         *  the CLI's `pell exec` guard (`^\s*module\s` in cli.py). */
+        private val MODULE_DECL = Regex("""(?m)^\s*module\s""")
     }
 }
 
