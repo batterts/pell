@@ -563,6 +563,33 @@ def cmd_repl(args: argparse.Namespace) -> int:
     return run_repl(args.connect, target=args.target)
 
 
+def _scan_root_for(source_path: Optional[str]):
+    """Project root for the cross-package scan, derived from the file
+    being compiled rather than the process cwd.
+
+    Debug stubs live at `<project>/.pell-debug/<stub>.pell` and `import`
+    modules whose records/signatures live elsewhere in the project (e.g.
+    `src/hello.pell`). The default scan walks the cwd, so running a stub
+    from inside `.pell-debug/` (or any cwd that isn't the project root)
+    finds only sibling stubs and reports `unknown type` / `known records:
+    (none)`. Anchor the scan at the project root — the parent of the
+    `.pell-debug` directory — so those imports resolve regardless of cwd.
+
+    Returns a `Path`, or None to keep the default (cwd) for ordinary
+    files and for `-e` / stdin input.
+    """
+    if not source_path or source_path in ("<-e>", "<stdin>"):
+        return None
+    try:
+        resolved = Path(source_path).resolve()
+    except OSError:
+        return None
+    for ancestor in resolved.parents:
+        if ancestor.name == ".pell-debug":
+            return ancestor.parent
+    return None
+
+
 def cmd_exec(args: argparse.Namespace) -> int:
     """Compile a pell cell (file or `-e` snippet) into an anonymous PL/SQL
     block and run it against the connected database."""
@@ -596,16 +623,19 @@ def cmd_exec(args: argparse.Namespace) -> int:
         return 1
     if not items and not stmts:
         return 0
-    # Scan the cwd for sibling .pell files so cross-package call
+    # Scan the project for sibling .pell files so cross-package call
     # inference + record resolution + access checks work the same way
-    # they do in the REPL and `pell build`.
+    # they do in the REPL and `pell build`. Anchor at the project root
+    # derived from the file (not cwd) so a debug stub under `.pell-debug/`
+    # still resolves the `import`ed modules living up in `src/`.
     try:
         from .repl import scan_project_signatures
         from .emitter import scan_project_records as _scan_records
         from .emitter import scan_project_modules as _scan_modules
-        project_signatures = scan_project_signatures()
-        project_records = _scan_records()
-        project_modules = _scan_modules()
+        scan_root = _scan_root_for(source_path)
+        project_signatures = scan_project_signatures(scan_root)
+        project_records = _scan_records(scan_root)
+        project_modules = _scan_modules(scan_root)
     except Exception:
         project_signatures = {}
         project_records = {}
@@ -1295,9 +1325,10 @@ def cmd_debug_serve(args: argparse.Namespace) -> int:
         from .repl import scan_project_signatures
         from .emitter import scan_project_records as _scan_records
         from .emitter import scan_project_modules as _scan_modules
-        project_signatures = scan_project_signatures()
-        project_records = _scan_records()
-        project_modules = _scan_modules()
+        scan_root = _scan_root_for(source_path)
+        project_signatures = scan_project_signatures(scan_root)
+        project_records = _scan_records(scan_root)
+        project_modules = _scan_modules(scan_root)
     except Exception:
         project_signatures = {}
         project_records = {}
@@ -1355,9 +1386,10 @@ def cmd_debug_target(args: argparse.Namespace) -> int:
         from .repl import scan_project_signatures
         from .emitter import scan_project_records as _scan_records
         from .emitter import scan_project_modules as _scan_modules
-        project_signatures = scan_project_signatures()
-        project_records = _scan_records()
-        project_modules = _scan_modules()
+        scan_root = _scan_root_for(source_path)
+        project_signatures = scan_project_signatures(scan_root)
+        project_records = _scan_records(scan_root)
+        project_modules = _scan_modules(scan_root)
     except Exception:
         project_signatures = {}
         project_records = {}
