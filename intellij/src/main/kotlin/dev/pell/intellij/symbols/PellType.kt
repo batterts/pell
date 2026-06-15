@@ -132,7 +132,15 @@ sealed class PellType {
     }
 }
 
-/** True for any type that isn't [PellType.Unit] or [PellType.Unknown] —
- *  the predicate the discarded-return inspection uses to decide whether
- *  to flag a bare-call statement. */
-fun PellType.producesValue(): Boolean = this !is PellType.Unit && this !is PellType.Unknown
+/** Whether a call to a fn of this return type yields a value that must
+ *  be used — the predicate the discarded-return inspection uses to flag a
+ *  bare-call statement. False for [PellType.Unit], [PellType.Unknown],
+ *  and `Result<Unit, E>`: the latter lowers to a PL/SQL PROCEDURE (the
+ *  `Ok` carries no value), so `f()?;` as a statement is valid — matching
+ *  the emitter's `_is_unit_return`. */
+fun PellType.producesValue(): Boolean = when {
+    this is PellType.Unit -> false
+    this is PellType.Unknown -> false
+    this is PellType.Result && this.ok is PellType.Unit -> false
+    else -> true
+}
