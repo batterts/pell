@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.9.12</version>
+    <version>0.9.13</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,15 @@ END staffing;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.9.13 — preview can't get stuck on "(compiling…)"</h3>
+        <ul><li>The split-editor preview now has a 30s watchdog: if a
+        <code>pell build</code> never returns (e.g. the project scan is
+        walking a huge directory because the IDE root is a big parent
+        folder), it's killed and the pane shows an actionable timeout
+        instead of spinning forever.</li>
+        <li>A build that's cancelled mid-flight (superseded by a newer
+        edit, or killed) now always resolves the preview exactly once —
+        no more lost callbacks leaving the placeholder up.</li></ul>
         <h3>0.9.12 — preview pane works for annotated modules</h3>
         <ul><li>The split-editor preview now lowers a module via
         <code>pell build</code> even when the file opens with an annotation

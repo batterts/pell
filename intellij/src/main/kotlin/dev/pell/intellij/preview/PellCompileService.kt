@@ -11,6 +11,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Key
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import javax.swing.Timer
 
@@ -117,6 +118,28 @@ class PellCompileService(private val project: Project) {
         val stdout = StringBuilder()
         val stderr = StringBuilder()
 
+        // Fire onResult exactly once — the watchdog and processTerminated
+        // race, and a double-callback would clobber a good preview.
+        val done = AtomicBoolean(false)
+        fun finish(result: CompileResult) {
+            if (done.compareAndSet(false, true)) onResult(result)
+        }
+
+        // Watchdog: a build that never returns (e.g. a project scan
+        // walking a huge directory because the IDE project root is a big
+        // parent folder) must not leave the preview stuck at
+        // "(compiling…)" forever. Kill it and surface an actionable error.
+        val watchdog = Timer(COMPILE_TIMEOUT_MS) {
+            if (running[sourcePath] === handler && !handler.isProcessTerminated) {
+                handler.destroyProcess()
+                finish(CompileResult.Error(
+                    "compile timed out after ${COMPILE_TIMEOUT_MS / 1000}s — " +
+                    "`pell build` didn't return. The project scan may be walking " +
+                    "a very large tree; check that the IDE project root is the " +
+                    "pell project, not a huge parent folder."))
+            }
+        }.apply { isRepeats = false; start() }
+
         handler.addProcessListener(object : ProcessAdapter() {
             override fun onTextAvailable(event: ProcessEvent, outputType: Key<*>) {
                 // IntelliJ surfaces THREE process channels here: STDOUT,
@@ -139,13 +162,17 @@ class PellCompileService(private val project: Project) {
                 }
             }
             override fun processTerminated(event: ProcessEvent) {
+                watchdog.stop()
                 running.remove(sourcePath, handler)
                 tmp.delete()
+                // Already handed a timeout error to the preview — the
+                // non-zero exit from our own destroyProcess is not news.
+                if (done.get()) return
                 if (event.exitCode == 0) {
-                    onResult(CompileResult.Ok(stdout.toString()))
+                    finish(CompileResult.Ok(stdout.toString()))
                 } else {
                     val errText = stderr.toString().trim().ifEmpty { stdout.toString().trim() }
-                    onResult(CompileResult.Error(errText.ifEmpty { "(no error text)" }))
+                    finish(CompileResult.Error(errText.ifEmpty { "(no error text)" }))
                 }
             }
         })
@@ -153,6 +180,11 @@ class PellCompileService(private val project: Project) {
     }
 
     companion object {
+        /** Preview build watchdog. A clean build is sub-second even with
+         *  the full project scan; 30s means something is wrong (a giant
+         *  scan tree, a wedged process) — fail loudly rather than spin. */
+        private const val COMPILE_TIMEOUT_MS = 30_000
+
         fun getInstance(project: Project): PellCompileService =
             project.getService(PellCompileService::class.java)
 

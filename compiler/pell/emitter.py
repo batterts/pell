@@ -6916,7 +6916,7 @@ def scan_project_records(
     # components *relative to the scan root* — otherwise a repo
     # named e.g. "plsql" or "built" excludes itself.
     _SKIP = {"built", "out", ".git", "node_modules", "expected",
-             "plsql", "dist", "build", ".venv", "venv"}
+             "plsql", "dist", "build", ".venv", "venv", ".pell-debug"}
 
     def _walk(base: _Path) -> None:
         base = base.resolve()
@@ -7003,7 +7003,7 @@ def scan_project_modules(
     out: dict[str, ModuleInfo] = {}
     seen: set[_Path] = set()
     _SKIP = {"built", "out", ".git", "node_modules", "expected",
-             "plsql", "dist", "build", ".venv", "venv"}
+             "plsql", "dist", "build", ".venv", "venv", ".pell-debug"}
 
     def _walk(base: _Path) -> None:
         base = base.resolve()
@@ -7092,7 +7092,7 @@ def scan_project_definitions(
     out: dict[tuple[str, str], A.Loc] = {}
     seen: set[_Path] = set()
     _SKIP = {"built", "out", ".git", "node_modules", "expected",
-             "plsql", "dist", "build", ".venv", "venv"}
+             "plsql", "dist", "build", ".venv", "venv", ".pell-debug"}
 
     def _walk(base: _Path) -> None:
         base = base.resolve()
@@ -7161,7 +7161,7 @@ def scan_project_references(
     refs: dict[tuple[Optional[str], str], list[A.Loc]] = {}
     seen: set[_Path] = set()
     _SKIP = {"built", "out", ".git", "node_modules", "expected",
-             "plsql", "dist", "build", ".venv", "venv"}
+             "plsql", "dist", "build", ".venv", "venv", ".pell-debug"}
     # Match `pkg::name`. The pkg can be a multi-segment qualifier
     # (`std::logger::info`); we record refs under the last segment
     # as pkg + `info` as name (matching how the project registries
