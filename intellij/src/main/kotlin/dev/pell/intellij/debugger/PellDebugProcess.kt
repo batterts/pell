@@ -173,8 +173,8 @@ class PellDebugProcess(
 
             // Identify both halves up front so a pasted log is unambiguous
             // about which build is running.
-            val pluginVer = com.intellij.ide.plugins.PluginManagerCore
-                .getPlugin(com.intellij.openapi.extensions.PluginId.getId("dev.pell"))
+            val pluginVer = com.intellij.ide.plugins.PluginManager.getInstance()
+                .findEnabledPlugin(com.intellij.openapi.extensions.PluginId.getId("dev.pell"))
                 ?.version ?: "?"
             val cliVer = runCatching { runPell(exe, "--version").second.trim() }
                 .getOrDefault("").ifBlank { "?" }
