@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.9.15</version>
+    <version>0.9.16</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,11 +163,12 @@ END staffing;
     ]]></description>
 
     <change-notes><![CDATA[
-        <h3>0.9.15 — drop an internal-API call</h3>
-        <ul><li>The debugger printed the plugin version via the internal
-        <code>PluginManagerCore.getPlugin</code>; switched to the public
-        <code>PluginManager.findEnabledPlugin</code>. Clears the
-        Marketplace verifier's internal-API warning — no behavior
+        <h3>0.9.16 — drop an internal-API call</h3>
+        <ul><li>The debugger printed its own plugin version in the
+        startup banner, which required an internal API the Marketplace
+        verifier rejects (and the public alternative was still flagged).
+        Removed the plugin-version line — the IDE already shows it. The
+        banner still prints the CLI path + version. No behavior
         change.</li></ul>
         <h3>0.9.14 — preview survives lowered SQL containing a CR</h3>
         <ul><li>Fixed the real cause of a preview stuck on "(compiling…)":

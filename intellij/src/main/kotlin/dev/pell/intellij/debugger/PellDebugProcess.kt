@@ -171,14 +171,13 @@ class PellDebugProcess(
             val exe = pellExe ?: error("pell CLI not found — set pell home on the run config")
             val script = config.filePath ?: error("run configuration has no file")
 
-            // Identify both halves up front so a pasted log is unambiguous
-            // about which build is running.
-            val pluginVer = com.intellij.ide.plugins.PluginManager.getInstance()
-                .findEnabledPlugin(com.intellij.openapi.extensions.PluginId.getId("dev.pell"))
-                ?.version ?: "?"
+            // Identify the CLI half up front so a pasted log is
+            // unambiguous about which build is running. (The plugin
+            // version is shown by the IDE itself; looking it up here
+            // needed an internal API the Marketplace verifier rejects.)
             val cliVer = runCatching { runPell(exe, "--version").second.trim() }
                 .getOrDefault("").ifBlank { "?" }
-            console("pell debugger: plugin $pluginVer, CLI $exe ($cliVer)")
+            console("pell debugger: CLI $exe ($cliVer)")
 
             // 1. debug-deploy the module under test (best-effort: the
             // script itself may be a plain exec script, not a module).
