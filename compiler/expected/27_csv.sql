@@ -138,9 +138,9 @@ CREATE OR REPLACE PACKAGE BODY data.csv AS
               l_cur := '';
               l_pending := TRUE;
             ELSE
-              IF ((l_ch = '') OR (l_ch = '
+              IF ((l_ch = CHR(13)) OR (l_ch = '
 ')) THEN
-                IF (((l_ch = '') AND (idx < l_n)) AND (substr(p_doc, (idx + 1), 1) = '
+                IF (((l_ch = CHR(13)) AND (idx < l_n)) AND (substr(p_doc, (idx + 1), 1) = '
 ')) THEN
                   l_skip := 1;
                 END IF;

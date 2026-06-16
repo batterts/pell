@@ -126,7 +126,14 @@ class PellPreviewEditor(
         executionHighlighter?.let { viewer.markupModel.removeHighlighter(it) }
         executionHighlighter = null
         com.intellij.openapi.application.ApplicationManager.getApplication().runWriteAction {
-            document.setText(sql.ifEmpty { "// (no output)\n" })
+            // IntelliJ documents must use \n-only separators. Lowered SQL
+            // can carry a raw CR byte inside a string literal (e.g. the
+            // CSV library's `"\r"` for CRLF handling); a bare \r would make
+            // setText throw "Wrong line separators" and leave the preview
+            // stuck at "(compiling…)". Normalize for display.
+            document.setText(
+                com.intellij.openapi.util.text.StringUtil
+                    .convertLineSeparators(sql.ifEmpty { "// (no output)\n" }))
         }
         hasGoodCompile = true
         errorBannerPanel.isVisible = false
@@ -356,7 +363,10 @@ class PellPreviewEditor(
             }
         }
         com.intellij.openapi.application.ApplicationManager.getApplication().runWriteAction {
-            document.setText(text)
+            // \n-only separators required (error text can echo a source
+            // line carrying a CR) — see setSql.
+            document.setText(
+                com.intellij.openapi.util.text.StringUtil.convertLineSeparators(text))
         }
         // No good content → no Run button. Strip the gutter icon so
         // the user isn't tempted to click it on broken output.

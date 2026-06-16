@@ -6836,7 +6836,20 @@ def _safe_drop_type(name: str) -> str:
 
 
 def _sql_string(s: str) -> str:
-    return "'" + s.replace("'", "''") + "'"
+    if "\r" not in s:
+        return "'" + s.replace("'", "''") + "'"
+    # A raw CR byte in generated SQL source is fragile: git/editor CRLF
+    # normalization silently rewrites it (corrupting e.g. the CSV
+    # library's CRLF detection), and an IDE document can't even hold it.
+    # Emit CR as CHR(13) concatenation instead. LF is left in place — a
+    # multi-line literal is valid PL/SQL and survives normalization.
+    pieces: list[str] = []
+    for i, seg in enumerate(s.split("\r")):
+        if i > 0:
+            pieces.append("CHR(13)")
+        if seg:
+            pieces.append("'" + seg.replace("'", "''") + "'")
+    return " || ".join(pieces) or "''"
 
 
 def _jq_literal_pl_type(lit: object) -> str:

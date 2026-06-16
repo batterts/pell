@@ -574,7 +574,7 @@ CREATE OR REPLACE PACKAGE BODY ut_pell_examples AS
     ut.expect(l_cells.COUNT).to_equal(3);
     ut.expect(l_cells(2)).to_equal('b,c');
     ut.expect(l_cells(3)).to_equal('say "hi"');
-    l_p := data.csv.parse('a,b,c,d,e
+    l_p := data.csv.parse('a,b,c,d,e' || CHR(13) || '
 x,"y
 y",z
 ');
