@@ -7,23 +7,34 @@ import dbms_output;
 // explain_plan — turn an Oracle execution plan into a readable picture.
 //
 // `EXPLAIN PLAN` fills PLAN_TABLE with a parent/child tree of operations.
-// Read raw it's a wall of indented text; this package renders it two ways:
+// Read raw it's a wall of indented text. This package has several lenses,
+// cheap to expensive:
 //
+//   as_story(id)     -> the plan as prose, in the order Oracle *starts*
+//                       the operations (leaf-first), with "meanwhile"
+//                       dividers where it crosses to the other join input
+//   as_tree(id)      -> the same structure as an indented tree
 //   as_mermaid(id)   -> a Mermaid flowchart (renders inline on GitHub,
 //                       wikis, and the IDE Markdown preview)
-//   as_tree(id)      -> an indented text tree, each step tagged with a
-//                       plain-English explanation of what it does
+//   analyze(sql)     -> the deep one: EXECUTES the query and shows the
+//                       optimizer's ESTIMATE next to the ACTUAL rows per
+//                       step, flagging misestimates and the stats (table
+//                       size, column NDV) that explain them
+//
+// The first three read PLAN_TABLE (estimates only, no execution).
+// `analyze` runs the query — that's the only way to get actual row
+// counts and catch where the optimizer guessed wrong.
 //
 // Workflow:
 //   1. populate PLAN_TABLE — `explain_for(id, sql)` (dynamic) or run
 //      `EXPLAIN PLAN SET STATEMENT_ID='x' FOR <sql>` yourself.
-//   2. render — `p(explain_plan::as_tree('x'));`
-//                `p(explain_plan::as_mermaid('x'));`
+//   2. render — `p(explain_plan::as_story('x'));`
+//                `p(explain_plan::as_tree('x'));`
 //
 // REPL taste:
 //   [1]> explain_plan::explain_for('q1', 'select * from emp where id=7');
-//   [2]> p(explain_plan::as_tree('q1'));
-//   [3]> p(mermaid::fence(explain_plan::as_mermaid('q1')));
+//   [2]> p(explain_plan::as_story('q1'));
+//   [3]> p(explain_plan::analyze('select * from emp where dept=10'));
 // ---------------------------------------------------------------------------
 
 // Plain-English gloss for an operation/options pair. Covers the common
@@ -307,6 +318,127 @@ pub fn as_story(stmt_id: text) -> text {
                                row.has_filter, row.filter_pred,
                                row.rows_in, row.rows_out, "     ");
         prev_parent = row.parent_id;
+    }
+    return buf;
+}
+
+// num_rows for a table from optimizer stats; -1 when unanalyzed/unknown.
+fn table_rows(owner: text, name: text) -> number {
+    let r: number = sql! {
+        select nvl(max(num_rows), -1) as v
+          from all_tables where owner = :owner and table_name = :name
+    }.one();
+    return r;
+}
+
+// Distinct-value count (NDV) for a column from optimizer stats; -1 when
+// unknown. This is what the optimizer divides num_rows by to guess how
+// many rows an equality predicate keeps — so a wrong NDV (or a skewed
+// column with no histogram) is the usual reason an estimate is off.
+fn col_ndv(owner: text, name: text, col: text) -> number {
+    let r: number = sql! {
+        select nvl(max(num_distinct), -1) as v
+          from all_tab_col_statistics
+         where owner = :owner and table_name = :name and column_name = :col
+    }.one();
+    return r;
+}
+
+// Deep analysis — the expensive tool. EXECUTE the query with row-source
+// statistics, then show the plan with the optimizer's ESTIMATE next to
+// the ACTUAL rows each step produced. Where they diverge by 10x or more
+// the step is flagged: that's where the optimizer guessed wrong, and the
+// `stats:` line names the table size + predicate-column NDV that explain
+// the guess. The query is run inside `count(*)` so it executes to
+// completion without fetching rows back — SELECT statements only.
+//
+// Needs SELECT on V$SQL_PLAN_STATISTICS_ALL (granted by
+// setup_example_schemas.sql).
+pub unsafe fn analyze(query: text) -> text {
+    // Run the query wrapped in count(*) (forces full execution, no fetch)
+    // with a distinctive inline-view alias we can find in V$SQL after.
+    let returned: number = exec_dyn(
+        "select /*+ gather_plan_statistics */ count(*) from ({query}) pelldeepprobe_src"
+    );
+    var buf: text = "Deep analysis — executed; the query returns {returned} row(s)." + chr(10);
+    buf = buf + "Optimizer estimate vs actual rows, per step:" + chr(10) + chr(10);
+    var found: number = 0;
+    for row in sql! {
+        select p.id,
+               p.depth,
+               p.operation,
+               nvl(p.options, ' ') as options,
+               case when p.options is null then 0 else 1 end as has_opt,
+               case when p.object_name is null then 0 else 1 end as has_obj,
+               case when p.object_type like 'INDEX%' then 1 else 0 end as is_index,
+               case when p.object_type like 'TABLE%' then 1 else 0 end as is_table,
+               nvl(p.object_owner, user) as object_owner,
+               nvl(p.object_name, ' ') as object_name,
+               nvl(p.cardinality, -1) as est_rows,
+               nvl(p.last_output_rows, -1) as act_rows,
+               case when p.cardinality is not null and p.last_output_rows is not null
+                         and p.last_output_rows > 0
+                    then round(greatest(p.cardinality, p.last_output_rows)
+                               / greatest(least(p.cardinality, p.last_output_rows), 1))
+                    else -1 end as misfactor,
+               case when nvl(p.cardinality, 0) > nvl(p.last_output_rows, 0) then 1 else 0 end as over_est,
+               case when p.access_predicates is null then 0 else 1 end as has_access,
+               nvl(replace(p.access_predicates, chr(34), ''), ' ') as access_pred,
+               case when p.filter_predicates is null then 0 else 1 end as has_filter,
+               nvl(replace(p.filter_predicates, chr(34), ''), ' ') as filter_pred,
+               nvl(regexp_substr(p.filter_predicates, '"([^"]+)"', 1, 1, null, 1), ' ') as filter_col,
+               case when regexp_substr(p.filter_predicates, '"([^"]+)"', 1, 1, null, 1) is null
+                    then 0 else 1 end as has_filter_col,
+               rpad(' ', p.depth * 2, ' ') as indent
+          from v$sql_plan_statistics_all p
+         where (p.sql_id, p.child_number) = (
+                 select s.sql_id, s.child_number from v$sql s
+                  where s.sql_text like '%pelldeep' || 'probe_src%'
+                  order by s.last_active_time desc, s.child_number desc
+                  fetch first 1 row only)
+         order by p.id
+    } {
+        found = 1;
+        let head = op_label(row.operation, row.options, row.has_opt,
+                            row.has_obj, row.object_owner, row.object_name, row.is_index);
+        var nums: text = "";
+        if row.est_rows >= 0 { nums = "   est {row.est_rows}"; }
+        if row.act_rows >= 0 {
+            if row.est_rows >= 0 { nums = nums + ", actual {row.act_rows}"; }
+            else { nums = "   actual {row.act_rows}"; }
+        }
+        var flag: text = "";
+        if row.misfactor >= 10 {
+            if row.over_est == 1 { flag = "   << over-estimated {row.misfactor}x >>"; }
+            else { flag = "   << under-estimated {row.misfactor}x >>"; }
+        }
+        buf = buf + row.indent + head + nums + flag + chr(10);
+        buf = buf + row.indent + "    -> " + explain_op(row.operation, row.options) + chr(10);
+        if row.has_access == 1 {
+            buf = buf + row.indent + "    accessed by: " + row.access_pred + chr(10);
+        }
+        if row.has_filter == 1 {
+            buf = buf + row.indent + "    filtered by:  " + row.filter_pred + chr(10);
+        }
+        // For a table scan, surface the stats that drove the estimate:
+        // the table's row count and the filter column's NDV.
+        if row.is_table == 1 {
+            let nrows = table_rows(row.object_owner, row.object_name);
+            if nrows >= 0 {
+                var why: text = "table has {nrows} rows";
+                if row.has_filter_col == 1 {
+                    let ndv = col_ndv(row.object_owner, row.object_name, row.filter_col);
+                    if ndv >= 1 {
+                        why = why + "; {row.filter_col} has {ndv} distinct value(s)";
+                    }
+                }
+                buf = buf + row.indent + "    stats: " + why + chr(10);
+            }
+        }
+    }
+    if found == 0 {
+        buf = buf + "  (no row-source statistics found — the query may have failed to "
+                  + "execute, or SELECT on V$SQL_PLAN_STATISTICS_ALL isn't granted)" + chr(10);
     }
     return buf;
 }
