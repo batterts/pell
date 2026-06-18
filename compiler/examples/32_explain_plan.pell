@@ -137,28 +137,176 @@ pub fn as_mermaid(stmt_id: text) -> text {
     return buf;
 }
 
-// Render the plan as an indented text tree, each line tagged with a
-// plain-English explanation. PLAN_TABLE.depth gives the indentation.
+// Decode an index object into `TABLE(col, col) unique|non-unique` from
+// the data dictionary, so a step reads `ACCOUNTS(ID) unique` instead of
+// the opaque `SYS_C008552`. Falls back to the raw name when nothing is
+// found (remote / function-based / freshly-created indexes).
+fn index_label(owner: text, name: text) -> text {
+    let label = sql! {
+        select case when count(*) = 0 then :name
+                    else max(i.table_name)
+                         || '(' || listagg(c.column_name, ', ')
+                                     within group (order by c.column_position) || ') '
+                         || case when max(i.uniqueness) = 'UNIQUE'
+                                 then 'unique' else 'non-unique' end
+               end as label
+          from all_indexes i
+          join all_ind_columns c
+            on c.index_owner = i.owner and c.index_name = i.index_name
+         where i.owner = :owner and i.index_name = :name
+    }.one();
+    return label;
+}
+
+// The object a step touches, with an index decoded to its columns.
+fn object_label(owner: text, name: text, is_index: number) -> text {
+    if is_index == 1 { return index_label(owner, name); }
+    return name;
+}
+
+// The annotation lines under a step: the plain-English gloss, then the
+// access predicate (how rows are *found*) and filter predicate (how rows
+// are *discarded*) — the distinction that makes a plan legible. When the
+// rows flowing in and out are both known, the filter line says how many
+// rows it removed. `pad` is the left margin (indent for the tree, a fixed
+// gutter for the story).
+fn step_notes(operation: text, options: text,
+              has_access: number, access: text,
+              has_filter: number, filter: text,
+              rows_in: number, rows_out: number, pad: text) -> text {
+    var notes: text = pad + "-> " + explain_op(operation, options) + chr(10);
+    if has_access == 1 {
+        notes = notes + pad + "accessed by: " + access + chr(10);
+    }
+    if has_filter == 1 {
+        var extra: text = "";
+        if rows_in > 0 && rows_out >= 0 && rows_in > rows_out {
+            let removed = rows_in - rows_out;
+            extra = " (discards {removed} of {rows_in})";
+        }
+        notes = notes + pad + "filtered by:  " + filter + extra + chr(10);
+    }
+    return notes;
+}
+
+// The `rows · cost` suffix, omitting whichever the optimizer didn't set.
+fn cardinality_tail(rows_out: number, cost: number) -> text {
+    if rows_out >= 0 && cost >= 0 { return "   {rows_out} rows, cost {cost}"; }
+    if rows_out >= 0 { return "   {rows_out} rows"; }
+    if cost >= 0 { return "   cost {cost}"; }
+    return "";
+}
+
+// The operation label: `OPERATION OPTIONS  OBJECT`.
+fn op_label(operation: text, options: text, has_opt: number,
+            has_obj: number, owner: text, name: text, is_index: number) -> text {
+    var label: text = operation;
+    if has_opt == 1 { label = "{operation} {options}"; }
+    if has_obj == 1 { label = label + "  " + object_label(owner, name, is_index); }
+    return label;
+}
+
+// Render the plan as an indented tree — structure at a glance. Each node
+// carries its decoded object, rows/cost, plain-English gloss, and the
+// access/filter predicates. PLAN_TABLE.depth drives the indentation.
 pub fn as_tree(stmt_id: text) -> text {
     var buf: text = "";
     for row in sql! {
-        select depth,
-               operation,
-               nvl(options, ' ') as options,
-               rpad(' ', depth * 2, ' ') as indent,
-               operation
-                 || case when options is not null then ' ' || options else '' end
-                 || case when object_name is not null then ' ' || object_name else '' end
-                 || case when cardinality is not null then ' (rows=' || cardinality else '' end
-                 || case when cost is not null then ' cost=' || cost || ')'
-                         when cardinality is not null then ')' else '' end
-                 as step
-          from plan_table
-         where statement_id = :stmt_id
-         order by id
+        select p.id,
+               p.depth,
+               p.operation,
+               nvl(p.options, ' ') as options,
+               case when p.options is null then 0 else 1 end as has_opt,
+               case when p.object_name is null then 0 else 1 end as has_obj,
+               case when p.object_type like 'INDEX%' then 1 else 0 end as is_index,
+               nvl(p.object_owner, user) as object_owner,
+               nvl(p.object_name, ' ') as object_name,
+               nvl(p.cardinality, -1) as rows_out,
+               nvl(p.cost, -1) as cost,
+               case when p.access_predicates is null then 0 else 1 end as has_access,
+               nvl(replace(p.access_predicates, chr(34), ''), ' ') as access_pred,
+               case when p.filter_predicates is null then 0 else 1 end as has_filter,
+               nvl(replace(p.filter_predicates, chr(34), ''), ' ') as filter_pred,
+               nvl((select sum(c.cardinality) from plan_table c
+                      where c.statement_id = p.statement_id and c.parent_id = p.id), -1) as rows_in,
+               rpad(' ', p.depth * 2, ' ') as indent
+          from plan_table p
+         where p.statement_id = :stmt_id
+         order by p.id
     } {
-        buf = buf + row.indent + row.step + chr(10);
-        buf = buf + row.indent + "    -> " + explain_op(row.operation, row.options) + chr(10);
+        let head = op_label(row.operation, row.options, row.has_opt,
+                            row.has_obj, row.object_owner, row.object_name, row.is_index);
+        buf = buf + row.indent + head + cardinality_tail(row.rows_out, row.cost) + chr(10);
+        buf = buf + step_notes(row.operation, row.options,
+                               row.has_access, row.access_pred,
+                               row.has_filter, row.filter_pred,
+                               row.rows_in, row.rows_out, row.indent + "    ");
+    }
+    return buf;
+}
+
+// Render the plan as a story — the operations in the order Oracle starts
+// them (deepest leaf first, then up), numbered, so it reads like prose.
+// A `meanwhile` divider marks where execution jumps to the other input of
+// a join. The execution order is post-order DFS, which we get straight
+// from PLAN_TABLE by sorting each node on the largest id in its subtree
+// (so a subtree's children sort before it), then id descending.
+pub fn as_story(stmt_id: text) -> text {
+    let hdr_rows: number = sql! {
+        select nvl(max(case when id = 0 then cardinality end), -1) as v
+          from plan_table where statement_id = :stmt_id
+    }.one();
+    let hdr_cost: number = sql! {
+        select nvl(max(case when id = 0 then cost end), -1) as v
+          from plan_table where statement_id = :stmt_id
+    }.one();
+    var buf: text = "How Oracle runs this";
+    if hdr_rows >= 0 { buf = buf + " — {hdr_rows} rows out"; }
+    if hdr_cost >= 0 { buf = buf + ", cost {hdr_cost}"; }
+    buf = buf + chr(10) + chr(10);
+    var step: number = 0;
+    var prev_parent: number = -99;
+    for row in sql! {
+        select p.id,
+               nvl(p.parent_id, -1) as parent_id,
+               p.operation,
+               nvl(p.options, ' ') as options,
+               case when p.options is null then 0 else 1 end as has_opt,
+               case when p.object_name is null then 0 else 1 end as has_obj,
+               case when p.object_type like 'INDEX%' then 1 else 0 end as is_index,
+               nvl(p.object_owner, user) as object_owner,
+               nvl(p.object_name, ' ') as object_name,
+               nvl(p.cardinality, -1) as rows_out,
+               nvl(p.cost, -1) as cost,
+               case when p.access_predicates is null then 0 else 1 end as has_access,
+               nvl(replace(p.access_predicates, chr(34), ''), ' ') as access_pred,
+               case when p.filter_predicates is null then 0 else 1 end as has_filter,
+               nvl(replace(p.filter_predicates, chr(34), ''), ' ') as filter_pred,
+               nvl((select sum(c.cardinality) from plan_table c
+                      where c.statement_id = p.statement_id and c.parent_id = p.id), -1) as rows_in
+          from plan_table p
+         where p.statement_id = :stmt_id
+         order by nvl((select min(n.id) from plan_table n
+                         where n.statement_id = p.statement_id
+                           and n.id > p.id and n.depth <= p.depth) - 1,
+                      (select max(m.id) from plan_table m
+                        where m.statement_id = p.statement_id)) asc,
+                  p.id desc
+    } {
+        // A jump to a node that isn't the previous step's parent means we
+        // finished one input and are starting the next — a "meanwhile".
+        if step > 0 && row.id != prev_parent {
+            buf = buf + "   --- meanwhile, the other input ---" + chr(10);
+        }
+        step = step + 1;
+        let head = op_label(row.operation, row.options, row.has_opt,
+                            row.has_obj, row.object_owner, row.object_name, row.is_index);
+        buf = buf + "{step}  " + head + cardinality_tail(row.rows_out, row.cost) + chr(10);
+        buf = buf + step_notes(row.operation, row.options,
+                               row.has_access, row.access_pred,
+                               row.has_filter, row.filter_pred,
+                               row.rows_in, row.rows_out, "     ");
+        prev_parent = row.parent_id;
     }
     return buf;
 }
@@ -176,6 +324,7 @@ pub unsafe fn explain_for(stmt_id: text, query: text) {
 @touches(plan_table)
 pub unsafe fn show(query: text) {
     explain_for("pell_show", query);
+    dbms_output::put_line(as_story("pell_show"));
+    dbms_output::put_line("  ---- plan structure ----");
     dbms_output::put_line(as_tree("pell_show"));
-    dbms_output::put_line(mermaid::fence(as_mermaid("pell_show")));
 }
