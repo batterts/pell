@@ -1082,6 +1082,29 @@ class Emitter:
 
     # ---- spec & body ----------------------------------------------------
 
+    # utPLSQL setup/teardown annotations. No-arg ones go on the fixture
+    # procedure itself and run around each/all tests in the suite;
+    # proc-arg ones go on a `@test` and name the fixture(s) to run around
+    # that specific test.
+    _UTPLSQL_FIXTURE_NOARG = ("beforeall", "afterall", "beforeeach", "aftereach")
+    _UTPLSQL_FIXTURE_PROCARG = ("beforetest", "aftertest")
+
+    def _utplsql_fixture_annotation(self, ann: A.Annotation) -> Optional[str]:
+        """Map a pell setup/teardown annotation to its `--%…` spec line,
+        or None if `ann` isn't a utPLSQL fixture annotation."""
+        if ann.name in self._UTPLSQL_FIXTURE_NOARG:
+            return f"  --%{ann.name}"
+        if ann.name in self._UTPLSQL_FIXTURE_PROCARG:
+            procs = [a.value for a in ann.args if isinstance(a, A.TextLit)]
+            if not procs:
+                raise EmitError(
+                    f"@{ann.name} needs a fixture procedure name, e.g. "
+                    f'`@{ann.name}("setup_transfer")`',
+                    ann.loc,
+                )
+            return f"  --%{ann.name}({','.join(procs)})"
+        return None
+
     def _emit_spec(self) -> str:
         # Pre-walk public fns to register any list types referenced in their
         # signatures so we can emit them in the spec (alongside records).
@@ -1174,6 +1197,14 @@ class Emitter:
                     if test.args and isinstance(test.args[0], A.TextLit):
                         tdesc = test.args[0].value
                     out.append(f"  --%test({tdesc})")
+                # utPLSQL fixtures: setup/teardown annotations on the fn map
+                # 1:1 to their --%annotation form (no-arg: beforeeach /
+                # aftereach / beforeall / afterall; proc-arg: beforetest /
+                # aftertest, naming a fixture procedure to run around a test).
+                for ann in fn.annotations:
+                    fixture = self._utplsql_fixture_annotation(ann)
+                    if fixture is not None:
+                        out.append(fixture)
                 out.append("  " + self._fn_signature(fn) + ";")
         out.append(f"END {self.pkg};")
         out.append("/")

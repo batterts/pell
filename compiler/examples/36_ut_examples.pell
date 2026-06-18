@@ -48,6 +48,9 @@ import dbms_stats;
 //
 // Written in pell: `@suite` lowers to --%suite, `@test` to --%test, and
 // `ut::expect(...).to_equal(...)` lowers to the native utPLSQL call.
+// Setup/teardown: `@beforetest("p")` / `@aftertest("p")` lower to
+// --%beforetest(p) / --%aftertest(p) (see t_transfer); `@beforeeach`,
+// `@aftereach`, `@beforeall`, `@afterall` lower to their --% forms too.
 // ---------------------------------------------------------------------------
 
 @test("hello::greet greets by name")
@@ -176,18 +179,35 @@ pub fn t_stat_diff() {
     ut::expect(r).to_be_like("%statistic%before%after%delta%");
 }
 
+// utPLSQL fixtures for t_transfer. `@beforetest`/`@aftertest` (below)
+// name these procedures so they run around that one test:
+// setup_transfer seeds a known pair of accounts; teardown_transfer
+// removes them. The test body is then just the behavior under test —
+// no inline fixture bookkeeping.
+pub fn setup_transfer() {
+    transaction {
+        sql! { delete from billing.accounts where id in (9101, 9102) };
+        sql! { insert into billing.accounts(id, balance, frozen) values (9101, 100, 0) };
+        sql! { insert into billing.accounts(id, balance, frozen) values (9102, 10, 0) };
+    }
+}
+
+pub fn teardown_transfer() {
+    transaction {
+        sql! { delete from billing.accounts where id in (9101, 9102) };
+    }
+}
+
 @test("charges::transfer moves money between accounts")
+@beforetest("setup_transfer")
+@aftertest("teardown_transfer")
 pub fn t_transfer() {
-    sql! { delete from billing.accounts where id in (9101, 9102) };
-    sql! { insert into billing.accounts(id, balance, frozen) values (9101, 100, 0) };
-    sql! { insert into billing.accounts(id, balance, frozen) values (9102, 10, 0) };
     let xfer = charges::Transfer { from_id: 9101, to_id: 9102, amt: 40 };
     charges::transfer(xfer)?;
     let b1: number = sql! { select balance from billing.accounts where id = 9101 }.one();
     let b2: number = sql! { select balance from billing.accounts where id = 9102 }.one();
     ut::expect(b1).to_equal(60);
     ut::expect(b2).to_equal(50);
-    sql! { delete from billing.accounts where id in (9101, 9102) };
 }
 
 @test("reports::daily prints recent orders without error")
