@@ -1979,6 +1979,20 @@ class Emitter:
             return []
         self._decl(f"{pl_name}__pdbg VARCHAR2(32767);")
         self._dbg_shadows.add(pl_name)
+        rec = self._lookup_record(elem_pell)
+        elem_norm = elem_pell.split("::")[-1].strip().lower()
+        # The element is neither a known scalar nor a record whose fields
+        # we can resolve (e.g. a cross-package record with an ambiguous
+        # bare name, a nested list, or json). We can't introspect it, and
+        # `arr.append(<non-scalar>)` is a PLS-00306 at deploy. Degrade to
+        # a count-only shadow so the debug build still compiles and the
+        # debugger still shows the element count.
+        if rec is None and elem_norm not in self._DBG_SHADOW_SCALARS:
+            esc = elem_pell.replace("\\", "\\\\").replace('"', '\\"')
+            return [
+                f"{indent}{pl_name}__pdbg := '{{\"count\":' || {pl_name}.COUNT "
+                f"|| ',\"rows\":[],\"note\":\"{esc} not serialized in debug shadow\"}}';",
+            ]
         n = self._sql_var_counter
         self._sql_var_counter += 1
         # `l_pell_` prefix so both transports' variable views hide these
@@ -1988,7 +2002,6 @@ class Emitter:
         idx = f"l_pell_pdbg_i_{n}"
         self._decl(f"{arr} JSON_ARRAY_T;")
         self._decl(f"{idx} PLS_INTEGER;")
-        rec = self._lookup_record(elem_pell)
         lines = [
             f"{indent}{arr} := JSON_ARRAY_T();",
             f"{indent}{idx} := {pl_name}.FIRST;",
