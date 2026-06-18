@@ -2,6 +2,7 @@
 module ut_pell_examples;
 
 import ut;
+import std::logger;
 import hello;
 import text_utils;
 import json_demo;
@@ -52,6 +53,22 @@ import dbms_stats;
 // --%beforetest(p) / --%aftertest(p) (see t_transfer); `@beforeeach`,
 // `@aftereach`, `@beforeall`, `@afterall` lower to their --% forms too.
 // ---------------------------------------------------------------------------
+
+// Suite-level fixtures: `@beforeall`/`@afterall` run ONCE for the whole
+// suite (--%beforeall / --%afterall), not per test. Here they bracket
+// the run with a banner — the INFO lines appear once, before the first
+// test and after the last — which is the natural place for one-time
+// shared setup (seed reference data, gather stats) and its teardown.
+@beforeall
+pub fn suite_setup() {
+    let accounts: number = sql! { select count(*) from billing.accounts }.one();
+    logger::info("ut_pell_examples: suite starting — {accounts} billing account(s)");
+}
+
+@afterall
+pub fn suite_teardown() {
+    logger::info("ut_pell_examples: suite complete");
+}
 
 @test("hello::greet greets by name")
 pub fn t_greet() {
