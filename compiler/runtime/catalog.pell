@@ -73,6 +73,13 @@ pub record IndexInfo {
     column_name: text,
 }
 
+pub record IndexDetail {
+    cols_found:  number,   // 0 when the index isn't visible to this session
+    table_name:  text,
+    cols:        text,     // comma-separated, in key order
+    uniqueness:  text,     // 'UNIQUE' / 'NONUNIQUE'
+}
+
 pub record ForeignKeyInfo {
     name:          text,
     column_name:   text,
@@ -220,6 +227,25 @@ pub fn indexes_of(table: text) -> list<IndexInfo> {
          where i.table_name = upper(:table)
          order by i.index_name, ic.column_position
     }.collect();
+}
+
+// Decode an index by owner + name into its table, columns, and
+// uniqueness. Unlike indexes_of(table) this is keyed by the index itself
+// and is owner-qualified (ALL_*), so it resolves indexes in other schemas
+// — handy when you have an index name from an execution plan but not its
+// table. `cols_found` is 0 when the index isn't visible.
+pub fn index_detail(owner: text, index: text) -> IndexDetail {
+    return sql! {
+        select count(*) as cols_found,
+               max(i.table_name) as table_name,
+               listagg(c.column_name, ', ')
+                 within group (order by c.column_position) as cols,
+               max(i.uniqueness) as uniqueness
+          from all_indexes i
+          join all_ind_columns c
+            on c.index_owner = i.owner and c.index_name = i.index_name
+         where i.owner = upper(:owner) and i.index_name = upper(:index)
+    }.one();
 }
 
 pub fn foreign_keys_of(table: text) -> list<ForeignKeyInfo> {

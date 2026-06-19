@@ -2,6 +2,7 @@ module explain_plan;
 
 import mermaid;
 import dbms_output;
+import catalog;
 
 // ---------------------------------------------------------------------------
 // explain_plan — turn an Oracle execution plan into a readable picture.
@@ -153,20 +154,11 @@ pub fn as_mermaid(stmt_id: text) -> text {
 // the opaque `SYS_C008552`. Falls back to the raw name when nothing is
 // found (remote / function-based / freshly-created indexes).
 fn index_label(owner: text, name: text) -> text {
-    let label = sql! {
-        select case when count(*) = 0 then :name
-                    else max(i.table_name)
-                         || '(' || listagg(c.column_name, ', ')
-                                     within group (order by c.column_position) || ') '
-                         || case when max(i.uniqueness) = 'UNIQUE'
-                                 then 'unique' else 'non-unique' end
-               end as label
-          from all_indexes i
-          join all_ind_columns c
-            on c.index_owner = i.owner and c.index_name = i.index_name
-         where i.owner = :owner and i.index_name = :name
-    }.one();
-    return label;
+    let d = catalog::index_detail(owner, name);
+    if d.cols_found == 0 { return name; }
+    var uniq: text = "non-unique";
+    if d.uniqueness == "UNIQUE" { uniq = "unique"; }
+    return "{d.table_name}({d.cols}) {uniq}";
 }
 
 // The object a step touches, with an index decoded to its columns.
