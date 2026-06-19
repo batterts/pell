@@ -294,6 +294,9 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     built_files: list[Path] = []
     uses_re = False
     uses_logger = False
+    uses_catalog = False
+    uses_catalog_all = False
+    uses_catalog_dba = False
     has_errors = False
     failures = 0
     for src_path in inputs:
@@ -324,6 +327,18 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             has_errors = True
         if "logger." in sql:
             uses_logger = True
+        # catalog family — hand-written runtime packages. catalog_all /
+        # catalog_dba reference catalog's record types, so either implies
+        # catalog. "catalog." doesn't match "catalog_all." (no dot after
+        # the base name there), so the checks are independent.
+        if "catalog." in sql:
+            uses_catalog = True
+        if "catalog_all." in sql:
+            uses_catalog = True
+            uses_catalog_all = True
+        if "catalog_dba." in sql:
+            uses_catalog = True
+            uses_catalog_dba = True
         out_path = out_dir / (src_path.stem + ".sql")
         out_path.write_text(sql)
         built_files.append(out_path)
@@ -368,6 +383,20 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 logger_sql = candidate
                 break
 
+    # catalog family — install catalog before catalog_all/catalog_dba
+    # (they reference its record types). Each is a hand-written runtime
+    # package shipped as compiler/runtime/<name>.sql.
+    def _runtime_sql(name: str) -> Path | None:
+        for candidate in (canonical_runtime / f"{name}.sql",
+                          out_dir / f"{name}.sql"):
+            if candidate.exists():
+                return candidate
+        return None
+
+    catalog_sql = _runtime_sql("catalog") if uses_catalog else None
+    catalog_all_sql = _runtime_sql("catalog_all") if uses_catalog_all else None
+    catalog_dba_sql = _runtime_sql("catalog_dba") if uses_catalog_dba else None
+
     # Install — connect via PELL_DB_URL / --connect, then apply each file.
     try:
         from . import driver
@@ -388,6 +417,12 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         install_order.append(re_sql)
     if logger_sql is not None:
         install_order.append(logger_sql)
+    if catalog_sql is not None:
+        install_order.append(catalog_sql)
+    if catalog_all_sql is not None:
+        install_order.append(catalog_all_sql)
+    if catalog_dba_sql is not None:
+        install_order.append(catalog_dba_sql)
     install_order.extend(sorted(built_files))
 
     print(f"pell deploy: install {len(install_order)} file(s) → "

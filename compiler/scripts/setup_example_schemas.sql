@@ -169,12 +169,13 @@ GRANT SELECT ON SYS.V_$SQL      TO PELL_TEST;
 GRANT SELECT ON SYS.V_$SQL_PLAN TO PELL_TEST;
 -- explain_plan.analyze() reads actual row counts (A-Rows) from here.
 GRANT SELECT ON SYS.V_$SQL_PLAN_STATISTICS_ALL TO PELL_TEST;
--- catalog's *_dba() functions read the DBA_* dictionary views. A
+-- The catalog_dba package reads the DBA_* dictionary views. A
 -- definer's-rights package needs this as a DIRECT system privilege
 -- (SELECT_CATALOG_ROLE is a role, and roles are inert during PL/SQL
--- compilation) — so the package compiles. It also subsumes the V$
--- grants above. Drop this line if you don't want PELL_TEST reading the
--- whole data dictionary (then catalog's *_dba functions won't compile).
+-- compilation) — so it compiles. It also subsumes the V$ grants above.
+-- Drop this line if you don't want PELL_TEST reading the whole data
+-- dictionary: only catalog_dba needs it (catalog / catalog_all do not),
+-- and nothing in the examples imports catalog_dba, so it stays optional.
 GRANT SELECT ANY DICTIONARY TO PELL_TEST;
 
 -- Verify.

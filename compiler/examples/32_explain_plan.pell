@@ -2,7 +2,8 @@ module explain_plan;
 
 import mermaid;
 import dbms_output;
-import catalog;
+import catalog;       // IndexDetail record type
+import catalog_all;   // index_detail(owner, index)
 
 // ---------------------------------------------------------------------------
 // explain_plan — turn an Oracle execution plan into a readable picture.
@@ -154,7 +155,7 @@ pub fn as_mermaid(stmt_id: text) -> text {
 // the opaque `SYS_C008552`. Falls back to the raw name when nothing is
 // found (remote / function-based / freshly-created indexes).
 fn index_label(owner: text, name: text) -> text {
-    let d = catalog::index_detail(owner, name);
+    let d = catalog_all::index_detail(owner, name);
     if d.cols_found == 0 { return name; }
     var uniq: text = "non-unique";
     if d.uniqueness == "UNIQUE" { uniq = "unique"; }

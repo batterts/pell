@@ -1,0 +1,255 @@
+module catalog_dba;
+
+import catalog;
+
+// ---------------------------------------------------------------------------
+// catalog_dba — the data dictionary over DBA_* views: EVERY object in the
+// database, regardless of grants. Same shape as `catalog_all`, owner-
+// qualified. Needs SELECT ANY DICTIONARY (a direct system privilege —
+// roles are inert during PL/SQL compilation, so the package won't compile
+// without it). Records are shared from `catalog`.
+// ---------------------------------------------------------------------------
+
+pub fn index_detail(owner: text, index: text) -> catalog::IndexDetail {
+    return sql! {
+        select count(*) as cols_found,
+               max(i.table_name) as table_name,
+               listagg(c.column_name, ', ')
+                 within group (order by c.column_position) as cols,
+               max(i.uniqueness) as uniqueness
+          from dba_indexes i
+          join dba_ind_columns c
+            on c.index_owner = i.owner and c.index_name = i.index_name
+         where i.owner = upper(:owner) and i.index_name = upper(:index)
+    }.one();
+}
+
+pub fn list_tables() -> list<text> {
+    return sql! {
+        select owner || '.' || table_name from dba_tables order by 1
+    }.collect();
+}
+
+pub fn list_views() -> list<text> {
+    return sql! {
+        select owner || '.' || view_name from dba_views order by 1
+    }.collect();
+}
+
+pub fn list_packages() -> list<text> {
+    return sql! {
+        select distinct owner || '.' || object_name from dba_objects
+         where object_type = 'PACKAGE' order by 1
+    }.collect();
+}
+
+pub fn list_functions() -> list<text> {
+    return sql! {
+        select owner || '.' || object_name from dba_objects
+         where object_type = 'FUNCTION' order by 1
+    }.collect();
+}
+
+pub fn list_procedures() -> list<text> {
+    return sql! {
+        select owner || '.' || object_name from dba_objects
+         where object_type = 'PROCEDURE' order by 1
+    }.collect();
+}
+
+pub fn list_sequences() -> list<text> {
+    return sql! {
+        select sequence_owner || '.' || sequence_name from dba_sequences order by 1
+    }.collect();
+}
+
+pub fn list_types() -> list<text> {
+    return sql! {
+        select owner || '.' || type_name from dba_types order by 1
+    }.collect();
+}
+
+pub fn list_triggers() -> list<text> {
+    return sql! {
+        select owner || '.' || trigger_name from dba_triggers order by 1
+    }.collect();
+}
+
+pub fn list_invalid() -> list<text> {
+    return sql! {
+        select owner || '.' || object_name from dba_objects
+         where status = 'INVALID' order by owner, object_type, object_name
+    }.collect();
+}
+
+pub fn list_objects_info() -> list<catalog::ObjectInfo> {
+    return sql! {
+        select owner || '.' || object_name as name,
+               object_type, status, last_ddl_time
+          from dba_objects order by owner, object_type, object_name
+    }.collect();
+}
+
+pub fn list_invalid_info() -> list<catalog::ObjectInfo> {
+    return sql! {
+        select owner || '.' || object_name as name,
+               object_type, status, last_ddl_time
+          from dba_objects where status = 'INVALID'
+         order by owner, object_type, object_name
+    }.collect();
+}
+
+pub fn columns_of(owner: text, table: text) -> list<catalog::ColumnInfo> {
+    return sql! {
+        select column_name as name, data_type, nullable, column_id, data_length
+          from dba_tab_columns
+         where owner = upper(:owner) and table_name = upper(:table)
+         order by column_id
+    }.collect();
+}
+
+pub fn constraints_of(owner: text, table: text) -> list<catalog::ConstraintInfo> {
+    return sql! {
+        select c.constraint_name as name, c.constraint_type, cc.column_name,
+               c.search_condition, c.r_constraint_name as r_constraint
+          from dba_constraints c
+          left join dba_cons_columns cc
+            on cc.owner = c.owner and cc.constraint_name = c.constraint_name
+         where c.owner = upper(:owner) and c.table_name = upper(:table)
+         order by c.constraint_name, cc.position
+    }.collect();
+}
+
+pub fn indexes_of(owner: text, table: text) -> list<catalog::IndexInfo> {
+    return sql! {
+        select i.index_name as name, i.uniqueness, ic.column_name
+          from dba_indexes i
+          join dba_ind_columns ic
+            on ic.index_owner = i.owner and ic.index_name = i.index_name
+         where i.table_owner = upper(:owner) and i.table_name = upper(:table)
+         order by i.index_name, ic.column_position
+    }.collect();
+}
+
+pub fn foreign_keys_of(owner: text, table: text) -> list<catalog::ForeignKeyInfo> {
+    return sql! {
+        select c.constraint_name as name, cc.column_name,
+               rc.table_name as r_table, rcc.column_name as r_column_name, c.delete_rule
+          from dba_constraints c
+          join dba_cons_columns cc
+            on cc.owner = c.owner and cc.constraint_name = c.constraint_name
+          join dba_constraints rc
+            on rc.owner = c.r_owner and rc.constraint_name = c.r_constraint_name
+          join dba_cons_columns rcc
+            on rcc.owner = rc.owner and rcc.constraint_name = rc.constraint_name
+           and rcc.position = cc.position
+         where c.constraint_type = 'R'
+           and c.owner = upper(:owner) and c.table_name = upper(:table)
+         order by c.constraint_name, cc.position
+    }.collect();
+}
+
+pub fn errors_for(owner: text, name: text) -> list<catalog::ErrorInfo> {
+    return sql! {
+        select name, line, position, text as message
+          from dba_errors
+         where owner = upper(:owner) and name = upper(:name)
+         order by sequence
+    }.collect();
+}
+
+pub fn source_of(owner: text, name: text) -> list<text> {
+    return sql! {
+        select text from dba_source
+         where owner = upper(:owner) and name = upper(:name)
+         order by type, line
+    }.collect();
+}
+
+pub fn spec_of(owner: text, name: text) -> list<text> {
+    return sql! {
+        select text from dba_source
+         where owner = upper(:owner) and name = upper(:name) and type = 'PACKAGE'
+         order by line
+    }.collect();
+}
+
+pub fn body_of(owner: text, name: text) -> list<text> {
+    return sql! {
+        select text from dba_source
+         where owner = upper(:owner) and name = upper(:name) and type = 'PACKAGE BODY'
+         order by line
+    }.collect();
+}
+
+pub fn fk_tree(owner: text, table: text) -> list<text> {
+    return sql! {
+        select lpad(' ', 2 * (level - 1)) || c.table_name
+               || ' -> ' || rc.table_name || ' (' || cc.column_name || ')'
+          from dba_constraints c
+          join dba_cons_columns cc
+            on cc.owner = c.owner and cc.constraint_name = c.constraint_name
+          join dba_constraints rc
+            on rc.owner = c.r_owner and rc.constraint_name = c.r_constraint_name
+         where c.constraint_type = 'R'
+         start with c.owner = upper(:owner) and c.table_name = upper(:table)
+         connect by nocycle prior rc.owner = c.owner and prior rc.table_name = c.table_name
+         order siblings by c.table_name
+    }.collect();
+}
+
+pub fn deps_tree(owner: text, name: text) -> list<text> {
+    return sql! {
+        select lpad(' ', 2 * (level - 1)) || referenced_name
+               || ' (' || referenced_type || ')'
+          from dba_dependencies
+         start with owner = upper(:owner) and name = upper(:name)
+         connect by nocycle prior referenced_owner = owner and prior referenced_name = name
+         order siblings by referenced_name
+    }.collect();
+}
+
+pub fn dependents_tree(owner: text, name: text) -> list<text> {
+    return sql! {
+        select lpad(' ', 2 * (level - 1)) || d.name || ' (' || d.type || ')'
+          from dba_dependencies d
+         start with d.referenced_owner = upper(:owner) and d.referenced_name = upper(:name)
+         connect by nocycle d.referenced_owner = prior d.owner and d.referenced_name = prior d.name
+         order siblings by d.name
+    }.collect();
+}
+
+pub fn fk_mermaid(owner: text, table: text) -> list<text> {
+    return sql! {
+        select 'flowchart LR' as line from dual
+        union all
+        select '  ' || c.table_name || ' -->|' || cc.column_name || '| ' || rc.table_name
+          from dba_constraints c
+          join dba_cons_columns cc
+            on cc.owner = c.owner and cc.constraint_name = c.constraint_name
+          join dba_constraints rc
+            on rc.owner = c.r_owner and rc.constraint_name = c.r_constraint_name
+         where c.constraint_type = 'R'
+           and ((c.owner = upper(:owner) and c.table_name = upper(:table))
+             or (rc.owner = upper(:owner) and rc.table_name = upper(:table)))
+         order by 1
+    }.collect();
+}
+
+pub fn depends_on(owner: text, name: text) -> list<text> {
+    return sql! {
+        select referenced_owner || '.' || referenced_name
+          from dba_dependencies
+         where owner = upper(:owner) and name = upper(:name)
+         order by 1
+    }.collect();
+}
+
+pub fn dependents_of(owner: text, name: text) -> list<text> {
+    return sql! {
+        select owner || '.' || name
+          from dba_dependencies
+         where referenced_owner = upper(:owner) and referenced_name = upper(:name)
+         order by 1
+    }.collect();
+}
