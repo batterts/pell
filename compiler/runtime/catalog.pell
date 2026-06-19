@@ -14,7 +14,11 @@ module catalog;
 //
 // Conventions:
 //   - Name args are case-insensitive (UPPER()'d in queries).
-//   - Always queries USER_* views (current schema only).
+//   - The bare functions query USER_* (current schema). Each has an
+//     `_all` variant over ALL_* (any schema you can access) and a `_dba`
+//     variant over DBA_* (every object — needs SELECT ANY DICTIONARY).
+//     The `_all`/`_dba` listings return `OWNER.NAME`; their detail
+//     lookups take an explicit `owner` (e.g. columns_of_all("HR","EMP")).
 //
 // Quick listings:
 //   list_tables()          list_views()        list_packages()
@@ -402,6 +406,482 @@ pub fn dependents_of(name: text) -> list<text> {
           from all_dependencies
          where referenced_name = upper(:name)
            and referenced_owner = user
+         order by 1
+    }.collect();
+}
+
+// ===========================================================================
+// ALL_ scoped variants — objects visible to this session in ANY schema.
+//
+// Mirror the USER_* functions above over the ALL_* views. The listings
+// return `OWNER.NAME` (qualified, since they span schemas); the detail
+// lookups take an explicit `owner`. See the DBA_ section below for the
+// privileged equivalents.
+// ===========================================================================
+
+pub fn list_tables_all() -> list<text> {
+    return sql! {
+        select owner || '.' || table_name from all_tables order by 1
+    }.collect();
+}
+
+pub fn list_views_all() -> list<text> {
+    return sql! {
+        select owner || '.' || view_name from all_views order by 1
+    }.collect();
+}
+
+pub fn list_packages_all() -> list<text> {
+    return sql! {
+        select distinct owner || '.' || object_name from all_objects
+         where object_type = 'PACKAGE' order by 1
+    }.collect();
+}
+
+pub fn list_functions_all() -> list<text> {
+    return sql! {
+        select owner || '.' || object_name from all_objects
+         where object_type = 'FUNCTION' order by 1
+    }.collect();
+}
+
+pub fn list_procedures_all() -> list<text> {
+    return sql! {
+        select owner || '.' || object_name from all_objects
+         where object_type = 'PROCEDURE' order by 1
+    }.collect();
+}
+
+pub fn list_sequences_all() -> list<text> {
+    return sql! {
+        select sequence_owner || '.' || sequence_name from all_sequences order by 1
+    }.collect();
+}
+
+pub fn list_types_all() -> list<text> {
+    return sql! {
+        select owner || '.' || type_name from all_types order by 1
+    }.collect();
+}
+
+pub fn list_triggers_all() -> list<text> {
+    return sql! {
+        select owner || '.' || trigger_name from all_triggers order by 1
+    }.collect();
+}
+
+pub fn list_invalid_all() -> list<text> {
+    return sql! {
+        select owner || '.' || object_name from all_objects
+         where status = 'INVALID' order by owner, object_type, object_name
+    }.collect();
+}
+
+pub fn list_objects_info_all() -> list<ObjectInfo> {
+    return sql! {
+        select owner || '.' || object_name as name,
+               object_type, status, last_ddl_time
+          from all_objects order by owner, object_type, object_name
+    }.collect();
+}
+
+pub fn list_invalid_info_all() -> list<ObjectInfo> {
+    return sql! {
+        select owner || '.' || object_name as name,
+               object_type, status, last_ddl_time
+          from all_objects where status = 'INVALID'
+         order by owner, object_type, object_name
+    }.collect();
+}
+
+pub fn columns_of_all(owner: text, table: text) -> list<ColumnInfo> {
+    return sql! {
+        select column_name as name, data_type, nullable, column_id, data_length
+          from all_tab_columns
+         where owner = upper(:owner) and table_name = upper(:table)
+         order by column_id
+    }.collect();
+}
+
+pub fn constraints_of_all(owner: text, table: text) -> list<ConstraintInfo> {
+    return sql! {
+        select c.constraint_name as name, c.constraint_type, cc.column_name,
+               c.search_condition, c.r_constraint_name as r_constraint
+          from all_constraints c
+          left join all_cons_columns cc
+            on cc.owner = c.owner and cc.constraint_name = c.constraint_name
+         where c.owner = upper(:owner) and c.table_name = upper(:table)
+         order by c.constraint_name, cc.position
+    }.collect();
+}
+
+pub fn indexes_of_all(owner: text, table: text) -> list<IndexInfo> {
+    return sql! {
+        select i.index_name as name, i.uniqueness, ic.column_name
+          from all_indexes i
+          join all_ind_columns ic
+            on ic.index_owner = i.owner and ic.index_name = i.index_name
+         where i.table_owner = upper(:owner) and i.table_name = upper(:table)
+         order by i.index_name, ic.column_position
+    }.collect();
+}
+
+pub fn foreign_keys_of_all(owner: text, table: text) -> list<ForeignKeyInfo> {
+    return sql! {
+        select c.constraint_name as name, cc.column_name,
+               rc.table_name as r_table, rcc.column_name as r_column_name, c.delete_rule
+          from all_constraints c
+          join all_cons_columns cc
+            on cc.owner = c.owner and cc.constraint_name = c.constraint_name
+          join all_constraints rc
+            on rc.owner = c.r_owner and rc.constraint_name = c.r_constraint_name
+          join all_cons_columns rcc
+            on rcc.owner = rc.owner and rcc.constraint_name = rc.constraint_name
+           and rcc.position = cc.position
+         where c.constraint_type = 'R'
+           and c.owner = upper(:owner) and c.table_name = upper(:table)
+         order by c.constraint_name, cc.position
+    }.collect();
+}
+
+pub fn errors_for_all(owner: text, name: text) -> list<ErrorInfo> {
+    return sql! {
+        select name, line, position, text as message
+          from all_errors
+         where owner = upper(:owner) and name = upper(:name)
+         order by sequence
+    }.collect();
+}
+
+pub fn source_of_all(owner: text, name: text) -> list<text> {
+    return sql! {
+        select text from all_source
+         where owner = upper(:owner) and name = upper(:name)
+         order by type, line
+    }.collect();
+}
+
+pub fn spec_of_all(owner: text, name: text) -> list<text> {
+    return sql! {
+        select text from all_source
+         where owner = upper(:owner) and name = upper(:name) and type = 'PACKAGE'
+         order by line
+    }.collect();
+}
+
+pub fn body_of_all(owner: text, name: text) -> list<text> {
+    return sql! {
+        select text from all_source
+         where owner = upper(:owner) and name = upper(:name) and type = 'PACKAGE BODY'
+         order by line
+    }.collect();
+}
+
+pub fn fk_tree_all(owner: text, table: text) -> list<text> {
+    return sql! {
+        select lpad(' ', 2 * (level - 1)) || c.table_name
+               || ' -> ' || rc.table_name || ' (' || cc.column_name || ')'
+          from all_constraints c
+          join all_cons_columns cc
+            on cc.owner = c.owner and cc.constraint_name = c.constraint_name
+          join all_constraints rc
+            on rc.owner = c.r_owner and rc.constraint_name = c.r_constraint_name
+         where c.constraint_type = 'R'
+         start with c.owner = upper(:owner) and c.table_name = upper(:table)
+         connect by nocycle prior rc.owner = c.owner and prior rc.table_name = c.table_name
+         order siblings by c.table_name
+    }.collect();
+}
+
+pub fn deps_tree_all(owner: text, name: text) -> list<text> {
+    return sql! {
+        select lpad(' ', 2 * (level - 1)) || referenced_name
+               || ' (' || referenced_type || ')'
+          from all_dependencies
+         start with owner = upper(:owner) and name = upper(:name)
+         connect by nocycle prior referenced_owner = owner and prior referenced_name = name
+         order siblings by referenced_name
+    }.collect();
+}
+
+pub fn dependents_tree_all(owner: text, name: text) -> list<text> {
+    return sql! {
+        select lpad(' ', 2 * (level - 1)) || d.name || ' (' || d.type || ')'
+          from all_dependencies d
+         start with d.referenced_owner = upper(:owner) and d.referenced_name = upper(:name)
+         connect by nocycle d.referenced_owner = prior d.owner and d.referenced_name = prior d.name
+         order siblings by d.name
+    }.collect();
+}
+
+pub fn fk_mermaid_all(owner: text, table: text) -> list<text> {
+    return sql! {
+        select 'flowchart LR' as line from dual
+        union all
+        select '  ' || c.table_name || ' -->|' || cc.column_name || '| ' || rc.table_name
+          from all_constraints c
+          join all_cons_columns cc
+            on cc.owner = c.owner and cc.constraint_name = c.constraint_name
+          join all_constraints rc
+            on rc.owner = c.r_owner and rc.constraint_name = c.r_constraint_name
+         where c.constraint_type = 'R'
+           and ((c.owner = upper(:owner) and c.table_name = upper(:table))
+             or (rc.owner = upper(:owner) and rc.table_name = upper(:table)))
+         order by 1
+    }.collect();
+}
+
+pub fn depends_on_all(owner: text, name: text) -> list<text> {
+    return sql! {
+        select referenced_owner || '.' || referenced_name
+          from all_dependencies
+         where owner = upper(:owner) and name = upper(:name)
+         order by 1
+    }.collect();
+}
+
+pub fn dependents_of_all(owner: text, name: text) -> list<text> {
+    return sql! {
+        select owner || '.' || name
+          from all_dependencies
+         where referenced_owner = upper(:owner) and referenced_name = upper(:name)
+         order by 1
+    }.collect();
+}
+
+// ===========================================================================
+// DBA_ scoped variants — every object in the database (needs DBA).
+//
+// Same as the ALL_ set, over the DBA_* views — sees everything
+// regardless of grants. Requires SELECT on the DBA_* dictionary views.
+// ===========================================================================
+
+pub fn list_tables_dba() -> list<text> {
+    return sql! {
+        select owner || '.' || table_name from dba_tables order by 1
+    }.collect();
+}
+
+pub fn list_views_dba() -> list<text> {
+    return sql! {
+        select owner || '.' || view_name from dba_views order by 1
+    }.collect();
+}
+
+pub fn list_packages_dba() -> list<text> {
+    return sql! {
+        select distinct owner || '.' || object_name from dba_objects
+         where object_type = 'PACKAGE' order by 1
+    }.collect();
+}
+
+pub fn list_functions_dba() -> list<text> {
+    return sql! {
+        select owner || '.' || object_name from dba_objects
+         where object_type = 'FUNCTION' order by 1
+    }.collect();
+}
+
+pub fn list_procedures_dba() -> list<text> {
+    return sql! {
+        select owner || '.' || object_name from dba_objects
+         where object_type = 'PROCEDURE' order by 1
+    }.collect();
+}
+
+pub fn list_sequences_dba() -> list<text> {
+    return sql! {
+        select sequence_owner || '.' || sequence_name from dba_sequences order by 1
+    }.collect();
+}
+
+pub fn list_types_dba() -> list<text> {
+    return sql! {
+        select owner || '.' || type_name from dba_types order by 1
+    }.collect();
+}
+
+pub fn list_triggers_dba() -> list<text> {
+    return sql! {
+        select owner || '.' || trigger_name from dba_triggers order by 1
+    }.collect();
+}
+
+pub fn list_invalid_dba() -> list<text> {
+    return sql! {
+        select owner || '.' || object_name from dba_objects
+         where status = 'INVALID' order by owner, object_type, object_name
+    }.collect();
+}
+
+pub fn list_objects_info_dba() -> list<ObjectInfo> {
+    return sql! {
+        select owner || '.' || object_name as name,
+               object_type, status, last_ddl_time
+          from dba_objects order by owner, object_type, object_name
+    }.collect();
+}
+
+pub fn list_invalid_info_dba() -> list<ObjectInfo> {
+    return sql! {
+        select owner || '.' || object_name as name,
+               object_type, status, last_ddl_time
+          from dba_objects where status = 'INVALID'
+         order by owner, object_type, object_name
+    }.collect();
+}
+
+pub fn columns_of_dba(owner: text, table: text) -> list<ColumnInfo> {
+    return sql! {
+        select column_name as name, data_type, nullable, column_id, data_length
+          from dba_tab_columns
+         where owner = upper(:owner) and table_name = upper(:table)
+         order by column_id
+    }.collect();
+}
+
+pub fn constraints_of_dba(owner: text, table: text) -> list<ConstraintInfo> {
+    return sql! {
+        select c.constraint_name as name, c.constraint_type, cc.column_name,
+               c.search_condition, c.r_constraint_name as r_constraint
+          from dba_constraints c
+          left join dba_cons_columns cc
+            on cc.owner = c.owner and cc.constraint_name = c.constraint_name
+         where c.owner = upper(:owner) and c.table_name = upper(:table)
+         order by c.constraint_name, cc.position
+    }.collect();
+}
+
+pub fn indexes_of_dba(owner: text, table: text) -> list<IndexInfo> {
+    return sql! {
+        select i.index_name as name, i.uniqueness, ic.column_name
+          from dba_indexes i
+          join dba_ind_columns ic
+            on ic.index_owner = i.owner and ic.index_name = i.index_name
+         where i.table_owner = upper(:owner) and i.table_name = upper(:table)
+         order by i.index_name, ic.column_position
+    }.collect();
+}
+
+pub fn foreign_keys_of_dba(owner: text, table: text) -> list<ForeignKeyInfo> {
+    return sql! {
+        select c.constraint_name as name, cc.column_name,
+               rc.table_name as r_table, rcc.column_name as r_column_name, c.delete_rule
+          from dba_constraints c
+          join dba_cons_columns cc
+            on cc.owner = c.owner and cc.constraint_name = c.constraint_name
+          join dba_constraints rc
+            on rc.owner = c.r_owner and rc.constraint_name = c.r_constraint_name
+          join dba_cons_columns rcc
+            on rcc.owner = rc.owner and rcc.constraint_name = rc.constraint_name
+           and rcc.position = cc.position
+         where c.constraint_type = 'R'
+           and c.owner = upper(:owner) and c.table_name = upper(:table)
+         order by c.constraint_name, cc.position
+    }.collect();
+}
+
+pub fn errors_for_dba(owner: text, name: text) -> list<ErrorInfo> {
+    return sql! {
+        select name, line, position, text as message
+          from dba_errors
+         where owner = upper(:owner) and name = upper(:name)
+         order by sequence
+    }.collect();
+}
+
+pub fn source_of_dba(owner: text, name: text) -> list<text> {
+    return sql! {
+        select text from dba_source
+         where owner = upper(:owner) and name = upper(:name)
+         order by type, line
+    }.collect();
+}
+
+pub fn spec_of_dba(owner: text, name: text) -> list<text> {
+    return sql! {
+        select text from dba_source
+         where owner = upper(:owner) and name = upper(:name) and type = 'PACKAGE'
+         order by line
+    }.collect();
+}
+
+pub fn body_of_dba(owner: text, name: text) -> list<text> {
+    return sql! {
+        select text from dba_source
+         where owner = upper(:owner) and name = upper(:name) and type = 'PACKAGE BODY'
+         order by line
+    }.collect();
+}
+
+pub fn fk_tree_dba(owner: text, table: text) -> list<text> {
+    return sql! {
+        select lpad(' ', 2 * (level - 1)) || c.table_name
+               || ' -> ' || rc.table_name || ' (' || cc.column_name || ')'
+          from dba_constraints c
+          join dba_cons_columns cc
+            on cc.owner = c.owner and cc.constraint_name = c.constraint_name
+          join dba_constraints rc
+            on rc.owner = c.r_owner and rc.constraint_name = c.r_constraint_name
+         where c.constraint_type = 'R'
+         start with c.owner = upper(:owner) and c.table_name = upper(:table)
+         connect by nocycle prior rc.owner = c.owner and prior rc.table_name = c.table_name
+         order siblings by c.table_name
+    }.collect();
+}
+
+pub fn deps_tree_dba(owner: text, name: text) -> list<text> {
+    return sql! {
+        select lpad(' ', 2 * (level - 1)) || referenced_name
+               || ' (' || referenced_type || ')'
+          from dba_dependencies
+         start with owner = upper(:owner) and name = upper(:name)
+         connect by nocycle prior referenced_owner = owner and prior referenced_name = name
+         order siblings by referenced_name
+    }.collect();
+}
+
+pub fn dependents_tree_dba(owner: text, name: text) -> list<text> {
+    return sql! {
+        select lpad(' ', 2 * (level - 1)) || d.name || ' (' || d.type || ')'
+          from dba_dependencies d
+         start with d.referenced_owner = upper(:owner) and d.referenced_name = upper(:name)
+         connect by nocycle d.referenced_owner = prior d.owner and d.referenced_name = prior d.name
+         order siblings by d.name
+    }.collect();
+}
+
+pub fn fk_mermaid_dba(owner: text, table: text) -> list<text> {
+    return sql! {
+        select 'flowchart LR' as line from dual
+        union all
+        select '  ' || c.table_name || ' -->|' || cc.column_name || '| ' || rc.table_name
+          from dba_constraints c
+          join dba_cons_columns cc
+            on cc.owner = c.owner and cc.constraint_name = c.constraint_name
+          join dba_constraints rc
+            on rc.owner = c.r_owner and rc.constraint_name = c.r_constraint_name
+         where c.constraint_type = 'R'
+           and ((c.owner = upper(:owner) and c.table_name = upper(:table))
+             or (rc.owner = upper(:owner) and rc.table_name = upper(:table)))
+         order by 1
+    }.collect();
+}
+
+pub fn depends_on_dba(owner: text, name: text) -> list<text> {
+    return sql! {
+        select referenced_owner || '.' || referenced_name
+          from dba_dependencies
+         where owner = upper(:owner) and name = upper(:name)
+         order by 1
+    }.collect();
+}
+
+pub fn dependents_of_dba(owner: text, name: text) -> list<text> {
+    return sql! {
+        select owner || '.' || name
+          from dba_dependencies
+         where referenced_owner = upper(:owner) and referenced_name = upper(:name)
          order by 1
     }.collect();
 }
