@@ -201,15 +201,20 @@ def _collect_inputs(input_arg: str) -> list[Path]:
     """Collect .pell files from a path. Directories are walked
     recursively, but a few well-known noise directories are skipped
     (.git, .venv, node_modules, build, out, expected, __pycache__,
-    .pell-debug).
+    .pell-debug, resources).
 
     `.pell-debug/` holds generated debug stubs — anonymous-block scripts
     (no `module`), not deployable units. Walking into it makes
     `pell build`/`deploy` try to parse a stub as a module, which fails
     and aborts the whole install.
+
+    `resources/` is the Java/Kotlin/Gradle convention for test fixtures —
+    e.g. the IntelliJ plugin's parser tests keep deliberately-malformed
+    `.pell` files under src/test/resources. They aren't project modules.
     """
     skip_dirs = {".git", ".venv", "node_modules", "build", "out",
-                 "expected", "__pycache__", "target", ".pell-debug"}
+                 "expected", "__pycache__", "target", ".pell-debug",
+                 "resources"}
     p = Path(input_arg)
     if p.is_file():
         return [p]
