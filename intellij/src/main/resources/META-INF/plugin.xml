@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.9.16</version>
+    <version>0.9.17</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,13 @@ END staffing;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.9.17 — qualified types in type position parse cleanly</h3>
+        <ul><li>The grammar only accepted a bare <code>IDENT</code> as a
+        type, so a cross-package type like <code>catalog::IndexDetail</code>
+        in a return/field/param position (e.g. catalog_all's
+        <code>-&gt; catalog::IndexDetail</code>) showed a spurious red
+        syntax error. <code>typeAtomBase</code> now accepts
+        <code>IDENT (:: IDENT)*</code>, matching the compiler.</li></ul>
         <h3>0.9.16 — drop an internal-API call</h3>
         <ul><li>The debugger printed its own plugin version in the
         startup banner, which required an internal API the Marketplace

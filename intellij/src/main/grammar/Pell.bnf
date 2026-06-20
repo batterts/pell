@@ -345,7 +345,7 @@ typeAtom ::= typeAtomBase typeAtomSuffix *
 
 private typeAtomBase ::= LPAREN typeRef ? RPAREN
                        | BANG
-                       | IDENT typeArgList ?
+                       | IDENT (COLONCOLON IDENT) * typeArgList ?
 
 typeArgList ::= LT typeRef (COMMA typeRef) * GT { pin = 1 }
 
