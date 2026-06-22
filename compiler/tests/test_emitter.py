@@ -2562,3 +2562,98 @@ def test_debug_build_emits_list_collection_shadow():
     plain = emit(parse(src, "<t>"), debug=False)
     assert "__pdbg" not in plain
     assert "JSON_ARRAY_T" not in plain
+
+
+# ---------------------------------------------------------------------------
+# `null` literal
+# ---------------------------------------------------------------------------
+
+def test_null_literal_lowers_to_null():
+    sql = compile_to_sql(
+        "module n;\n"
+        "pub fn f() -> text {\n"
+        "    var x: text = null;\n"
+        "    return x;\n"
+        "}\n"
+    )
+    assert "l_x := NULL;" in sql
+
+
+def test_null_equality_lowers_to_is_null():
+    sql = compile_to_sql(
+        "module n;\n"
+        "pub fn f(name: text) -> bool { return name == null; }\n"
+    )
+    assert "p_name IS NULL" in sql
+    # SQL `= NULL` is always UNKNOWN — must never be emitted.
+    assert "p_name = NULL" not in sql
+
+
+def test_null_inequality_lowers_to_is_not_null():
+    sql = compile_to_sql(
+        "module n;\n"
+        "pub fn f(name: text) -> bool { return name != null; }\n"
+    )
+    assert "p_name IS NOT NULL" in sql
+    assert "<> NULL" not in sql
+
+
+def test_null_on_either_side():
+    sql = compile_to_sql(
+        "module n;\n"
+        "pub fn f(name: text) -> bool { return null == name; }\n"
+    )
+    assert "p_name IS NULL" in sql
+
+
+def test_return_null():
+    sql = compile_to_sql(
+        "module n;\n"
+        "pub fn f() -> text { return null; }\n"
+    )
+    assert "RETURN NULL;" in sql
+
+
+# ---------------------------------------------------------------------------
+# default parameter values
+# ---------------------------------------------------------------------------
+
+def test_default_param_in_spec_only():
+    sql = compile_to_sql(
+        "module d;\n"
+        'pub fn greet(name: text, greeting: text = "hello") -> text {\n'
+        "    return greeting;\n"
+        "}\n"
+    )
+    # The default lives in the package SPEC declaration ...
+    assert "p_greeting IN VARCHAR2 DEFAULT 'hello'" in sql
+    # ... but NOT in the body's signature (PL/SQL errors if repeated).
+    assert "p_greeting IN VARCHAR2) RETURN VARCHAR2 IS" in sql
+    assert "DEFAULT 'hello') RETURN VARCHAR2 IS" not in sql
+
+
+def test_default_param_number_and_null():
+    sql = compile_to_sql(
+        "module d;\n"
+        "pub fn f(n: number = 3, x: text = null) -> number { return n; }\n"
+    )
+    assert "p_n IN NUMBER DEFAULT 3" in sql
+    assert "p_x IN VARCHAR2 DEFAULT NULL" in sql
+
+
+def test_default_param_must_come_last():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql(
+            "module d;\n"
+            "pub fn bad(a: number = 1, b: number) -> number { return b; }\n"
+        )
+
+
+def test_out_param_cannot_have_default():
+    from pell.emitter import EmitError
+    with pytest.raises(EmitError):
+        compile_to_sql(
+            "module d;\n"
+            "pub fn bad(out x: number = 1) -> number { return 0; }\n"
+        )

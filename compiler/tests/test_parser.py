@@ -58,6 +58,22 @@ def test_simple_fn():
     assert fn.params[0].name == "name"
 
 
+def test_param_default_parses():
+    m = parse('module m; fn f(a: number, b: text = "hi") {}')
+    fn = m.items[0]
+    assert fn.params[0].default is None
+    assert isinstance(fn.params[1].default, A.TextLit)
+    assert fn.params[1].default.value == "hi"
+
+
+def test_null_literal_parses():
+    m = parse("module m; fn f() -> text { return null; }")
+    fn = m.items[0]
+    ret = fn.body[0]
+    assert isinstance(ret, A.ReturnStmt)
+    assert isinstance(ret.value, A.NullLit)
+
+
 def test_record():
     m = parse("module m; record Foo { id: number, name: text }")
     rec = m.items[0]
