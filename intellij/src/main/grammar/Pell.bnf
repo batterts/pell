@@ -94,6 +94,7 @@
     KW_ERROR       = 'error'
     KW_TRUE        = 'true'
     KW_FALSE       = 'false'
+    KW_NULL        = 'null'
     KW_SOME        = 'Some'
     KW_NONE        = 'None'
     KW_OK          = 'Ok'
@@ -329,7 +330,7 @@ aggregateFinish ::= <<consumeIdent "finish">> LPAREN RPAREN (ARROW typeRef) ? bl
 // --- params / fields ------------------------------------------------
 
 paramList ::= param (COMMA param) * COMMA ?
-param ::= paramMode ? paramName COLON typeRef { pin = 2 }
+param ::= paramMode ? paramName COLON typeRef (EQ expr) ? { pin = 2 }
 private paramMode ::= KW_OUT | KW_INOUT
 
 fieldDefList ::= fieldDef (COMMA fieldDef) * COMMA ?
@@ -481,6 +482,7 @@ primaryExpr ::= numberLit
               | rawTextLit
               | regexLit
               | boolLit
+              | nullLit
               | noneLit
               | selfLit
               | unitLit            // ()  — must precede parenOrTuple
@@ -500,6 +502,7 @@ textLit    ::= STRING
 rawTextLit ::= RAWSTRING
 regexLit   ::= REGEX
 boolLit    ::= KW_TRUE | KW_FALSE
+nullLit    ::= KW_NULL
 noneLit    ::= KW_NONE
 selfLit    ::= KW_SELF
 unitLit    ::= LPAREN RPAREN

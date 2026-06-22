@@ -235,9 +235,10 @@ INLINE_WS   = [ \t\r\n]*
   "jq!"  {INLINE_WS} "{"  { return value(readMacroBlock(JQ_BLOCK));  }
 
   // ---- keywords (must precede IDENT_BODY rule; JFlex picks first on tie) -
-  // Value-producing literal-keywords: true, false, self
+  // Value-producing literal-keywords: true, false, null, self
   "true"        { return value(KW_TRUE); }
   "false"       { return value(KW_FALSE); }
+  "null"        { return value(KW_NULL); }
   "self"        { return value(KW_SELF); }
   // Non-value keywords — operator/control/declarator-flavoured.
   "module"      { return nonValue(KW_MODULE); }

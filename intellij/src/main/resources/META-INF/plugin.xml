@@ -2,7 +2,7 @@
     <id>dev.pell</id>
     <name>pell</name>
     <vendor email="shaun.batterton@gmail.com" url="https://github.com/batterts">Shaun Batterton</vendor>
-    <version>0.9.17</version>
+    <version>0.9.18</version>
 
     <description><![CDATA[
         <h2>Write PL/SQL like it's 2026</h2>
@@ -163,6 +163,11 @@ END staffing;
     ]]></description>
 
     <change-notes><![CDATA[
+        <h3>0.9.18 — grammar: <code>null</code> literal + default parameters</h3>
+        <ul><li>The editor now parses and highlights the new <code>null</code>
+        literal and default parameter values
+        (<code>fn f(scope: text = "user")</code>), matching the compiler —
+        no more spurious red on either.</li></ul>
         <h3>0.9.17 — qualified types in type position parse cleanly</h3>
         <ul><li>The grammar only accepted a bare <code>IDENT</code> as a
         type, so a cross-package type like <code>catalog::IndexDetail</code>
