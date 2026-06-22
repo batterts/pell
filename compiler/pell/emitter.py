@@ -1409,7 +1409,32 @@ class Emitter:
 
     # ---- fn signatures & bodies -----------------------------------------
 
-    def _fn_signature(self, fn: A.FnDef) -> str:
+    def _param_decl(self, p: A.Param, in_spec: bool) -> str:
+        s = f"{param_name(p.name)} {PARAM_MODE_PL[p.mode]} {self._lt(p.type_ref, param=True)}"
+        # PL/SQL declares parameter defaults in the package SPEC only;
+        # repeating them in the body is an error.
+        if in_spec and p.default is not None:
+            s += f" DEFAULT {self._emit_expr(p.default)}"
+        return s
+
+    def _check_param_defaults(self, fn: A.FnDef) -> None:
+        """Enforce PL/SQL's two rules: only IN params take defaults, and a
+        defaulted param can't be followed by a non-defaulted one."""
+        seen_default = False
+        for p in fn.params:
+            if p.default is not None:
+                if p.mode != "in":
+                    raise EmitError(
+                        f"parameter `{p.name}` is `{p.mode}` and can't have a "
+                        f"default — only IN parameters can", p.loc)
+                seen_default = True
+            elif seen_default:
+                raise EmitError(
+                    f"parameter `{p.name}` has no default but follows one — "
+                    f"defaulted parameters must come last", p.loc)
+
+    def _fn_signature(self, fn: A.FnDef, in_spec: bool = True) -> str:
+        self._check_param_defaults(fn)
         ann_names = {a.name for a in fn.annotations}
         is_pipelined = "pipelined" in ann_names
         # Pipelined fns get a custom signature: cursor params become SYS_REFCURSOR
@@ -1429,10 +1454,7 @@ class Emitter:
             sig += f" RETURN {nt_name} PIPELINED"
             sig += self._pipelined_parallel_clauses(fn)
             return sig
-        params = ", ".join(
-            f"{param_name(p.name)} {PARAM_MODE_PL[p.mode]} {self._lt(p.type_ref, param=True)}"
-            for p in fn.params
-        )
+        params = ", ".join(self._param_decl(p, in_spec) for p in fn.params)
         ret = fn.return_type
         if ret is None or _is_unit_like(ret):
             sig = f"PROCEDURE {fn_pl_name(fn.name)}"
@@ -1799,7 +1821,7 @@ class Emitter:
             )
 
         # walk body to collect declarations and assemble statements
-        sig = self._fn_signature(fn)
+        sig = self._fn_signature(fn, in_spec=False)
         # If there's a `finally` clause, lower as:
         #   procedure pell_finally_body is begin <finally> end;
         #   begin
@@ -5556,6 +5578,8 @@ class Emitter:
             return "NULL"
         if isinstance(e, A.NoneExpr):
             return "NULL"
+        if isinstance(e, A.NullLit):
+            return "NULL"
         if isinstance(e, A.SomeExpr):
             return self._emit_expr(e.inner)
         if isinstance(e, A.OkExpr):
@@ -5616,6 +5640,15 @@ class Emitter:
         return f"/* TODO: {type(e).__name__} — emitter unhandled */"
 
     def _emit_binop(self, e: A.BinOp) -> str:
+        # `x == null` / `x != null` lower to IS NULL / IS NOT NULL — SQL's
+        # `= NULL` is always UNKNOWN, never true. Works on either side.
+        if e.op in ("==", "!="):
+            l_null = isinstance(e.left, A.NullLit)
+            r_null = isinstance(e.right, A.NullLit)
+            if l_null or r_null:
+                operand = e.right if l_null else e.left
+                cmp = "IS NULL" if e.op == "==" else "IS NOT NULL"
+                return f"({self._emit_expr(operand)} {cmp})"
         op_map = {
             "&&": "AND", "||": "OR",
             "==": "=", "!=": "<>",

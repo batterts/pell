@@ -228,7 +228,9 @@ class Parser:
             pname = self._expect("IDENT").value
             self._expect("COLON")
             ptype = self._parse_type()
-            params.append(A.Param(loc=ploc, name=pname, type_ref=ptype, mode=mode))
+            pdefault = self._parse_expr() if self._eat("EQ") else None
+            params.append(A.Param(loc=ploc, name=pname, type_ref=ptype,
+                                  mode=mode, default=pdefault))
             if not self._eat("COMMA"):
                 break
         return params
@@ -1015,6 +1017,9 @@ class Parser:
         if cur.kind == "KW_NONE":
             self.pos += 1
             return A.NoneExpr(loc=cur.loc)
+        if cur.kind == "KW_NULL":
+            self.pos += 1
+            return A.NullLit(loc=cur.loc)
         if cur.kind == "KW_SELF":
             # `self` reads as a regular identifier in expressions; the emitter
             # knows it refers to the method's receiver and renders it as the

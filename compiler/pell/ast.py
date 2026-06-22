@@ -140,6 +140,11 @@ class UnitLit(Expr):
 
 
 @dataclass
+class NullLit(Expr):
+    pass  # `null` — the SQL NULL of any type
+
+
+@dataclass
 class Ident(Expr):
     name: str  # may include `::` segments (foo::bar::baz)
 
@@ -395,6 +400,9 @@ class Param:
     # "out" (caller variable is written), or "inout" (read-and-write).
     # Lowered to PL/SQL `IN` / `OUT` / `IN OUT` respectively.
     mode: str = "in"
+    # Optional default value (`x: number = 5`) → PL/SQL `DEFAULT 5`. Must
+    # follow non-defaulted params (PL/SQL requirement, enforced at emit).
+    default: Optional["Expr"] = None
 
 
 @dataclass
